@@ -46,35 +46,34 @@ Read before any non-trivial change (start with `docs/map.md`, one page):
 - **The hub cannot widen node policy.** Sensitive actions need user-signed approvals verified on the node (ADR-0020).
 - **Mesh messages are untrusted data.** Never let content from another agent bypass approvals.
 - **Performance budgets are requirements** (ADR-0022, `docs/design/performance.md`). Hot-path changes need a
-  benchmark result in the PR; terminal bytes never go through the event store; input outranks output.
+  benchmark result in the commit message; terminal bytes never go through the event store; input outranks output.
 - **Simplicity and visual quality are requirements** (ADR-0024, `docs/ux/visual-language.md`). UI text uses
-  the UI vocabulary, never internal terms. UI PRs include screenshots in both themes and use design tokens only.
+  the UI vocabulary, never internal terms. UI changes are checked with screenshots in both themes and use design tokens only.
 - **Detection never reads the user-visible viewport.** Screen-based detection reads the live bottom of
   the terminal buffer only.
 
-## Multi-agent development workflow
+## Development workflow (from 2026-11-26)
 
-This repository is developed by several coding agents in parallel (Claude Code and Codex). To avoid
-collisions:
+The maintainer's rule: one line of history, no review queue.
 
-- **One task, one worktree, one branch.** Work in `../agora-worktrees/<task-slug>` on branch
-  `<agent>/<issue-id>-<slug>` (for example `codex/42-pty-resize`). Never edit the shared main checkout
-  while another task is in progress there.
-- **Claim before you start.** A task is claimed by its issue assignee/label. Do not start an unclaimed
-  task that touches the same crate as a claimed one without coordinating through the issue.
-- **Stay in your lane.** Touch only the crates your task names. If you need a change in another crate,
-  open a separate issue rather than widening the diff.
-- **Cross-review.** A PR written by one agent is reviewed by the other (Codex reviews Claude Code PRs and
-  vice versa) before the human maintainer merges. Agents never merge.
-- **Architecture changes need an ADR first.** If your change alters an invariant, a protocol message,
-  crate boundaries, or a dependency policy, write `docs/adr/NNNN-title.md` with status `Proposed` and stop
-  for human review.
-- **Docs move with code.** If behavior described in `docs/` changes, update the doc in the same PR.
+- **Work on `main`, no pull requests.** `git pull --rebase`, make the change, run the checks that cover it locally (`cargo fmt`,
+  `cargo clippy -- -D warnings`, the touched crates' tests, the web typecheck/tests/build for `apps/web`, `scripts/check-docs.sh`),
+  commit with a Conventional Commit message, `git push origin main`. Pull right before pushing.
+- **CI runs on `main` after the push**; nobody waits on it. A commit that breaks it is fixed forward at once by whoever pushed it.
+- **No git worktrees and no `git stash`.** A separate checkout, when one is needed, is a plain clone that is deleted afterwards.
+  Never edit the shared main checkout while someone else's work is in progress there.
+- **No open issues.** The plan is `docs/backlog/roadmap.md`; leftovers, suspected bugs and flaky tests go in
+  `docs/backlog/follow-ups.md`, and an item is removed in the commit that fixes it.
+- **The Windows and macOS sessions** work the same way. Before pushing a change outside their own `<os>.rs` platform code they post a
+  one-line note in comms so two pushes do not collide.
+- **Architecture changes need an ADR first.** If your change alters an invariant, a protocol message, crate boundaries, or a dependency
+  policy, write `docs/adr/NNNN-title.md` with status `Proposed`, commit it, and stop for the maintainer's decision before building on it.
+  Schema changes need the maintainer's explicit OK.
+- **Docs move with code.** If behavior described in `docs/` changes, update the doc in the same commit.
 - **Changelog by fragment.** A user-visible change adds one file `changelog.d/<slug>.md` holding its CHANGELOG bullet
-  (`changelog.d/README.md`). Never edit `CHANGELOG.md` outside a release PR, which folds the fragments in with
-  `scripts/fold-changelog.sh`; two PRs then never conflict on it.
-- **Leave a handoff note.** When stopping mid-task, append to the PR description: what is done, what is
-  not, how to verify, known risks.
+  (`changelog.d/README.md`). Never edit `CHANGELOG.md` outside a release commit, which folds the fragments in with
+  `scripts/fold-changelog.sh`.
+- **Risky changes** (auth, approvals, mesh, networking, hot paths) still get an independent review before they are pushed.
 
 ## Repository layout (planned)
 
@@ -104,10 +103,10 @@ scripts/             repository checks (`check-docs.sh`)
 ## Rust conventions
 
 - Stable toolchain pinned in `rust-toolchain.toml`. Edition 2021 or newer.
-- Minimize dependencies. Every new crate dependency needs a one-line justification in the PR. Prefer std.
+- Minimize dependencies. Every new crate dependency needs a one-line justification in the commit message. Prefer std.
 - No `unwrap()`/`expect()` outside tests and provably-infallible cases (comment why).
 - Errors: typed error enums per crate; map to protocol error codes at the boundary.
-- `cargo fmt`, `cargo clippy -- -D warnings`, and tests must pass before a PR.
+- `cargo fmt`, `cargo clippy -- -D warnings`, and tests must pass before a push.
 - Hot paths (PTY read, VT parse, frame fanout, detection) scale with panes × clients. Do not add
   allocation, filesystem I/O, or lock contention there without a benchmark.
 

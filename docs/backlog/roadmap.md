@@ -5,6 +5,8 @@ on a gate. From 2026-11-26 work lands straight on `main` after local tests (fmt,
 checks); CI runs once on `main` and a break is fixed forward. Risky changes still get an independent review first. `docs/capabilities.md`
 stays the record of what is built; this file is the plan, and a task is ticked here in the commit that finishes it.
 
+Small leftovers, suspected bugs and flaky tests (formerly GitHub issues) are in [follow-ups](follow-ups.md).
+
 Gates, written in the task:
 - **schema**: adds protocol messages or fields; the maintainer approves the schema step before it is built (AGENTS.md).
 - **decision**: the maintainer chooses (an ADR, a dependency, a default).
@@ -45,8 +47,8 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
   - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
   - [ ] ADR-0119 (a helper started on another machine): settles ADR-0057's open route; on `main` as Proposed, seven open questions
   - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
-- [ ] **M0.4 Other open PRs**: #1204 (title rules, **human**: real captures), #1188 (input validation, Codex's; the shared checkout's
-  uncommitted edits)
+- [x] **M0.4 Other open PRs**: #1188 (Codex's input validation audit) merged on `main`; #1204 (title rules) closed earlier, its
+  open point is in [follow-ups](follow-ups.md)
 - [x] **M0.5 Release 0.3.40** (2026-11-26), blackview and `win` updated; mac asked. Left: **win**, a real `shutdown /r` check of #1231's
   Windows part, on hold until the maintainer's go
 

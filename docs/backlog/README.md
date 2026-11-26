@@ -1,10 +1,11 @@
 # Backlog
 
-Tasks sized for one coding-agent session each. Copy each task into a GitHub issue using the Task template;
-the ID here (`P1-03`) goes in the issue title. Tasks marked `needs-decision` wait for a Proposed ADR to be
-accepted by the maintainer.
+Tasks sized for one coding-agent session each. From 2026-11-26 the repository keeps no open GitHub issues or pull requests:
+work lands on `main`, the plan is the roadmap and the small leftovers are the follow-ups list. Tasks marked `needs-decision` wait
+for a Proposed ADR to be accepted by the maintainer.
 
 - **[Roadmap: the order of the remaining work, with subtasks](roadmap.md)** (start here)
+- [Follow-ups: small leftovers, suspected bugs and flaky tests](follow-ups.md)
 - [Phase 0: bootstrap](phase-0.md)
 - [Phase 1: protocol and schema](phase-1.md)
 - [Phase 2: node core](phase-2.md)
