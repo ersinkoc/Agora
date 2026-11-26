@@ -10,7 +10,7 @@ the hub's page policy (`crates/agora-hub/src/web.rs`).
 
 ## Context
 
-The maintainer wants the window to be restyled much further than it can be today, "like herdr": deep visual customization, themes
+The maintainer wants the window to be restyled much further than it can be today, as far as the most customizable agent workspaces go: deep visual customization, themes
 made and shared by a community, and plugins (ADR-0114).
 
 **What exists.** Theme format 1 is built in the web window (`themes.md`). A theme is a JSON file of about 25 tokens: surfaces, text,
@@ -21,7 +21,8 @@ and exported as files and kept in the browser. The terminal palette follows the 
 (ADR-0068 rung 5), and nothing is shared through the hub.
 
 **What others do** (research of 2026-11-25, sources in the PR):
-- **herdr's flexibility comes from chrome and layout, not from more colours.** Its terminal app has 19 colour tokens with light and
+- **In the most customizable agent workspaces, flexibility comes from chrome and layout, not from more colours.** One such
+  terminal app has 19 colour tokens with light and
   dark variants. Its desktop app has a pure-data theme (`background`, `foreground`, `selection`, `cursor`, 16 ANSI colours,
   optional panel overrides). What looks different between its gallery entries is borders, gaps, padding, bar positions, status
   segments and per-block backgrounds, set in layouts.
@@ -29,7 +30,7 @@ and exported as files and kept in the browser. The terminal palette follows the 
 - **Every theme incident found was code labelled as a theme, not bad theme data:**
   - the 2025–2026 VS Code "GlassWorm" colour themes declared JavaScript entry points;
   - a Neovim colorscheme is a script;
-  - a herdr layout can load a mod.
+  - in one agent workspace, a layout can load a code extension.
 - **CSS is not inert.** Attribute selectors with `url()` read page data out character by character, and Mermaid CVE-2022-31108
   turned a theme variable into CSS injection. CSS can also hide or restyle a warning.
 
@@ -111,7 +112,7 @@ and exported as files and kept in the browser. The terminal palette follows the 
   hide or fake an approval or warning. Obsidian needs a page policy and still cannot stop restyling.
 - **Themes as code** (Neovim colorschemes) or **themes shipped as extensions** (VS Code): rejected; the theme incidents found were
   all of this kind.
-- **Only more colour tokens:** cheap, but it misses what makes herdr look different (chrome and layout).
+- **Only more colour tokens:** cheap, but it misses what makes the most customizable workspaces look different (chrome and layout).
 - **The browser fetches the catalog:** rejected; it needs the page policy opened to another origin, and the hub already fetches
   outside data for prices.
 
