@@ -647,6 +647,7 @@ tui-start-settings-more = n  more ({ $page } of { $pages })
 tui-start-settings-back = Backspace goes back to the setting before.
 
 ## ADR-0068 decision 6: the keybindings file (docs/ux/keybindings.md).
+tui-keys-refused = Your keybindings file (keybindings.json in the Agora folder) is not used; the default keys are in force:
 tui-keys-error-json = keybindings.json is not valid JSON.
 tui-keys-error-too-big = keybindings.json is too large (at most 64 KB).
 tui-keys-error-shape = keybindings.json is not a keybindings file this client can read.

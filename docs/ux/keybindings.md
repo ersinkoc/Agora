@@ -200,9 +200,10 @@ cannot follow them there. A change made in safe mode holds for that visit only.
 ## The terminal client
 
 The terminal client's keys are commands too (`crates/agora-tui/src/keys/`), and it reads **the same file**: a `keybindings.json` exported
-from the web window, put in the Agora folder (`$AGORA_HOME`, else `~/.agora`), is the terminal client's. **Not wired yet:** the console
-does not read that file when it starts, so the defaults below are in force; the reader, the checks and the keys in force are built and
-tested, and `App::keys` takes them.
+from the web window, put in the Agora folder (`$AGORA_HOME`, else `~/.agora`), is the terminal client's. The console reads it when it starts; a file
+changed later is used after the next start. When there is none, the defaults below are in force; when it has a problem, the defaults
+are in force and the footer (a box when it is long) says why; keys of it the terminal client keeps, and commands it does not have, are
+said the same way.
 
 - **Reading the file** follows "Reading a file" above exactly (the same limits, the same closed fields, the same refusals, the web's fixed
   keys and fixed command; a byte-order mark is dropped and a byte that is not UTF-8 is replaced, as the web reads a chosen file), so a file

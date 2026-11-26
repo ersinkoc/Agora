@@ -85,7 +85,7 @@ fixes it.
   - [ ] **decision**: an archive reader for `.tar.gz` / `.zip` (a dependency) or binary-only for now
   - [ ] the window's "Add an agent": the signed list, what is installed where, install with the machine's typed approval
   - [ ] update and roll back from the window (the CLI already keeps the previous version)
-- [ ] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode; the question is in `agora-tui` (`launch.rs`), the console does not ask it yet
+- [ ] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode; built for "Start an agent in a folder" (#1242), not yet remembered per machine
 - [ ] **M2.3 Confinement** (ADR-0047, ADR-0050, ADR-0083)
   - [ ] per-project and per-kind choice of the level (decision 1)
   - [ ] **win**: measure the Windows sandbox on real agents, then on by default if it holds

@@ -217,15 +217,14 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   change); the composer's note ends when nothing waits; `adapter.queue_dropped` names its entries (`entries`), so one failed send among
   several waiting prompts marks only that one. No message changed shape. The terminal client keeps the first version of each entry (step 7 not started) and shows each answer on
   its own line, as before.
-- Step 7 (TUI), the client part: the terminal client draws a thought as one line saying it is hidden and a permission record as a line
-  (`render_chat`, used by the console today). The rest is in `crates/agora-tui` and not yet called by the console
-  (`crates/agora/src/tuicmd.rs`): `chat::merge` keeps the last version of each entry; `render_chat_view` with `chat::View` draws a tool
+- Step 7 (TUI): done in #1242, in the console's chat tab and the plain list's full-screen chat: `chat::merge` keeps the last version of each entry; `render_chat_view` with `chat::View` draws a tool
   call's status and duration (a call still waiting or running after its turn is shown stopped, as #908), a plan's steps, a permission's
   outcome, the prompts that wait, and the thinking on `/thinking`; `chat::ask` reads `/stop` and `/stop all` (`AgentCancelTurn`, the second
   with `drop_queue`), `/effort NAME` (the option of category thought level; an agent without one is told effort is a start setting) and
   `/set ID VALUE` for any option the agent reported (a value that skips permissions is typed twice, then the machine raises Amendment A's
   approval, `agent.approval_needed`); `Session::cancel_turn` and `Session::set_config` send them; `chat::session_line` adds the effort to
-  the line above the conversation. No message or schema change. Not built in the TUI: the `/` menu of the agent's own commands, a tool
+  the line above the conversation. Both send through the same per-agent grant as a prompt when a machine asks for one, and a viewer's
+  window sends neither. No message or schema change. Not built in the TUI: the `/` menu of the agent's own commands, a tool
   call's output, and the web's time ordering of a waiting prompt (#908).
 
 

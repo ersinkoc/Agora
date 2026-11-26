@@ -610,6 +610,7 @@ tui-start-settings-more = n  daha fazla ({ $page } / { $pages })
 tui-start-settings-back = Backspace bir önceki ayara döner.
 
 ## ADR-0068 karar 6: tuş dosyası (docs/ux/keybindings.md).
+tui-keys-refused = Tuş dosyanız (Agora klasöründeki keybindings.json) kullanılmıyor; varsayılan tuşlar geçerli:
 tui-keys-error-json = keybindings.json geçerli bir JSON değil.
 tui-keys-error-too-big = keybindings.json çok büyük (en çok 64 KB).
 tui-keys-error-shape = keybindings.json bu istemcinin okuyabildiği bir tuş dosyası değil.
