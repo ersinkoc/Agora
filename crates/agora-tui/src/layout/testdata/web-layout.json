@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "root": {
+    "type": "split",
+    "direction": "column",
+    "ratios": [
+      0.6,
+      0.4
+    ],
+    "children": [
+      {
+        "type": "split",
+        "direction": "row",
+        "ratios": [
+          0.40456783333333335,
+          0.2620988333333333,
+          0.3333333333333333
+        ],
+        "children": [
+          {
+            "type": "pane",
+            "id": "p1",
+            "panel": "agent",
+            "bind": {
+              "agent": "laptop/agent-1"
+            }
+          },
+          {
+            "type": "pane",
+            "id": "p2",
+            "panel": "approvals"
+          },
+          {
+            "type": "pane",
+            "id": "p3",
+            "panel": "agent",
+            "bind": {
+              "follow": "attention"
+            }
+          }
+        ]
+      },
+      {
+        "type": "split",
+        "direction": "row",
+        "ratios": [
+          0.3333333333333333,
+          0.3333333333333333,
+          0.3333333333333333
+        ],
+        "children": [
+          {
+            "type": "pane",
+            "id": "p4",
+            "panel": "changes",
+            "bind": {
+              "agent": "vps/agent-8"
+            }
+          },
+          {
+            "type": "split",
+            "direction": "column",
+            "ratios": [
+              0.5,
+              0.5
+            ],
+            "children": [
+              {
+                "type": "pane",
+                "id": "p5",
+                "panel": "agent",
+                "bind": {
+                  "agent": "win/agent-3"
+                }
+              },
+              {
+                "type": "split",
+                "direction": "row",
+                "ratios": [
+                  0.5,
+                  0.5
+                ],
+                "children": [
+                  {
+                    "type": "pane",
+                    "id": "p8",
+                    "panel": "files",
+                    "bind": {
+                      "follow": "selection"
+                    }
+                  },
+                  {
+                    "type": "pane",
+                    "id": "p9",
+                    "panel": "theme"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tabs",
+            "active": 0,
+            "children": [
+              {
+                "type": "pane",
+                "id": "p6",
+                "panel": "agent",
+                "bind": {
+                  "agent": "win/agent-4"
+                }
+              },
+              {
+                "type": "pane",
+                "id": "p7",
+                "panel": "agent",
+                "bind": {
+                  "agent": "win/agent-5"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

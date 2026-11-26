@@ -757,6 +757,68 @@ mod tests {
         assert!(deserialise_layout(&serialise_layout(&l)).is_ok_and(|back| same_layout(&back, &l)));
     }
 
+    /// JSON values equal but for a rounding in the last place of a number.
+    fn same_json(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(x), Value::Number(y)) => match (x.as_f64(), y.as_f64()) {
+                (Some(x), Some(y)) => (x - y).abs() < 1e-12,
+                _ => x == y,
+            },
+            (Value::Array(x), Value::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same_json(x, y))
+            }
+            (Value::Object(x), Value::Object(y)) => {
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).is_some_and(|w| same_json(v, w)))
+            }
+            _ => a == b,
+        }
+    }
+
+    /// `testdata/web-layout.json` was written by the web window's own reducer and serialiser (`apps/web/src/layout/engine.ts` and
+    /// `tree.ts`: a 3x2 preset of seven agents, then Needs you, a pane following what needs you, Changes, two resizes, a split with
+    /// Files following the selection, and the theme editor shown). It reads here as the same tree and writes back as the same JSON.
+    #[test]
+    fn a_layout_the_web_made_reads_here_and_writes_back_the_same() {
+        let text = include_str!("testdata/web-layout.json");
+        let l = match deserialise_layout(text) {
+            Ok(l) => l,
+            Err(e) => panic!("the web's layout was refused: {e:?}"),
+        };
+        assert!(is_valid(&l));
+        let ids: Vec<(&str, &str)> = panes_of(&l.root)
+            .iter()
+            .map(|p| (p.id.as_str(), p.panel.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("p1", "agent"),
+                ("p2", "approvals"),
+                ("p3", "agent"),
+                ("p4", "changes"),
+                ("p5", "agent"),
+                ("p8", "files"),
+                ("p9", "theme"),
+                ("p6", "agent"),
+                ("p7", "agent"),
+            ]
+        );
+        let p = panes_of(&l.root);
+        assert_eq!(p[2].follow(), Some(Follow::Attention));
+        assert_eq!(p[5].follow(), Some(Follow::Selection));
+        assert_eq!(p[3].bound_agent(), Some("vps/agent-8"));
+        let written = serialise_layout(&l);
+        let (back, web): (Value, Value) =
+            match (serde_json::from_str(&written), serde_json::from_str(text)) {
+                (Ok(a), Ok(b)) => (a, b),
+                _ => panic!("not JSON"),
+            };
+        assert!(same_json(&back, &web), "{written}");
+        assert!(deserialise_layout(&written).is_ok_and(|again| same_layout(&again, &l)));
+    }
+
     #[test]
     fn fresh_ids_are_one_past_the_highest() {
         let root = Node::Tabs {
