@@ -151,7 +151,8 @@ and waiting events are untouched. Update the hub before the machines.
 ## Upgrading the hub, and going back
 
 The hub's database changes shape between some versions, and only forward: a hub binary that finds a database newer than it understands refuses it
-cleanly and starts nothing (it never changes the file). The release that adds certificate renewal (ADR-0085) moves the hub database to schema 13.
+cleanly and starts nothing (it never changes the file). The release that adds certificate renewal (ADR-0085) moves the hub database to schema 13, and the one that adds the community theme
+catalog (ADR-0113) to schema 15.
 Before you upgrade, copy the hub folder (`~/.agora/hub`, or `AGORA_HOME/hub`) or run `agora hub backup`; to go back to an older version, stop the
 hub, put that copy back (`agora hub restore`) and start the older binary. Machines keep running through it: they buffer their events and
 reconnect.

@@ -430,8 +430,12 @@ What the hub checks (`crates/agora-hub/src/theme_catalog.rs`):
   digits, `.`, `_`, `-` and `/`, ending in `.json`, with no empty, `.` or `..` part. The index cannot send the hub to another address.
 - **Sizes and time.** The index at most 256 KiB, each theme at most 256 KiB (the theme rules' own cap), at most 200 themes and 4 MiB of
   themes in all (themes past it are refused). Connecting, and each read or write, at most 10 seconds; the whole update at most 2
-  minutes. A theme file that cannot be reached in time stops the update with nothing changed, so a network failure half way never
-  drops themes that are fine.
+  minutes. These hold inside TLS too: every read and write of the socket gets only the time left, so a server that sends a TLS record
+  a byte at a time is given up at the deadline. A theme file that cannot be reached in time, or whose server answers 429 (too many
+  requests) or a 5xx status, stops the update with nothing changed, so a network or server failure half way never drops themes that
+  are fine. Any other status refuses that theme alone.
+- **What is printed** from the catalog (ids, field names, a theme's problems) has every control character and every invisible or
+  direction-changing character written as a visible `\u{…}`, so a catalog cannot send the owner's terminal escape sequences.
 - **The index** is read strictly: a field it does not know, at the top or in an entry, refuses the index or that entry (below).
 - **Each theme** must have the SHA-256 the index gives (of the file's bytes as served), be UTF-8, and pass the theme rules: the
   terminal client's reader ([above](#the-terminal-client)), which accepts and refuses a file exactly as the web window does. The file

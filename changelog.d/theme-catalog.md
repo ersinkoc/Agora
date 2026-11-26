@@ -4,3 +4,5 @@
   preview a theme in its own colours, install a copy into your themes, and see "Version N available" on one you installed, which
   changes only when you choose Update. The project's catalog repository does not exist yet, so the owner gives its address
   (ADR-0113)
+- The hub database moves to schema 15 (the theme catalog's table); to go back to an older version, restore a backup made before
+  upgrading (`agora hub backup`, `agora hub restore`) (ADR-0113)
