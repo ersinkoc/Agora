@@ -73,8 +73,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - `mesh_bridge::while_disconnected_a_batch_gets_a_batch_of_errors_and_notifications_get_nothing` ("an array", 1 in 350 at 12 threads).
 - `mesh_bridge::the_bridge_ends_when_the_clients_output_is_gone` ("the bridge lingers", 1 in 350).
 - `hubcli::store_tests::overlapping_saves_never_mix_two_enrollments` (hubcli.rs:2292, 1 in 40 suite runs).
-- `agent_spawn::a_helper_acts_without_asking_only_when_the_signed_decision_names_it` on Windows (agent_spawn.rs:1512): the args record
-  can be read before it is fully written.
 - `doctor::tests::a_version_probe_that_does_not_end_is_killed_and_counts_as_not_working` on Ubuntu (doctor.rs:1338): timing.
 - Windows `control.rs` timing: one more test seen on 0.3.40's main runs, name not recorded (the stuck-write test's 5 s budget is
   now 20 s).
