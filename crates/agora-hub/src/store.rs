@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -412,6 +412,33 @@ impl SqliteStore {
                  PRAGMA user_version = 14;
                  COMMIT;"
             ))?;
+        }
+        if version < 15 {
+            // ADR-0114 decision 6: the plugins the owner installed on this hub (each package as opaque bytes, never run, with what the
+            // hub read from its checked manifest) and what each person allowed each plugin to see, for the version they were shown.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS plugins (
+                     id           TEXT PRIMARY KEY,
+                     version      TEXT NOT NULL,
+                     name         TEXT NOT NULL,
+                     capabilities TEXT NOT NULL,
+                     sha256       TEXT NOT NULL,
+                     installed_ms INTEGER NOT NULL,
+                     package      BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS plugin_grants (
+                     user_id   TEXT NOT NULL,
+                     plugin_id TEXT NOT NULL,
+                     version   TEXT NOT NULL,
+                     seen      TEXT NOT NULL,
+                     granted   TEXT NOT NULL,
+                     set_ms    INTEGER NOT NULL,
+                     PRIMARY KEY (user_id, plugin_id)
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),

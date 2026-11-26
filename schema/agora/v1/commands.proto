@@ -7,6 +7,7 @@ import "agora/v1/devices.proto";
 import "agora/v1/enroll.proto";
 import "agora/v1/events.proto";
 import "agora/v1/pairing.proto";
+import "agora/v1/plugins.proto";
 import "agora/v1/preview.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
@@ -105,6 +106,12 @@ message CommandRequest {
     TaskDispatch task_dispatch = 109;
     // ADR-0109: the hub sends this only to a node after negotiating `mesh.task_handoff.v1`.
     DeliverTaskHandoff deliver_task_handoff = 110;
+    // ADR-0114 decision 6: plugins kept by the hub and each person's grants (plugins.proto). Answered by the hub; they name no node.
+    PluginList plugin_list = 111;
+    PluginFetch plugin_fetch = 112;
+    PluginGrantList plugin_grant_list = 113;
+    PluginGrantSet plugin_grant_set = 114;
+    PluginGrantRemove plugin_grant_remove = 115;
   }
 }
 
@@ -158,6 +165,10 @@ message CommandOk {
     TaskDispatchResult task_dispatch = 31;
     // ADR-0109: the node has durably accepted a `DeliverTaskHandoff`.
     TaskHandoffReceipt task_handoff_receipt = 32;
+    // ADR-0114 decision 6
+    PluginListResult plugin_list = 33;
+    PluginFetchResult plugin_fetch = 34;
+    PluginGrantListResult plugin_grant_list = 35;
   }
 }
 

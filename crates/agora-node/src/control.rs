@@ -2176,6 +2176,12 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PreviewConnect(_) => "preview.connect",
         // ADR-0082: only the local control socket answers it (in `handle_request`); anywhere else it is refused as unsupported.
         Cmd::ControlAuth(_) => "control.auth",
+        // ADR-0114: plugins and their grants are the hub's; a node never receives them (refused as unsupported).
+        Cmd::PluginList(_) => "plugin.list",
+        Cmd::PluginFetch(_) => "plugin.fetch",
+        Cmd::PluginGrantList(_) => "plugin.grant_list",
+        Cmd::PluginGrantSet(_) => "plugin.grant_set",
+        Cmd::PluginGrantRemove(_) => "plugin.grant_remove",
     }
 }
 

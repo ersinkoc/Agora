@@ -1,0 +1,6 @@
+{
+  "requestId": "r5",
+  "pluginGrantRemove": {
+    "pluginId": "sample-agents"
+  }
+}

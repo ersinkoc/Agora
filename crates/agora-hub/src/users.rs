@@ -202,6 +202,9 @@ impl<'a> Users<'a> {
             .map_err(db)?;
         conn.execute("DELETE FROM passkeys WHERE user_id = ?1", [id])
             .map_err(db)?;
+        // ADR-0114: what this person allowed plugins to see goes with them.
+        conn.execute("DELETE FROM plugin_grants WHERE user_id = ?1", [id])
+            .map_err(db)?;
         let n = conn
             .execute("DELETE FROM users WHERE id = ?1", [id])
             .map_err(db)?;

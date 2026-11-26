@@ -1,0 +1,253 @@
+{
+ "agoraVersion": "0.3.0",
+ "cases": [
+  {
+   "file": "ok.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "ok-bom.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "ok-version-float.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "ok-version-exponent.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "newer-format.bundle",
+   "ok": false,
+   "code": "newer-format"
+  },
+  {
+   "file": "format-version-fraction.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "format-version-huge.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "format-version-string.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "ok-base64-trailing-bits.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "ok-duplicate-keys-last-wins.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read",
+    "theme.read"
+   ]
+  },
+  {
+   "file": "duplicate-key-last-is-bad.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "name"
+  },
+  {
+   "file": "lone-surrogate-name.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "name"
+  },
+  {
+   "file": "ok-name-60-utf16-units.bundle",
+   "ok": true,
+   "id": "demo",
+   "version": "1.0.0",
+   "capabilities": [
+    "agents.read"
+   ]
+  },
+  {
+   "file": "name-62-utf16-units.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "name"
+  },
+  {
+   "file": "path.bundle",
+   "ok": false,
+   "code": "path",
+   "detail": "../evil.js"
+  },
+  {
+   "file": "proto-key.bundle",
+   "ok": false,
+   "code": "path",
+   "detail": "__proto__"
+  },
+  {
+   "file": "link.bundle",
+   "ok": false,
+   "code": "link",
+   "detail": "evil.js"
+  },
+  {
+   "file": "type.bundle",
+   "ok": false,
+   "code": "type",
+   "detail": "evil.exe"
+  },
+  {
+   "file": "array-index-first.bundle",
+   "ok": false,
+   "code": "type",
+   "detail": "7"
+  },
+  {
+   "file": "format-base64.bundle",
+   "ok": false,
+   "code": "format",
+   "detail": "panel.css"
+  },
+  {
+   "file": "format-not-utf8.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "format-not-json.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "format-extra-top-key.bundle",
+   "ok": false,
+   "code": "format"
+  },
+  {
+   "file": "too-many.bundle",
+   "ok": false,
+   "code": "too-many"
+  },
+  {
+   "file": "manifest-missing.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "agora-plugin.json"
+  },
+  {
+   "file": "manifest-not-json.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "agora-plugin.json"
+  },
+  {
+   "file": "manifest-unknown-field.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "network"
+  },
+  {
+   "file": "manifest-entry-not-script.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "entry"
+  },
+  {
+   "file": "manifest-panel-twice.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "panels"
+  },
+  {
+   "file": "manifest-panel-kind.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "panels"
+  },
+  {
+   "file": "manifest-invisible-author.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "author"
+  },
+  {
+   "file": "manifest-padded-licence.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "licence"
+  },
+  {
+   "file": "manifest-version.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "version"
+  },
+  {
+   "file": "manifest-files-hash.bundle",
+   "ok": false,
+   "code": "manifest",
+   "detail": "files"
+  },
+  {
+   "file": "capability.bundle",
+   "ok": false,
+   "code": "capability",
+   "detail": "terminal.read"
+  },
+  {
+   "file": "unlisted.bundle",
+   "ok": false,
+   "code": "unlisted",
+   "detail": "panel.css"
+  },
+  {
+   "file": "missing.bundle",
+   "ok": false,
+   "code": "missing",
+   "detail": "logo.png"
+  },
+  {
+   "file": "hash.bundle",
+   "ok": false,
+   "code": "hash",
+   "detail": "panel.css"
+  },
+  {
+   "file": "newer.bundle",
+   "ok": false,
+   "code": "newer",
+   "detail": "99.0.0"
+  }
+ ]
+}

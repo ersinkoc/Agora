@@ -20,6 +20,8 @@ pub mod pairing;
 pub mod pairing_net;
 pub mod passkey;
 pub mod password;
+pub mod plugin_package;
+pub mod plugins;
 pub mod project_names;
 pub mod projection;
 pub mod proxy;

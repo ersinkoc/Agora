@@ -1216,6 +1216,12 @@ where
             .await?;
         return Ok(());
     }
+    // ADR-0114: the hub's plugins and each person's own grants, answered by the hub for owner, member and viewer alike.
+    if let Some(resp) = plugin_command(hub, who, &req) {
+        conn.send(&frame(STREAM_COMMANDS, 1, resp.encode_to_vec()))
+            .await?;
+        return Ok(());
+    }
     // Who may do what is decided apart from the transport (R9, `dispatch.rs`); here only what the answer says is done.
     let ok_empty = |request_id: String| v1::CommandResponse {
         request_id,
@@ -2007,6 +2013,96 @@ fn device_command(
             Err(e) => e.code.as_str(),
         };
         audit(hub, who, action, "", outcome);
+    }
+    Some(match result {
+        Ok(ok) => v1::CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Ok(v1::CommandOk {
+                result: Some(ok),
+            })),
+        },
+        Err(e) => error_response(&req.request_id, &e),
+    })
+}
+
+/// ADR-0114 decision 6: the plugin commands a window sends, answered here; `None` for any other command. Every signed-in person, owner,
+/// member or viewer, may list the installed plugins, fetch their packages and set or read their own grants: a plugin only reads what its
+/// person can already see in the window, and choosing what it may see is the person's own (a viewer could use no plugin otherwise). No
+/// message installs or removes a plugin: that is the owner's, on the hub's machine (`agora hub plugin`). A request that names a node is
+/// refused, as for the device commands.
+pub(crate) fn plugin_command(
+    hub: &Hub,
+    who: &crate::users::Access,
+    req: &v1::CommandRequest,
+) -> Option<v1::CommandResponse> {
+    use command_request::Command as C;
+    let plugins = crate::plugins::Plugins::new(hub.store());
+    let internal = |_| Error::new(ErrorCode::Internal).with("incident_id", "plugins");
+    let empty = || command_ok::Result::Empty(v1::Empty {});
+    let (action, result): (&str, Result<command_ok::Result, Error>) = match &req.command {
+        Some(
+            C::PluginList(_)
+            | C::PluginFetch(_)
+            | C::PluginGrantList(_)
+            | C::PluginGrantSet(_)
+            | C::PluginGrantRemove(_),
+        ) if !req.target_node.is_empty() => (
+            "",
+            Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
+        ),
+        Some(C::PluginList(_)) => (
+            "",
+            plugins
+                .list()
+                .map(|plugins| command_ok::Result::PluginList(v1::PluginListResult { plugins }))
+                .map_err(internal),
+        ),
+        Some(C::PluginFetch(f)) => (
+            "",
+            plugins
+                .piece(&f.plugin_id, &f.sha256, f.offset)
+                .map(command_ok::Result::PluginFetch),
+        ),
+        Some(C::PluginGrantList(_)) => (
+            "",
+            plugins
+                .grants_of(&who.user)
+                .map(|grants| {
+                    command_ok::Result::PluginGrantList(v1::PluginGrantListResult { grants })
+                })
+                .map_err(internal),
+        ),
+        Some(C::PluginGrantSet(g)) => (
+            "plugin.grant",
+            plugins.set_grant(&who.user, g, now_ms()).map(|()| empty()),
+        ),
+        Some(C::PluginGrantRemove(g)) => (
+            "plugin.ungrant",
+            plugins
+                .remove_grant(&who.user, &g.plugin_id)
+                .map(|()| empty())
+                .map_err(internal),
+        ),
+        _ => return None,
+    };
+    if !action.is_empty() {
+        // Which plugin, when the id is one a manifest could have (anything else a window sent is not written into the trail).
+        let id = match &req.command {
+            Some(C::PluginGrantSet(g)) => g.plugin_id.as_str(),
+            Some(C::PluginGrantRemove(g)) => g.plugin_id.as_str(),
+            _ => "",
+        };
+        let plain = !id.is_empty()
+            && id.len() <= 40
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        let outcome = match (&result, plain) {
+            (Ok(_), true) => format!("ok {id}"),
+            (Ok(_), false) => "ok".to_string(),
+            (Err(e), _) => e.code.as_str().to_string(),
+        };
+        audit(hub, who, action, "", &outcome);
     }
     Some(match result {
         Ok(ok) => v1::CommandResponse {

@@ -26,6 +26,7 @@ cli-usage =
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
       agora hub fleet on|off|status [--hub-dir DIR]
+      agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install NAME [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
@@ -281,6 +282,27 @@ cli-hub-fleet-solo-on = Agents see every machine and agent of this hub: nobody b
 cli-hub-fleet-user-warning = `agora hub fleet` is on for this hub, so this person's agents see every machine and agent, also in projects they have no access to. `agora hub fleet off` turns it off.
 cli-hub-fleet-on = Agents see every machine and agent of this hub, also in projects their person has no access to. `agora hub fleet off` turns it off.
 cli-hub-fleet-off = Agents see only the machines and agents of their own projects, because other people use this hub. `agora hub fleet on` lets them see every machine and agent.
+cli-hub-plugin-added = Installed { $name } { $version } ({ $id }) for this hub. It asks to see: { $capabilities }. Each person chooses in the window whether to show it and what it may see.
+cli-hub-plugin-replaced = Installed { $name } { $version } ({ $id }) for this hub, in place of { $old }. It asks to see: { $capabilities }. Anyone who allowed the old version is asked again in the window if this one asks to see more.
+cli-hub-plugin-line = { $id } { $version }  { $name }  asks to see: { $capabilities }  (installed { $installed })
+cli-hub-plugin-none = No plugins are installed on this hub. `agora hub plugin add FILE` installs one.
+cli-hub-plugin-removed = Removed { $id } from this hub, with what each person allowed it. Windows leave it out the next time they load.
+cli-hub-plugin-unknown = No plugin { $id } is installed on this hub. `agora hub plugin list` shows them.
+cli-hub-plugin-full = This hub keeps at most { $limit } plugins. Remove one first (`agora hub plugin remove ID`).
+cli-hub-plugin-unreadable = Could not read { $file }.
+cli-hub-plugin-error-too-large = This file is larger than 2 MB, the most a plugin can be. Nothing was installed.
+cli-hub-plugin-error-format = This file is not a plugin package. Nothing was installed.
+cli-hub-plugin-error-newer-format = This plugin package was made for a newer version. Nothing was installed.
+cli-hub-plugin-error-too-many = This package holds more files than a plugin may have. Nothing was installed.
+cli-hub-plugin-error-path = This package names a file with a folder or path in it ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-link = This package holds a link or something else that is not a file ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-type = This package holds a kind of file a plugin cannot use ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-manifest = The package's description (agora-plugin.json) is missing or wrong at "{ $detail }". Nothing was installed.
+cli-hub-plugin-error-capability = This plugin asks to see something Agora does not know ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-unlisted = This package holds a file its description does not list ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-missing = A file the package's description lists is missing ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-hash = A file in this package is not the one its description lists ({ $detail }). Nothing was installed.
+cli-hub-plugin-error-newer = This plugin needs Agora { $detail } or newer. Nothing was installed.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = There is no team member called { $id }.
 cli-hub-user-project =   works in { $project }

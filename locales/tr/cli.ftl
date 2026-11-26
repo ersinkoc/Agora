@@ -26,6 +26,7 @@ cli-usage =
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
       agora hub fleet on|off|status [--hub-dir DIR]
+      agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
       agora hub ssh install AD [--yes] [--unsigned] [--release-url URL] [--hub-dir DIR]
@@ -274,6 +275,27 @@ cli-hub-fleet-solo-on = Ajanlar bu hub'ın her makinesini ve ajanını görür: 
 cli-hub-fleet-user-warning = Bu hub'da `agora hub fleet` açık, bu yüzden bu kişinin ajanları her makineyi ve ajanı görür; erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
 cli-hub-fleet-on = Ajanlar bu hub'ın her makinesini ve ajanını görür; kişilerinin erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
 cli-hub-fleet-off = Bu hub'ı başka kişiler de kullandığı için ajanlar yalnızca kendi projelerinin makinelerini ve ajanlarını görür. `agora hub fleet on` her makineyi ve ajanı görmelerini sağlar.
+cli-hub-plugin-added = { $name } { $version } ({ $id }) bu hub için kuruldu. Görmek istedikleri: { $capabilities }. Her kişi pencerede onu gösterip göstermeyeceğini ve neyi görebileceğini kendisi seçer.
+cli-hub-plugin-replaced = { $name } { $version } ({ $id }), { $old } sürümünün yerine bu hub için kuruldu. Görmek istedikleri: { $capabilities }. Eski sürüme izin veren herkese, bu sürüm daha fazlasını görmek isterse pencerede yeniden sorulur.
+cli-hub-plugin-line = { $id } { $version }  { $name }  görmek istedikleri: { $capabilities }  (kuruldu: { $installed })
+cli-hub-plugin-none = Bu hub'da kurulu eklenti yok. `agora hub plugin add FILE` bir eklenti kurar.
+cli-hub-plugin-removed = { $id } bu hub'dan, her kişinin ona verdiği izinlerle birlikte kaldırıldı. Pencereler bir sonraki açılışta onu göstermez.
+cli-hub-plugin-unknown = Bu hub'da { $id } adlı bir eklenti kurulu değil. `agora hub plugin list` kurulu olanları gösterir.
+cli-hub-plugin-full = Bu hub en fazla { $limit } eklenti tutar. Önce birini kaldırın (`agora hub plugin remove ID`).
+cli-hub-plugin-unreadable = { $file } okunamadı.
+cli-hub-plugin-error-too-large = Bu dosya, bir eklentinin olabileceği en büyük boyut olan 2 MB'tan büyük. Hiçbir şey kurulmadı.
+cli-hub-plugin-error-format = Bu dosya bir eklenti paketi değil. Hiçbir şey kurulmadı.
+cli-hub-plugin-error-newer-format = Bu eklenti paketi daha yeni bir sürüm için yapılmış. Hiçbir şey kurulmadı.
+cli-hub-plugin-error-too-many = Bu paket, bir eklentinin sahip olabileceğinden fazla dosya içeriyor. Hiçbir şey kurulmadı.
+cli-hub-plugin-error-path = Bu paket, içinde klasör ya da yol olan bir dosya adı içeriyor ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-link = Bu paket bir bağlantı ya da dosya olmayan başka bir şey içeriyor ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-type = Bu paket, bir eklentinin kullanamayacağı türde bir dosya içeriyor ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-manifest = Paketin açıklaması (agora-plugin.json) eksik ya da "{ $detail }" noktasında hatalı. Hiçbir şey kurulmadı.
+cli-hub-plugin-error-capability = Bu eklenti, Agora'nın bilmediği bir şeyi görmek istiyor ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-unlisted = Bu paket, açıklamasında listelenmeyen bir dosya içeriyor ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-missing = Paketin açıklamasında listelenen bir dosya eksik ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-hash = Bu paketteki bir dosya, açıklamasında listelenen dosya değil ({ $detail }). Hiçbir şey kurulmadı.
+cli-hub-plugin-error-newer = Bu eklenti Agora { $detail } ya da daha yeni bir sürüm istiyor. Hiçbir şey kurulmadı.
 cli-hub-user-line = { $id }  { $name }  { $role }
 cli-hub-user-unknown = { $id } adında bir ekip üyesi yok.
 cli-hub-user-project =   { $project } projesinde çalışır

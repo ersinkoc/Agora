@@ -64,7 +64,10 @@ const HASH = /^[0-9a-f]{64}$/;
 // pose as two words of the window's own or reorder what stands beside it.
 // eslint-disable-next-line no-control-regex
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f­؜᠎​-‏‪-‮⁠-⁯﻿￹-￻]/;
-const plainText = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim() === v && v.length > 0 && v.length <= max && !UNSAFE_TEXT.test(v);
+// A lone surrogate (half of a pair, from a `\ud800` escape) is no character at all; the hub refuses it as well (plugin_package.rs).
+const LONE_SURROGATE = /\p{Cs}/u;
+const plainText = (v: unknown, max: number): v is string =>
+  typeof v === 'string' && v.trim() === v && v.length > 0 && v.length <= max && !UNSAFE_TEXT.test(v) && !LONE_SURROGATE.test(v);
 
 const MANIFEST_KEYS = ['id', 'name', 'version', 'author', 'licence', 'min_agora', 'panels', 'capabilities', 'entry', 'files'];
 const PANEL_KEYS = ['id', 'kind', 'name'];

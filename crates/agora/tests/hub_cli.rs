@@ -655,6 +655,105 @@ fn the_fleet_view_is_turned_on_and_off_from_the_command_line() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// ADR-0114 decision 6: `agora hub plugin add|list|remove` on the hub's machine installs a checked package for the hub, refuses a bad
+/// one whole, and records each change in the audit trail as the owner's.
+#[test]
+fn plugins_are_added_listed_and_removed_from_the_command_line_and_audited() {
+    let root = tmp("plugins");
+    let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../agora-hub/tests/fixtures/plugin-packages");
+    let run = |dir: &Path, args: &[&str]| {
+        let o = agora(&root, args)
+            .arg("--hub-dir")
+            .arg(dir)
+            .output()
+            .unwrap();
+        (
+            o.status.code(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let hub = root.join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let (code, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(code == Some(0) && out.contains("No plugins"), "{out}");
+    let ok = fixtures.join("ok.bundle");
+    let (code, out, err) = run(&hub, &["hub", "plugin", "add", ok.to_str().unwrap()]);
+    assert!(
+        code == Some(0)
+            && out.contains("Installed")
+            && out.contains("demo")
+            && out.contains("agents.read"),
+        "{out}{err}"
+    );
+    let (code, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(
+        code == Some(0) && out.contains("demo 1.0.0") && out.contains("agents.read"),
+        "{out}"
+    );
+    // A bad package is refused whole, with the window's reason; nothing of it is kept.
+    let bad = fixtures.join("hash.bundle");
+    let (code, _, err) = run(&hub, &["hub", "plugin", "add", bad.to_str().unwrap()]);
+    assert!(
+        code == Some(1) && err.contains("panel.css") && err.contains("Nothing was installed"),
+        "{err}"
+    );
+    let (code, _, err) = run(
+        &hub,
+        &[
+            "hub",
+            "plugin",
+            "add",
+            root.join("none.json").to_str().unwrap(),
+        ],
+    );
+    assert!(code == Some(1) && err.contains("Could not read"), "{err}");
+    let (code, _, err) = run(&hub, &["hub", "plugin", "remove", "nope"]);
+    assert!(code == Some(1) && err.contains("No plugin nope"), "{err}");
+    let (code, out, _) = run(&hub, &["hub", "plugin", "remove", "demo"]);
+    assert!(code == Some(0) && out.contains("Removed demo"), "{out}");
+    let (_, out, _) = run(&hub, &["hub", "plugin", "list"]);
+    assert!(out.contains("No plugins"), "{out}");
+    for bad in [
+        &["hub", "plugin"][..],
+        &["hub", "plugin", "add"],
+        &["hub", "plugin", "remove", "a", "b"],
+        &["hub", "plugin", "install", "x"],
+    ] {
+        let (code, _, err) = run(&hub, bad);
+        assert!(
+            code == Some(2) && err.contains("arguments"),
+            "{bad:?}: {err}"
+        );
+    }
+    // Each change is the owner's row in the audit trail.
+    let store = SqliteStore::open(&hub.join("hub.db")).unwrap();
+    let rows: Vec<(String, String, String)> = agora_hub::audit::Audit::new(&store)
+        .list(0, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.action.starts_with("plugin."))
+        .map(|r| (r.who, r.action, r.outcome))
+        .collect();
+    let want = |w: &str, a: &str, o: &str| (w.to_string(), a.to_string(), o.to_string());
+    assert_eq!(
+        rows,
+        [
+            want("owner", "plugin.add", "ok demo@1.0.0"),
+            want("owner", "plugin.add", "package.hash"),
+            want("owner", "plugin.remove", "plugin.not_found"),
+            want("owner", "plugin.remove", "ok demo"),
+        ]
+    );
+    // A machine without a hub folder is told so, and nothing is made.
+    let none = root.join("no-hub");
+    let (code, _, _) = run(&none, &["hub", "plugin", "list"]);
+    assert_eq!(code, Some(1));
+    assert!(!none.exists(), "a hub folder was made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn team_members_are_added_listed_changed_and_removed_from_the_command_line() {
     let root = tmp("users");
