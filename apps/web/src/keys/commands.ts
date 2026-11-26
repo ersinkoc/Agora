@@ -58,6 +58,8 @@ export const COMMANDS: readonly CommandDef[] = [
   // The safe-mode key (ADR-0114): heard by the window before anything else (plugins/safe.ts `installSafeKey`), never through this list,
   // and no keybinding can move it or take it (FIXED_KEYS).
   { id: 'window.safe-mode', label: 'palette-safe-mode', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: ['ctrl+alt+shift+s', 'alt+shift+meta+s'], fixed: true },
+  // Sounds (main-window.md): on or off for this browser, and the focused pane's agent muted or not.
+  { id: 'sounds.toggle', label: 'keys-cmd-sounds', group: 'actions', icon: 'volume', context: 'anywhere', keys: [] },
   { id: 'window.agents', label: 'keys-cmd-agents', group: 'actions', icon: 'panelLeft', context: 'window', keys: ['ctrl+b', 'meta+b', 'ctrl+shift+b'] },
   ...n9.map((i): CommandDef => ({ id: `pane.tab-${i}`, label: 'keys-cmd-tab', args: { n: i }, group: 'go', icon: 'single', context: 'tabs', keys: [`alt+${i}`] })),
   ...n5.map((i): CommandDef => ({ id: `side.place-${i}`, label: 'keys-cmd-side', args: { n: i }, group: 'go', icon: 'panelRight', context: 'side', keys: [`alt+shift+${i}`] })),
@@ -67,6 +69,7 @@ export const COMMANDS: readonly CommandDef[] = [
   { id: 'layout.split-down', label: 'layout-split-down', group: 'actions', icon: 'splitDown', context: 'pane', keys: [] },
   { id: 'layout.close-pane', label: 'layout-close-pane', group: 'actions', icon: 'close', context: 'pane', keys: [] },
   { id: 'layout.reset', label: 'layout-reset', group: 'actions', icon: 'layout', context: 'window', keys: [] },
+  { id: 'agent.mute-sounds', label: 'keys-cmd-mute-agent', group: 'actions', icon: 'volume', context: 'pane', keys: [] },
 ];
 
 export const commandById = (id: string): CommandDef | undefined => COMMANDS.find((c) => c.id === id);

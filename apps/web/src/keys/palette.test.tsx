@@ -9,6 +9,7 @@ import { agora } from '../gen/agora.js';
 import { App } from '../App';
 import { forgetLoaded } from '../layout/store';
 import { attentionPrefs } from '../net/attention';
+import { soundPrefs } from '../net/sounds';
 import { CONTROL_KIND, encodeFrame, EVENT_KIND, STREAM_CONTROL, STREAM_EVENTS } from '../net/frame';
 import { setLanguage, t } from '../i18n';
 import { COMMANDS, commandById } from './commands';
@@ -114,6 +115,27 @@ describe('the command palette lists every command', () => {
     expect(option('window.agents')?.getAttribute('aria-keyshortcuts')).toBe('Control+B');
     expect(option('side.place-1')?.querySelector('.palette__label')?.textContent).toBe('Side panel: Needs you');
     expect(option('window.safe-mode')?.querySelector('kbd')?.textContent).toBe('Ctrl+Alt+Shift+S');
+  });
+
+  it('turns sounds on, and mutes the focused agent\'s sounds, by the palette', async () => {
+    vi.stubGlobal('AudioContext', class { state = 'running'; resume() { return Promise.resolve(); } });
+    soundPrefs.reset();
+    await window_();
+    press({ key: 'k', code: 'KeyK', ctrlKey: true });
+    expect(option('sounds.toggle')?.querySelector('.palette__label')?.textContent).toBe('Turn sounds on');
+    // Sounds off: muting an agent is not offered.
+    expect(option('agent.mute-sounds')).toBeNull();
+    act(() => option('sounds.toggle')?.click());
+    expect(soundPrefs.get().on).toBe(true);
+    // An agent's tab in focus (Alt+2: the first agent after Home), then the palette again.
+    press({ key: '2', code: 'Digit2', altKey: true });
+    press({ key: 'k', code: 'KeyK', ctrlKey: true });
+    expect(option('sounds.toggle')?.querySelector('.palette__label')?.textContent).toBe('Turn sounds off');
+    const mute = option('agent.mute-sounds');
+    expect(mute?.querySelector('.palette__label')?.textContent).toMatch(/^Mute the sounds of /);
+    act(() => mute?.click());
+    expect(soundPrefs.muted().length).toBe(1);
+    soundPrefs.reset();
   });
 
   it('is searchable by a command\'s name', async () => {

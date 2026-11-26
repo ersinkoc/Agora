@@ -3,7 +3,10 @@ import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, u
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { closeAsk, closeReasonKey, losesWork, useCloseAsk, type CloseAsk } from '../net/closeAgent';
-import { Menu } from '../layout/Menu';
+import { Menu, type MenuItem } from '../layout/Menu';
+import { soundPrefs } from '../net/sounds';
+import { canPlaySounds } from './chime';
+import { useSoundPrefs } from './SoundSettings';
 import { Icon } from './Icon';
 import { Button } from './kit';
 
@@ -14,11 +17,18 @@ export const CloseAgentContext = createContext<((agent: AgentTileModel) => Promi
 /** Whether this agent can be closed from here: running, and the window can send the command. */
 export const useCanClose = (agent: AgentTileModel): boolean => !!useContext(CloseAgentContext) && !agent.closed;
 
-// The header's menu: "Close agent" opens the confirm for the agent of that pane. Not "Stop turn" (that one is in the composer and keeps the agent).
+// The agent's menu: "Close agent" opens the confirm for the agent of that pane. Not "Stop turn" (that one is in the composer and keeps the
+// agent). While sounds are on in this browser it also mutes this agent's sounds (remembered here; net/sounds.ts).
 export function CloseAgentMenu({ agent, where = 'pane' }: { agent: AgentTileModel; where?: CloseAsk['where'] }) {
   const can = useCanClose(agent);
-  if (!can) return null;
-  return <Menu label={t('agent-actions', { name: agent.name })} items={[{ label: t('close-agent'), run: () => closeAsk.ask(agent.id, where) }]}><Icon name="more" /></Menu>;
+  const sounds = useSoundPrefs().on && canPlaySounds() && !agent.closed;
+  const muted = useSyncExternalStore(soundPrefs.subscribe, () => soundPrefs.isMuted(agent.id), () => false);
+  const items: MenuItem[] = [
+    ...(sounds ? [{ label: t('agent-sounds-mute'), checked: muted, run: () => soundPrefs.setMuted(agent.id, !muted) }] : []),
+    ...(can ? [{ label: t('close-agent'), divider: sounds, run: () => closeAsk.ask(agent.id, where) }] : []),
+  ];
+  if (items.length === 0) return null;
+  return <Menu label={t('agent-actions', { name: agent.name })} items={items}><Icon name="more" /></Menu>;
 }
 
 // One dialog for one ask, even where the agent is drawn twice at once (two panes on the same agent): of the confirms drawn for the ask,
