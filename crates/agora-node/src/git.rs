@@ -2800,6 +2800,8 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         refs: &[(&str, &str)],
         mark: Option<&Path>,
     ) -> PathBuf {
+        // `git_dirs` answers canonical paths, verbatim (`\\?\C:\...`) on Windows, which git cannot use.
+        let (admin, common) = (plain(admin.to_path_buf()), plain(common.to_path_buf()));
         let other = admin.join("other.git");
         let ok = raw_git()
             .args(["init", "-q", "--bare"])
@@ -3008,8 +3010,7 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         let _ = fs::remove_dir_all(&wt);
     }
 
-    /// A `commondir` longer than a git link file can be is refused unread, even when its first line names the real shared folder; a
-    /// sparse one costs no disk and is not read either.
+    /// A `commondir` longer than a git link file can be is refused unread, even when its first line names the real shared folder.
     #[test]
     fn a_commondir_longer_than_a_link_file_is_refused_unread() {
         let r = Repo::new(None);
@@ -3024,6 +3025,22 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         assert!(!links_hold(&admin, &common), "a padded commondir held");
         assert!(matches!(status(&wt), Err(GitError::LinksMoved(_))));
         fs::write(&cd, &orig).expect("reset");
+        status(&wt).expect("status once put back");
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// A huge sparse `commondir` (no disk used) is refused without being read. Unix only: NTFS does not make a file sparse unless
+    /// asked, so the same length would be allocated there.
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_sparse_commondir_is_refused_unread() {
+        let r = Repo::new(None);
+        let wt = r.wt("links-sparse");
+        create_worktree(&r.dir, &wt, "links-sparse", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
         fs::OpenOptions::new()
             .write(true)
             .open(&cd)
@@ -3035,7 +3052,6 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
         fs::remove_file(&cd).expect("unlink");
         fs::write(&cd, &orig).expect("reset");
-        status(&wt).expect("status once put back");
         let _ = remove_worktree(&r.dir, &wt, true);
         let _ = fs::remove_dir_all(&wt);
     }

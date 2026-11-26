@@ -3778,21 +3778,13 @@ mod small_file_tests {
     }
 
     #[test]
-    fn a_small_regular_file_is_read_and_a_longer_or_sparse_one_is_refused() {
+    fn a_small_regular_file_is_read_and_a_longer_one_is_refused() {
         let d = dir("len");
         let f = d.join("f");
         std::fs::write(&f, b"../..\n").unwrap();
         assert_eq!(read(&f, 16).unwrap(), b"../..\n");
         assert_eq!(read(&f, 6).unwrap(), b"../..\n");
         assert!(read(&f, 5).is_err());
-        // A sparse file: no disk used, still refused without being read.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&f)
-            .unwrap()
-            .set_len(1 << 36)
-            .unwrap();
-        assert!(read(&f, 4096).is_err());
         assert!(read(&d, 4096).is_err(), "a folder");
         assert!(read(&d.join("missing"), 4096).is_err());
         let _ = std::fs::remove_dir_all(&d);
@@ -3806,6 +3798,24 @@ mod small_file_tests {
         if crate::symlink(&target, &d.join("link")).is_ok() {
             assert!(read(&d.join("link"), 4096).is_err());
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A sparse file uses no disk and is still refused without being read. Unix only: NTFS allocates the length unless the file is
+    /// marked sparse.
+    #[cfg(unix)]
+    #[test]
+    fn a_huge_sparse_file_is_refused_unread() {
+        let d = dir("sparse");
+        let f = d.join("f");
+        std::fs::write(&f, b"x").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_len(1 << 36)
+            .unwrap();
+        assert!(read(&f, 4096).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 
