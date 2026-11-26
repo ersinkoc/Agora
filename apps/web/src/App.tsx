@@ -63,7 +63,7 @@ import { decodeHash, isMachinesHash, isSettingsHash, machineOfHash, settingsSect
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
 import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
-import { SAFE } from './plugins/safe';
+import { SAFE, safeAddress } from './plugins/safe';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -560,6 +560,7 @@ export function App() {
     ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); }, group: 'appearance' as const, icon: 'globe' as const })),
     { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme, group: 'appearance', icon: 'pencil' },
     { id: 'plugins', label: t('palette-plugins'), run: () => setPluginsOpen(true), group: 'appearance', icon: 'puzzle' },
+    ...(SAFE ? [] : [{ id: 'safe-mode', label: t('palette-safe-mode'), run: () => location.assign(safeAddress(location.href)), group: 'appearance' as const, icon: 'puzzle' as const }]),
     ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
     ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
     // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.

@@ -1,12 +1,13 @@
 // The plugins this browser loaded for development (ADR-0114 decision 6, "Development"; docs/ux/plugins.md, "Development loading"). A
 // package is loaded from a local file into this browser only, works without the hub, and is marked "development" wherever it shows. The
 // package text and the person's grants are kept in this browser's storage; every start checks each package again, exactly as a new file.
-// Nothing here is sent anywhere. In safe mode nothing is read and no plugin is shown.
+// Nothing here is sent anywhere. In safe mode no plugin is checked or shown; the list of kept plugins is read only to name them, so
+// the person can remove one from there.
 //
 // Hub storage, install for a hub, and per-person grants kept by the hub are ADR-0114 build step 3; the catalog is step 4.
 import type { Capability } from './capabilities';
 import { type GrantRecord, type GrantState, grant, grantState, granted, readGrants } from './grants';
-import { type CheckedPlugin, type PackageResult, MAX_PACKAGE_BYTES, checkPackage } from './package';
+import { type CheckedPlugin, type PackageResult, MANIFEST, MAX_PACKAGE_BYTES, checkPackage, readManifest } from './package';
 import { SAFE } from './safe';
 
 export const DEV_KEY = 'agora.plugins.dev.v1';
@@ -96,20 +97,41 @@ export function createPluginStore(env: PluginStoreEnv) {
       write(env.kv, GRANTS_KEY, { ...grants(), [id]: g });
       set(state.plugins.map((x) => (x === p ? entry(p.plugin, p.text, g) : x)));
     },
+    /** The plugins this browser keeps, by their manifests only (nothing is checked or run): what safe mode lists for removal. */
+    kept(): { id: string; name: string; version: string }[] {
+      const list = read(env.kv, DEV_KEY);
+      if (!Array.isArray(list)) return [];
+      return list.flatMap((k) => { const m = manifestOf((k as { text?: unknown })?.text); return m ? [{ id: m.id, name: m.name, version: m.version }] : []; });
+    },
+    /** Forgets a plugin: its package and its grant, in this browser and on screen, in safe mode too. */
     remove(id: string) {
-      const plugins = state.plugins.filter((p) => p.plugin.manifest.id !== id);
+      const list = read(env.kv, DEV_KEY);
+      const left = Array.isArray(list) ? list.filter((k) => manifestOf((k as { text?: unknown })?.text)?.id !== id) : [];
+      write(env.kv, DEV_KEY, left.length ? left : undefined);
       const g = grants();
       delete g[id];
       write(env.kv, GRANTS_KEY, Object.keys(g).length ? g : undefined);
-      persist(plugins);
-      set(plugins);
+      set(state.plugins.filter((p) => p.plugin.manifest.id !== id));
     },
   };
 }
 export type PluginStore = ReturnType<typeof createPluginStore>;
 
+/** A kept package's manifest, read as text without checking the package (only to name it); undefined for anything unreadable. */
+function manifestOf(text: unknown) {
+  try {
+    if (typeof text !== 'string' || text.length > MAX_PACKAGE_BYTES * 2) return undefined;
+    const files = (JSON.parse(text) as { files?: Record<string, unknown> })?.files;
+    const b64 = files && Object.prototype.hasOwnProperty.call(files, MANIFEST) ? files[MANIFEST] : undefined;
+    if (typeof b64 !== 'string') return undefined;
+    const m = readManifest(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))));
+    return m.ok ? m.manifest : undefined;
+  } catch { return undefined; }
+}
+
 function storage(): KV | undefined {
   try { return typeof window !== 'undefined' ? window.localStorage : undefined; } catch { return undefined; }
 }
 export const AGORA_VERSION: string = typeof __AGORA_VERSION__ === 'string' ? __AGORA_VERSION__ : '0.0.0';
-export const pluginStore: PluginStore = createPluginStore({ kv: SAFE ? undefined : storage(), version: AGORA_VERSION, safe: SAFE });
+// In safe mode the store keeps its storage only to list and remove what is kept; it checks and shows nothing.
+export const pluginStore: PluginStore = createPluginStore({ kv: storage(), version: AGORA_VERSION, safe: SAFE });

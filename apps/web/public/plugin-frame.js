@@ -10,6 +10,15 @@
 //   agora.granted, agora.plugin, agora.panel, agora.scheme
 (function () {
   'use strict';
+  // WebRTC is the one way out a page policy does not close in every engine (`connect-src` does not cover it, and `webrtc 'block'` is
+  // not enforced everywhere): its constructors are taken away for good before anything of the plugin's runs, in this frame and in any
+  // frame the plugin makes that runs this loader too. A frame the plugin makes without it has an opaque origin of its own (the
+  // sandbox), so this one cannot reach into it, and no plugin script can run there (`script-src` allows no inline code, and a blob
+  // made here does not load there).
+  Object.getOwnPropertyNames(window).forEach(function (k) {
+    if (!/^(webkit|moz)?RTC/.test(k)) return;
+    try { Object.defineProperty(window, k, { value: undefined, writable: false, configurable: false, enumerable: false }); } catch (e) { /* already fixed */ }
+  });
   if (self.origin !== 'null' || window.parent === window) return;
   var host = window.parent;
   var loaded = false;

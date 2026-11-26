@@ -4,7 +4,7 @@
 <!-- A plugin's sandboxed frame (ADR-0114, docs/ux/plugins.md). The hub serves this page under its own header policy (web.rs
      PLUGIN_FRAME_CSP: opaque, no network, framed only by the hub's window); this copy of it, without what only a header can say, holds
      where no header is sent (the development server). It runs only the window's loader. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'">
 <meta charset="utf-8">
 <meta name="referrer" content="no-referrer">
 <script src="plugin-frame.js"></script>

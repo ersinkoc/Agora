@@ -18,6 +18,8 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import dgram from 'node:dgram';
+import net from 'node:net';
 import { extname, join } from 'node:path';
 import { hubHeaders, APP_CSP, PLUGIN_FRAME_CSP } from './hub-headers.mjs';
 import { pack } from './pack-plugin.mjs';
@@ -73,7 +75,9 @@ const results = [];
 const check = (ok, what) => { results.push([ok, what]); console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
 // A fresh window with this storage; the window's messages from frames are kept for the probes to report through.
-async function open(storage, path = '/#/demo', scheme = 'dark') {
+// `quiet`: no listener of the test's own reads the window's messages (it would copy every one of them into the window, as the window's
+// own filter does not for a message over the rate).
+async function open(storage, path = '/#/demo', scheme = 'dark', quiet = false) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: scheme, locale: 'en-US' });
   // A request the browser refused before sending (a page policy's block) is announced and then fails; only one that finished, or one a
   // server saw, left the frame.
@@ -83,11 +87,11 @@ async function open(storage, path = '/#/demo', scheme = 'dark') {
   ctx.on('requestfailed', (r) => refused.push(`${r.url()} ${r.failure()?.errorText ?? ''}`));
   const pages = [];
   ctx.on('page', (p) => pages.push(p));
-  await ctx.addInitScript((kv) => {
+  await ctx.addInitScript(([kv, q]) => {
     try { localStorage.setItem('agora.attention.mode', 'off'); for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); } catch { /* checked below */ }
     window.__probes = [];
-    addEventListener('message', (e) => { if (e.data && typeof e.data === 'object' && 'probe' in e.data) window.__probes.push(e.data); });
-  }, storage);
+    if (!q) addEventListener('message', (e) => { if (e.data && typeof e.data === 'object' && 'probe' in e.data) window.__probes.push(e.data); });
+  }, [storage, quiet]);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -175,6 +179,86 @@ for (const p of probes) {
 // the frame's request for the loader must carry no Origin at all.
 check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the frame asks for the window's loader without an Origin header (${loaderOrigins.length} requests, origins: ${JSON.stringify([...new Set(loaderOrigins)])})`);
 
+// ---- WebRTC: the one way out a page policy does not close everywhere -------------------------------------------------------
+// Judged by a UDP and a TCP listener outside the frame (STUN and TURN servers a plugin names): nothing may reach them. The loader takes
+// the RTC constructors away for good; a frame the plugin makes has an opaque origin of its own, so it cannot hand a fresh one back.
+{
+  const udpLog = [];
+  const tcpLog = [];
+  const udp = dgram.createSocket('udp4');
+  udp.on('message', (m) => udpLog.push(m.length));
+  await new Promise((r) => udp.bind(0, '127.0.0.1', r));
+  const tcp = net.createServer((c) => { tcpLog.push('conn'); c.destroy(); }).listen(0, '127.0.0.1');
+  await new Promise((r) => tcp.once('listening', r));
+  const ice = `[{ urls: 'stun:127.0.0.1:${udp.address().port}' }, { urls: 'turn:127.0.0.1:${tcp.address().port}?transport=tcp', username: 'u', credential: 'p' }]`;
+  const entry = R('webrtc', `
+    var out = {};
+    var d = Object.getOwnPropertyDescriptor(window, 'RTCPeerConnection');
+    out.descriptor = d ? [typeof d.value, d.writable, d.configurable].join(',') : 'none';
+    out.left = Object.getOwnPropertyNames(window).filter(function (k) { return /RTC/.test(k) && typeof window[k] === 'function'; }).join(',') || 'none';
+    try { delete window.RTCPeerConnection; window.RTCPeerConnection = 1; out.reassign = typeof window.RTCPeerConnection; } catch (e) { out.reassign = 'blocked: ' + e.name; }
+    function attempt(C, name) {
+      try { var pc = new C({ iceServers: ${ice} }); pc.createDataChannel('x'); pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }); out[name] = 'constructed'; }
+      catch (e) { out[name] = 'blocked: ' + e.name; }
+    }
+    attempt(window.RTCPeerConnection, 'direct');
+    attempt(window.webkitRTCPeerConnection, 'webkit');
+    var f = document.createElement('iframe'); document.body.appendChild(f);
+    try { attempt(f.contentWindow.RTCPeerConnection, 'blankFrame'); } catch (e) { out.blankFrame = 'blocked: ' + e.name; }
+    try { attempt(window[0].RTCPeerConnection, 'indexedFrame'); } catch (e) { out.indexedFrame = 'blocked: ' + e.name; }
+    var g = document.createElement('iframe');
+    g.srcdoc = '<script src="' + URL.createObjectURL(new Blob(["parent.postMessage({ nested: typeof RTCPeerConnection }, '*')"], { type: 'text/javascript' })) + '"><\\/script>';
+    out.nested = 'did not run';
+    addEventListener('message', function (e) { if (e.data && 'nested' in e.data) out.nested = 'ran: ' + e.data.nested; });
+    document.body.appendChild(g);
+    setTimeout(function () { report(JSON.stringify(out)); }, 2500);`);
+  const id = 'webrtc';
+  const w = await open(seeded(id, makePackage(id, entry, []), []));
+  await w.page.waitForSelector('iframe[data-plugin-frame]');
+  const said = JSON.parse((await report(w.page, 'webrtc', 9000)) ?? '{}');
+  await w.page.waitForTimeout(1500);
+  check(said.descriptor === 'undefined,false,false' && said.left === 'none' && said.reassign === 'undefined',
+    `the RTC constructors are gone for good before the plugin runs (descriptor ${said.descriptor}; left ${said.left}; reassigned ${said.reassign})`);
+  check([said.direct, said.webkit, said.blankFrame, said.indexedFrame].every((x) => /^blocked/.test(x ?? '')) && said.nested === 'did not run',
+    `no fresh copy from a frame the plugin makes (direct ${said.direct}; webkit ${said.webkit}; blank frame ${said.blankFrame}; window[0] ${said.indexedFrame}; srcdoc script ${said.nested})`);
+  check(udpLog.length === 0 && tcpLog.length === 0, `WebRTC from inside a plugin frame reaches no STUN or TURN server (UDP ${udpLog.length}, TCP ${tcpLog.length})`);
+  await w.ctx.close();
+  udp.close();
+  tcp.close();
+}
+
+// ---- Large messages and floods ------------------------------------------------------------------------------------------
+// The review's case: four 16 MB arrays, which the window once serialised to measure: refused without a pause. A flood (400 more) is
+// cut off: after STOP_AFTER messages over the rate the window takes the frame away (each message costs the window a copy, read or
+// not, which no filter can avoid), and offers to start it again. A 200,000-field object is measured and only reported.
+for (const [name, code] of [
+  ['four', "var a = new Uint8Array(16e6); for (var i = 0; i < 4; i++) parent.postMessage(a, '*'); parent.postMessage({ agora: 1, type: 'done' }, '*');"],
+  ['flood', "var a = new Uint8Array(16e6); for (var j = 0; j < 400; j++) parent.postMessage(a, '*');"],
+  ['object', "var o = {}; for (var j = 0; j < 200000; j++) o['k' + j] = j; o.agora = 1; o.type = 'read'; parent.postMessage(o, '*'); parent.postMessage({ agora: 1, type: 'done' }, '*');"],
+]) {
+  const id = `big-${name}`;
+  const w = await open(seeded(id, makePackage(id, `(function () { ${code} })();`, []), []), '/#/demo', 'dark', true);
+  await w.page.evaluate(() => { window.__gaps = []; let last = performance.now(); setInterval(() => { const n = performance.now(); window.__gaps.push(n - last); last = n; }, 50); });
+  await w.page.waitForSelector('iframe[data-plugin-frame]');
+  if (name === 'flood') {
+    const stopped = await w.page.waitForSelector('[data-plugin-stopped]', { timeout: 60000 }).then(() => true, () => false);
+    const frames = await w.page.locator('iframe[data-plugin-frame]').count();
+    await w.page.getByRole('button', { name: 'Start it again' }).click().catch(() => {});
+    const back = await w.page.waitForSelector('iframe[data-plugin-frame]', { timeout: 10000 }).then(() => true, () => false);
+    const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
+    check(stopped && frames === 0 && back, `a frame flooding the window with messages is stopped, and can be started again (stopped ${stopped}, frames left ${frames}, back ${back}; longest pause while it flooded ${gap.toFixed(0)} ms)`);
+  } else {
+    // The frame's last message (a type the window does not know) is counted when everything before it has arrived.
+    const want = name === 'four' ? 5 : 2;
+    const all = await w.page.waitForFunction((n) => Number(document.querySelector('iframe[data-plugin-frame]')?.dataset.dropped) >= n, want, { timeout: 30000 }).then(() => true, () => false);
+    await w.page.waitForTimeout(1200);
+    const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
+    if (name === 'four') check(all && gap < 1500, `four 16 MB arrays are refused without stalling the window (longest pause ${gap.toFixed(0)} ms)`);
+    else console.log(`info a 200,000-field object: longest pause ${gap.toFixed(0)} ms (the browser's copy of one message within the rate)`);
+  }
+  await w.ctx.close();
+}
+
 // ---- Grants, messages, containment -----------------------------------------------------------------------------------------
 {
   const id = 'reads';
@@ -213,6 +297,20 @@ check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the fra
   check(box.markHit && box.barHit && box.markText === 'Plugin development' && box.name === 'Probe reads', `the pane bar with the plugin's name and the marker stays on top of a plugin trying to cover the window ("${box.name}", "${box.markText}")`);
   check(box.otherHit, 'what needs you (the pane beside it) is not covered');
   await w.ctx.close();
+
+  // In a narrow pane the marker keeps its whole width; the name gives way first, then the pane's own buttons, never over the marker.
+  const narrow = await open(seeded(id, text, ['agents.read', 'usage.read'], ['agents.read'], JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'split', direction: 'row', ratios: [0.88, 0.12], children: [{ type: 'pane', id: 'p2', panel: 'usage' }, { type: 'pane', id: 'p1', panel: `plugin.${id}.main` }] } }, focus: 'p1', touched: true })));
+  await narrow.page.waitForSelector('iframe[data-plugin-frame]');
+  const n = await narrow.page.evaluate(() => {
+    const mark = document.querySelector('[data-plugin-mark]');
+    const bar = [...document.querySelectorAll('.pane-bar')].find((b) => b.contains(mark));
+    const m = mark.getBoundingClientRect();
+    const b = bar.getBoundingClientRect();
+    const at = (x) => mark.contains(document.elementFromPoint(x, m.y + m.height / 2));
+    return { inside: m.left >= b.left - 0.5 && m.right <= b.right + 0.5, hits: [at(m.left + 2), at(m.left + m.width / 2), at(m.right - 2)], width: m.width.toFixed(0), bar: b.width.toFixed(0), whole: mark.scrollWidth <= mark.clientWidth + 1 };
+  });
+  check(n.inside && n.hits.every(Boolean) && n.whole, `in a narrow pane (${n.bar} px) the marker stays whole and uncovered (${n.width} px; hits ${n.hits.join(',')})`);
+  await narrow.ctx.close();
 }
 
 // ---- Safe mode ----------------------------------------------------------------------------------------------------------------
@@ -243,6 +341,48 @@ check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the fra
   await key.page.waitForSelector('[data-safe-mode]', { timeout: 10000 }).catch(() => {});
   check(key.page.url().includes('?safe') && (await key.page.locator('iframe').count()) === 0, `the safe-mode key reopens the window with no plugin (${key.page.url().replace(HUB, '')})`);
   await key.ctx.close();
+
+  // A plugin that keeps taking the focus: the frame is inert until the person clicks into it, and inert again once they click
+  // elsewhere, so the key reaches the window; and a plugin pane's menu has safe mode by the mouse.
+  const sid = 'stealer';
+  const stealer = makePackage(sid, R('stealer', "var i = document.createElement('input'); document.body.appendChild(i); setInterval(function () { window.focus(); i.focus(); }, 20); report('stealing');"), []);
+  const st = { ...seeded(sid, stealer, [], [], workspace(`plugin.${sid}.main`, [{ type: 'pane', id: 'p2', panel: 'usage' }])) };
+  const f1 = await open(st);
+  await f1.page.waitForSelector('iframe[data-plugin-frame]');
+  await report(f1.page, 'stealer');
+  await f1.page.waitForTimeout(500);
+  const untouched = await f1.page.evaluate(() => document.activeElement?.tagName);
+  const fb = await f1.page.locator('iframe[data-plugin-frame]').boundingBox();
+  await f1.page.mouse.click(fb.x + fb.width / 2, fb.y + fb.height / 2);
+  await f1.page.waitForTimeout(400);
+  const inFrame = await f1.page.evaluate(() => document.activeElement?.tagName);
+  await f1.page.locator('[data-pane="p2"]').click({ position: { x: 20, y: 200 } });
+  await f1.page.waitForTimeout(600);
+  const after = await f1.page.evaluate(() => ({ tag: document.activeElement?.tagName, inert: document.querySelector('iframe[data-plugin-frame]').inert }));
+  await f1.page.keyboard.press('Control+Alt+Shift+KeyS');
+  await f1.page.waitForURL(/\?safe/, { timeout: 10000 }).catch(() => {});
+  check(untouched !== 'IFRAME' && inFrame === 'IFRAME' && after.tag !== 'IFRAME' && after.inert && f1.page.url().includes('?safe'),
+    `a plugin taking the focus cannot keep it: before a click ${untouched}, after clicking in ${inFrame}, after clicking elsewhere ${after.tag} (inert ${after.inert}); the key then opens safe mode`);
+  await f1.ctx.close();
+  const f2 = await open(st);
+  await f2.page.waitForSelector('iframe[data-plugin-frame]');
+  await f2.page.locator('.pane-bar', { has: f2.page.locator('[data-plugin-mark]') }).locator('button[aria-haspopup]').click();
+  await f2.page.getByRole('menuitem', { name: 'Open in safe mode' }).click();
+  await f2.page.waitForURL(/\?safe/, { timeout: 10000 }).catch(() => {});
+  check(f2.page.url().includes('?safe'), `a plugin pane's menu opens safe mode by the mouse (${f2.page.url().replace(HUB, '')})`);
+  // In safe mode the plugins dialog lists what is kept and removes it.
+  await f2.page.waitForSelector('[data-safe-mode]');
+  await f2.page.keyboard.press('Control+KeyK');
+  await f2.page.keyboard.type('Plugins');
+  await f2.page.keyboard.press('Enter');
+  const row = f2.page.locator(`[data-plugin-row="${sid}"]`);
+  await row.waitFor({ timeout: 5000 }).catch(() => {});
+  const listed = await row.count();
+  await row.getByRole('button', { name: 'Remove' }).click().catch(() => {});
+  await f2.page.waitForTimeout(300);
+  const kept = await f2.page.evaluate(() => localStorage.getItem('agora.plugins.dev.v1'));
+  check(listed === 1 && kept === null, `in safe mode the plugins dialog lists the kept plugin and removes it (listed ${listed}; kept after: ${kept === null ? 'none' : 'some'})`);
+  await f2.ctx.close();
 }
 
 // ---- Loading through the window's dialog, with the person's grant ---------------------------------------------------------

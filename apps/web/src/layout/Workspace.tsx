@@ -12,6 +12,7 @@ import { TabStrip } from './TabStrip';
 import { type Bindings, agentOf } from './streams';
 import { type Pane, MIN_RATIO, bindOf, followOf, panesOf } from './tree';
 import { Note } from './Note';
+import { safeAddress } from '../plugins/safe';
 import { PANEL_INFO, type PanelActions, type PanelContext, type PanelDef, type PanelInfo, type PanelRegistry, type PanelSources, type PanelState } from './panels';
 import type { TerminalSource } from '../terminal/source';
 
@@ -54,7 +55,7 @@ export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'get'>, panel: 
 // loaded from a local file.
 export function PluginMark({ dev }: { dev: boolean }) {
   return (
-    <span className="plugin-mark" data-plugin-mark="">
+    <span className="plugin-mark" data-plugin-mark="" title={dev ? `${t('plugin-marker')} · ${t('plugin-development')}` : t('plugin-marker')}>
       <Icon name="puzzle" className="size-3" />{t('plugin-marker')}{dev && <>{' '}<span className="plugin-mark__dev">{t('plugin-development')}</span></>}
     </span>
   );
@@ -125,6 +126,8 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
     { label: t('layout-move-to'), disabled: others(p).length === 0, items: others(p).map((o) => ({ label: label(o), items: places.map(([place, key]) => ({ label: t(key), run: () => dispatch({ type: 'move', pane: p.id, target: o.id, place }) })) })) },
     { label: t('layout-swap-with'), disabled: others(p).length === 0, items: others(p).map((o) => ({ label: label(o), run: () => dispatch({ type: 'swap', a: p.id, b: o.id }) })) },
     ...(f.tabs && f.panes.length > 1 && !narrow ? [{ label: t('layout-move-out'), run: () => dispatch({ type: 'detach', pane: p.id }) }] : []),
+    // A plugin's pane offers the way out by the mouse too: the window again with no plugins and the built-in theme (ADR-0114).
+    ...(panels.get(p.panel)?.plugin ? [{ label: t('safe-mode-open'), divider: true, run: () => location.assign(safeAddress(location.href)) }] : []),
     { label: t('layout-close-pane'), divider: true, run: () => dispatch({ type: 'close', pane: p.id }) },
   ];
 
@@ -205,10 +208,9 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
             })}
           </TabStrip>
         ) : (
-          <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
+          <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} data-pane-label="" {...dragProps(front)}>
             {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
             <PaneName text={label(front)} className="font-medium" />
-            {panels.get(front.panel)?.plugin && <PluginMark dev={!!panels.get(front.panel)?.plugin?.dev} />}
             {a && <NoAskBadge agent={a} bare />}
             {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
             {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
@@ -216,8 +218,19 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
           </div>
         )}
         {f.tabs && followOf(front) && <span className="ide-chip mx-1 flex-none self-center">{t(`layout-follows-${followOf(front)}`)}</span>}
-        {barTools(front, f)}
-        {!f.tabs && !lone && <button type="button" className="ide-iconbtn me-1 self-center" onClick={() => dispatch({ type: 'close', pane: front.id })} aria-label={t('layout-close-pane')} title={t('layout-close-pane')}><Icon name="close" /></button>}
+        {(() => {
+          const tools = <>
+            {barTools(front, f)}
+            {!f.tabs && !lone && <button type="button" className="ide-iconbtn me-1 self-center" onClick={() => dispatch({ type: 'close', pane: front.id })} aria-label={t('layout-close-pane')} title={t('layout-close-pane')}><Icon name="close" /></button>}
+          </>;
+          // A plugin's pane: the marker keeps its whole width in any pane; the name gives way first, then the pane's own buttons, which are
+          // cut at the end rather than drawn over it (they are all in the ⋯ menu, and the pane can be widened).
+          const plugin = !f.tabs ? panels.get(front.panel)?.plugin : undefined;
+          return plugin ? <>
+            <span className="flex flex-none items-center pe-1"><PluginMark dev={plugin.dev} /></span>
+            <div className="flex min-w-0 items-stretch overflow-hidden" data-pane-tools="">{tools}</div>
+          </> : tools;
+        })()}
       </div>
     );
   };

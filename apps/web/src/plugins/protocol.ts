@@ -10,15 +10,18 @@
 //   result  { id, ok: true, data } | { id, ok: false, error }   error: not-granted | unknown-capability | unavailable | too-many
 //   update  { id, data }
 //
-// The window takes a message only from a frame it made (by `event.source`, as an opaque frame's origin is "null"), only of a known type
-// and shape, at most MAX_MESSAGE_BYTES long and at most RATE per second (with a burst of BURST). Anything else is ignored and counted.
+// The window takes a message only from a frame it made (by `event.source`, as an opaque frame's origin is "null"), at most RATE per
+// second (with a burst of BURST), only a plain object of a known type with exactly its fields, a capability name at most MAX_CAP long.
+// Anything else is ignored and counted, without serialising or walking it.
 import { type Capability, isCapability } from './capabilities';
 
 export const PROTOCOL_VERSION = 1;
-export const MAX_MESSAGE_BYTES = 4096;
 export const RATE = 20;
 export const BURST = 40;
 export const MAX_WATCHES = 16;
+/** A frame whose messages are ignored this many times (over the rate, of no known type, too long) is stopped: every message costs
+ *  the window a copy, and the window's own loader never sends one that is ignored, so only a broken or hostile plugin gets here. */
+export const STOP_AFTER = 20;
 
 export type Inbound =
   | { type: 'boot' }
@@ -40,28 +43,51 @@ export const noCounts = (): Counts => ({ type: 0, size: 0, rate: 0 });
 
 const isId = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER;
 
-/** The size of a message as JSON, or undefined for one that is not plain data (a cycle, a function, a transferable). */
-export function sizeOf(data: unknown): number | undefined {
-  try {
-    const s = JSON.stringify(data);
-    return typeof s === 'string' ? s.length : undefined;
-  } catch { return undefined; }
+/** The most fields an inbound message has; a message with more is refused before anything else is read from it. */
+const MAX_KEYS = 4;
+/** The longest capability name a message may carry (every name is far shorter). */
+export const MAX_CAP = 64;
+
+/** Only a plain object is read at all: a typed array, a Map, a Blob or anything else that is not `{ … }` is refused without walking
+ *  or measuring it (a 16 MB array would otherwise be serialised to be measured, and the window would stall on it). */
+export const isPlainObject = (v: unknown): v is Record<string, unknown> => {
+  if (typeof v !== 'object' || v === null) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
+
+/** The field names of a plain object, or undefined when it has more than MAX_KEYS (the scan stops there). */
+function fewKeys(m: Record<string, unknown>): string[] | undefined {
+  const keys: string[] = [];
+  for (const k in m) {
+    if (!Object.prototype.hasOwnProperty.call(m, k)) continue;
+    keys.push(k);
+    if (keys.length > MAX_KEYS) return undefined;
+  }
+  return keys.sort();
 }
 
-/** A message's type and fields, or undefined for anything that is not exactly one of the inbound messages. */
-export function parseInbound(data: unknown): Inbound | undefined {
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return undefined;
-  const m = data as Record<string, unknown>;
-  if (m.agora !== PROTOCOL_VERSION) return undefined;
-  const keys = Object.keys(m).sort().join(',');
-  switch (m.type) {
-    case 'boot': return keys === 'agora,type' ? { type: 'boot' } : undefined;
+/** A message's type and fields, or why it is refused: `type` for anything that is not exactly one of the inbound messages, `size` for
+ *  one of the right shape with a field longer than its bound. Cheap whatever is sent: no serialising, no walking past MAX_KEYS fields. */
+export function classify(data: unknown): Inbound | 'type' | 'size' {
+  if (!isPlainObject(data)) return 'type';
+  const keys = fewKeys(data)?.join(',');
+  if (keys === undefined || data.agora !== PROTOCOL_VERSION) return 'type';
+  switch (data.type) {
+    case 'boot': return keys === 'agora,type' ? { type: 'boot' } : 'type';
     case 'read':
     case 'watch':
-      return keys === 'agora,cap,id,type' && isId(m.id) && typeof m.cap === 'string' && m.cap.length <= 64 ? { type: m.type, id: m.id, cap: m.cap } : undefined;
-    case 'unwatch': return keys === 'agora,id,type' && isId(m.id) ? { type: 'unwatch', id: m.id } : undefined;
-    default: return undefined;
+      if (keys !== 'agora,cap,id,type' || !isId(data.id) || typeof data.cap !== 'string') return 'type';
+      return data.cap.length > MAX_CAP ? 'size' : { type: data.type, id: data.id, cap: data.cap };
+    case 'unwatch': return keys === 'agora,id,type' && isId(data.id) ? { type: 'unwatch', id: data.id } : 'type';
+    default: return 'type';
   }
+}
+
+/** A message's type and fields, or undefined for anything that is not exactly one of the inbound messages within its bounds. */
+export function parseInbound(data: unknown): Inbound | undefined {
+  const m = classify(data);
+  return typeof m === 'string' ? undefined : m;
 }
 
 /** A token bucket: RATE messages a second, BURST at once. `now` is in milliseconds. */
@@ -85,19 +111,22 @@ export function gate(cap: string, granted: readonly Capability[]): { ok: true; c
   return { ok: true, cap };
 }
 
-/** One frame's filter: size, then shape and type, then rate (a message that is not one of ours never spends the frame's rate). */
-export function frameFilter(clock: () => number = () => Date.now()) {
+/** One frame's filter: the rate first (every message spends it, so a flood costs the window nothing more), then the shape, which is
+ *  cheap whatever is sent. Nothing is serialised to be measured: a message of the right shape is at most a few hundred bytes. */
+export function frameFilter(clock: () => number = () => Date.now(), onFlood: () => void = () => {}) {
   const counts = noCounts();
   const allow = rateLimiter();
   return {
     counts,
-    take(data: unknown): Inbound | undefined {
-      const size = sizeOf(data);
-      if (size === undefined || size > MAX_MESSAGE_BYTES) { counts.size++; return undefined; }
-      const m = parseInbound(data);
-      if (!m) { counts.type++; return undefined; }
-      if (!allow(clock())) { counts.rate++; return undefined; }
-      return m;
+    /** Whether STOP_AFTER of the frame's messages were ignored (its host stops it then). */
+    get flooding() { return counts.rate + counts.type + counts.size >= STOP_AFTER; },
+    /** `read` gives the message's data. It is called only after the rate allows the message: a browser copies a message's data out
+     *  only when it is read, so a message over the rate costs the window nothing. */
+    take(read: () => unknown): Inbound | undefined {
+      const ignore = (why: DropReason) => { counts[why]++; if (counts.rate + counts.type + counts.size === STOP_AFTER) onFlood(); return undefined; };
+      if (!allow(clock())) return ignore('rate');
+      const m = classify(read());
+      return typeof m === 'string' ? ignore(m) : m;
     },
   };
 }
@@ -118,7 +147,7 @@ export function messageRouter() {
     receive(e: { source: unknown; data: unknown }): boolean {
       const f = e.source ? frames.get(e.source) : undefined;
       if (!f) { strays.count++; return false; }
-      const m = f.filter.take(e.data);
+      const m = f.filter.take(() => e.data);
       if (!m) return false;
       f.on(m);
       return true;

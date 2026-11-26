@@ -17,4 +17,4 @@ export const FRAME_PATH = 'plugin-frame.html';
 export const frameUrl = (base = '/') => `${base.endsWith('/') ? base : `${base}/`}${FRAME_PATH}`;
 
 /** The header policy the hub sends with the frame page (`crates/agora-hub/src/web.rs` `PLUGIN_FRAME_CSP`; a test holds them equal). */
-export const FRAME_POLICY = "sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+export const FRAME_POLICY = "sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'; frame-ancestors 'self'";

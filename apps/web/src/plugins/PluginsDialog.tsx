@@ -25,6 +25,7 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
   const { plugins, safe } = usePlugins();
   const [screen, setScreen] = useState<Screen>({ at: 'list' });
   const file = useRef<HTMLInputElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
   const choose = async (f: File | undefined) => {
@@ -47,11 +48,24 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
     <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-surface-0/70 backdrop-blur-sm" />
-        <Dialog.Content aria-labelledby={titleId} aria-describedby={undefined} data-plugins-dialog=""
-          className="fixed left-1/2 top-1/2 z-50 grid max-h-[calc(100dvh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 gap-3 overflow-y-auto rounded-l border border-line bg-surface-1 p-5 shadow-card">
+        {/* The dialog itself takes the focus when it opens, never one of its buttons: the Enter that chose "Plugins" in the palette
+            must not press Remove or Done. */}
+        <Dialog.Content aria-labelledby={titleId} aria-describedby={undefined} data-plugins-dialog="" tabIndex={-1}
+          ref={content} onOpenAutoFocus={(e) => { e.preventDefault(); content.current?.focus(); }}
+          className="fixed left-1/2 top-1/2 z-50 grid outline-none max-h-[calc(100dvh-2rem)] w-[min(32rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 gap-3 overflow-y-auto rounded-l border border-line bg-surface-1 p-5 shadow-card">
           {screen.at === 'list' ? <>
             <Dialog.Title id={titleId} className="m-0 text-base font-semibold normal-case tracking-normal text-ink">{t('plugins-title')}</Dialog.Title>
             <p className="m-0 text-muted">{t(safe ? 'plugins-safe' : 'plugins-intro')}</p>
+            {/* In safe mode no plugin runs; what this browser keeps is listed by name only, to be removed. */}
+            {safe && pluginStore.kept().length > 0 && <ul className="m-0 grid list-none gap-2 p-0">
+              {pluginStore.kept().map((k) => (
+                <li key={k.id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-m border border-line p-3" data-plugin-row={k.id}>
+                  <span className="min-w-0 flex-1 truncate font-medium text-ink">{k.name}</span>
+                  <span className="text-xs text-muted">{k.version}</span>
+                  <Button size="sm" variant="danger-ghost" onClick={() => pluginStore.remove(k.id)}>{t('plugin-remove')}</Button>
+                </li>
+              ))}
+            </ul>}
             {plugins.length > 0 && <ul className="m-0 grid list-none gap-2 p-0">
               {plugins.map((p) => {
                 const m = p.plugin.manifest;

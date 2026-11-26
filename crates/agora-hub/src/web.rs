@@ -616,11 +616,11 @@ const APP_CSP: &str = "default-src 'self'; connect-src 'self' ws: wss:; style-sr
                        frame-src 'self'; frame-ancestors 'none'";
 
 /// The plugin frame page's own policy: opaque even when opened on its own (`sandbox allow-scripts`), the window's loader and the
-/// blobs it makes inside the frame, no network at all (WebSocket included), no frames, forms or base, and framed only by this hub's
-/// own pages. `apps/web/src/plugins/panel.test.tsx` holds `frameDoc.ts` `FRAME_POLICY` equal to it.
+/// blobs it makes inside the frame, no connection to anywhere (WebSocket included; WebRTC too where the engine enforces `webrtc`,
+/// and the loader takes it away everywhere), no frames, forms or base, and framed only by this hub's own pages. `apps/web/src/plugins/panel.test.tsx` holds `frameDoc.ts` `FRAME_POLICY` equal to it.
 const PLUGIN_FRAME_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; \
                                 style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; \
-                                frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+                                frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'; frame-ancestors 'self'";
 
 /// Which headers an answer carries.
 #[derive(Clone, Copy)]
@@ -780,7 +780,7 @@ mod tests {
     const FRAME_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: SAMEORIGIN\r\nReferrer-Policy: no-referrer\r\n\
         Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; \
         style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; \
-        form-action 'none'; base-uri 'none'; frame-ancestors 'self'\r\nCache-Control: no-cache\r\n";
+        form-action 'none'; base-uri 'none'; webrtc 'block'; frame-ancestors 'self'\r\nCache-Control: no-cache\r\n";
 
     async fn get(path: &str, assets: &dyn Assets) -> String {
         let (mut c, s) = tokio::io::duplex(1 << 16);

@@ -4,6 +4,7 @@
 // from the plugin view (projection.ts): never the built-in panels' context, state or actions.
 import { useEffect, useRef, useState } from 'react';
 import { directionOf, getLanguage, t } from '../i18n';
+import { Button } from '../components/kit';
 import { mergeLines, type ChatLine } from '../net/chat';
 import { themeStore } from '../themes/store';
 import { COLOR_TOKENS } from '../themes/tokens';
@@ -42,12 +43,15 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   const latest = useRef(view);
   latest.current = view;
   const [dropped, setDropped] = useState(0);
+  // A frame that floods the window with messages is taken away (each message costs the window a copy, read or not); the person can
+  // start it again.
+  const [stopped, setStopped] = useState(false);
   const flushNow = useRef<() => void>(() => {});
   const m = plugin.manifest;
   useEffect(() => {
     const win = frame.current?.contentWindow;
     if (!win) return;
-    const filter = frameFilter();
+    const filter = frameFilter(undefined, () => { alive = false; setStopped(true); });
     const watches = new Map<number, Watch>();
     let booted = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -134,13 +138,46 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
       watches.clear();
       flushNow.current = () => {};
     };
-  }, [plugin, panel, granted, m]);
+  }, [plugin, panel, granted, m, stopped]);
 
   // Every new view (the window's state moved) is compared with what each watch last sent.
   useEffect(() => { flushNow.current(); });
 
+  // The focus is the person's (ADR-0114 decision 4): the frame is inert, so nothing in it can take the keyboard, until the person clicks
+  // into it (or presses Enter on it); it is inert again as soon as they click or move the focus anywhere else in the window. So a
+  // plugin can never hold the focus against them, and the safe-mode key always reaches the window once they have clicked outside.
+  const box = useRef<HTMLDivElement>(null);
+  const [active, setActive] = useState(false);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    if (active) frame.current?.focus();
+    const away = (e: Event) => { if (activeRef.current && !(e.target instanceof Node && box.current?.contains(e.target))) setActive(false); };
+    // Focus that reaches the frame while it is not in use (it cannot, while inert; this is the guard) goes back to the window.
+    const blur = () => setTimeout(() => { if (!activeRef.current && document.activeElement === frame.current) { frame.current?.blur(); window.focus(); } }, 0);
+    window.addEventListener('pointerdown', away, true);
+    window.addEventListener('focusin', away, true);
+    window.addEventListener('blur', blur);
+    return () => { window.removeEventListener('pointerdown', away, true); window.removeEventListener('focusin', away, true); window.removeEventListener('blur', blur); };
+  }, [active]);
+
+  if (stopped) {
+    return (
+      <div className="grid min-h-0 flex-1 place-items-center p-4 text-center" data-plugin-stopped="">
+        <div className="grid justify-items-center gap-2">
+          <p className="m-0 text-muted">{t('plugin-stopped', { name: panel.name ?? m.name })}</p>
+          <Button size="sm" onClick={() => { setDropped(0); setStopped(false); }}>{t('plugin-restart')}</Button>
+        </div>
+      </div>
+    );
+  }
   return (
-    <iframe ref={frame} src={frameUrl(import.meta.env.BASE_URL)} sandbox={FRAME_SANDBOX} referrerPolicy="no-referrer" title={t('plugin-frame-title', { name: panel.name ?? m.name })}
-      className="block min-h-0 w-full flex-1 border-0 bg-transparent" data-plugin-frame={m.id} data-plugin-dev={dev ? '' : undefined} data-dropped={dropped} />
+    <div ref={box} className="flex min-h-0 w-full flex-1 flex-col outline-none" data-plugin-box="" data-active={active ? '' : undefined}
+      tabIndex={active ? -1 : 0} aria-label={active ? undefined : t('plugin-frame-use', { name: panel.name ?? m.name })}
+      onPointerDown={() => { if (!active) setActive(true); }}
+      onKeyDown={(e) => { if (!active && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setActive(true); } }}>
+      <iframe ref={frame} src={frameUrl(import.meta.env.BASE_URL)} sandbox={FRAME_SANDBOX} referrerPolicy="no-referrer" title={t('plugin-frame-title', { name: panel.name ?? m.name })}
+        inert={!active} className="block min-h-0 w-full flex-1 border-0 bg-transparent" data-plugin-frame={m.id} data-plugin-dev={dev ? '' : undefined} data-dropped={dropped} />
+    </div>
   );
 }

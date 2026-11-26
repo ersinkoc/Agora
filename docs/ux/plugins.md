@@ -16,7 +16,8 @@ pane's chooser under the plugin's own name, and kept in layouts by its id `plugi
 - **It draws only inside its pane**, in a sandboxed frame. It opens no overlays, dialogs or notifications.
 - **It reads, never acts.** It can see what the person allowed (below) and nothing else. It cannot answer a request, send a prompt,
   start, stop or type into anything, change a setting, a theme or another plugin, or sign anything, in any rung.
-- **It has no network.** No fetch, no WebSocket, no image, font or page from anywhere. Everything it runs is in its package.
+- **It connects to nothing.** No fetch, WebSocket, WebRTC, image, font or page from any other origin. Towards the hub it can only make
+  credential-less GET requests for the hub's own paths, whose answers it cannot read. Everything it runs is in its package.
 - **The window names it.** The pane bar (and the tab, in a tab group) shows the plugin's name as plain text and the **Plugin** marker,
   with **development** for a plugin loaded from a file. The marker is the window's own and is in the theme floor (ADR-0113): no theme
   restyles it and the plugin cannot reach it.
@@ -83,13 +84,19 @@ Its page is one the hub serves beside the window's files, `/plugin-frame.html` (
 
 ```
 Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline';
-  img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'
+  img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block';
+  frame-ancestors 'self'
 X-Frame-Options: SAMEORIGIN
 ```
 
 - **Opaque on its own too:** the `sandbox` directive gives the page an opaque origin even when it is opened directly, outside any
   window, and the loader does nothing there.
-- **No network at all:** `connect-src 'none'`, WebSocket included; no images, fonts or pages from anywhere.
+- **No connections:** `connect-src 'none'`, WebSocket included; no images, fonts or pages from another origin. WebRTC is the one way
+  out a page policy does not close in every engine (`connect-src` does not cover it, and Chromium does not enforce `webrtc 'block'`):
+  the loader takes every `RTC…` constructor away, for good (not writable, not configurable), before the plugin's code runs. A frame the
+  plugin makes has an opaque origin of its own, so the plugin cannot reach a fresh constructor through it, and no plugin script runs in
+  it (no inline code, and a blob made in the plugin's frame does not load there). `'self'` lets the frame ask the hub for its own paths
+  (a script, a stylesheet, its frame going to a hub page) without cookies, and it cannot read the answers.
 - **Framed only by the hub's own pages:** `frame-ancestors 'self'` and `SAMEORIGIN`.
 - **The window's policy is not loosened.** It gains only `frame-src 'self'`; every other path of the hub keeps its headers exactly
   (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so the frame page is the only page that can be framed. A frame can navigate itself
@@ -117,9 +124,14 @@ A small set over `postMessage`, version 1 (`plugins/protocol.ts`). Every message
 | window | `result` | `id`, `ok`, `data` or `error` | `error`: `not-granted`, `unknown-capability`, `unavailable`, `too-many` |
 | window | `update` | `id`, `data` | |
 
-The window takes a message only from one of its own frames (by `event.source`: an opaque frame's origin is `"null"`), only of a known
-type with exactly its fields, at most 4,096 bytes as JSON, and at most 20 a second per frame (a burst of 40). Anything else is ignored
-and counted; a message from no frame of the window is counted as a stray. The frame element carries its count (`data-dropped`).
+The window takes a message only from one of its own frames (by `event.source`: an opaque frame's origin is `"null"`). The frame's rate
+comes first, at most 20 a second (a burst of 40): a message over it is not even read (a browser copies a message's data out only when
+it is read). Then only a plain object is looked at, of a known type with exactly its fields (the scan stops past four) and a capability
+name of at most 64 characters; a typed array, a Map or anything else is refused without being serialised or walked. Anything else is
+ignored and counted; a message from no frame of the window is counted as a stray. The frame element carries its count
+(`data-dropped`). A frame whose messages are ignored 20 times is **stopped**: every message costs the window a copy, read or not, and the
+window's loader never sends one that is ignored, so only a broken or hostile plugin gets there. The pane says so, with **Start it
+again**.
 
 In the frame the loader gives the plugin `agora`: `agora.read(cap)` (a Promise, rejected with an `Error` whose message is the code),
 `agora.watch(cap, onData, onError)` (returns a function that stops it), `agora.file(name)`, `agora.granted`, `agora.plugin`,
@@ -160,8 +172,16 @@ change cannot bring a stored theme back either, and a choice made in safe mode h
 with **Leave safe mode**.
 
 The key is heard by the window first, in the capture phase, before any handler of the page's own; no plugin, theme or keybinding can
-change it. A key pressed while a plugin's frame has the focus goes to the frame, not the window: click outside the frame first, or use
-the address.
+change it. **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
+app, which shows no address.
+
+**The focus is the person's.** A plugin's frame is `inert` until the person clicks into it (or presses Enter on it), and inert again as
+soon as they click or move the focus anywhere else in the window; focus that reaches a frame not in use is sent back to the window. So a
+plugin can never take the keyboard by itself or keep it: while the person is using the frame, a key goes to the frame (as any key does
+in a frame), and one click outside it hands the keyboard, and the safe-mode key, back to the window.
+
+In safe mode **Plugins** lists the plugins this browser keeps by their names only (nothing is checked or run) and **Remove** forgets
+one, so a plugin that misbehaves can be taken out without running it.
 
 ## Development loading
 
@@ -188,8 +208,11 @@ runs.
 - Hub (`web.rs`): the exact headers of each path; only `/plugin-frame.html` has the frame page's.
 - Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's headers per path, read from `web.rs` by
   `scripts/hub-headers.mjs`): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
-  and the frame going to a blob page it made, judged by the servers' request logs; the frame page opened on its own is opaque and
-  reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
+  and the frame going to a blob page it made, judged by the servers' request logs; WebRTC to a STUN and a TURN server reaches neither
+  (judged by a UDP and a TCP listener), the `RTC…` constructors are gone for good and no frame the plugin makes hands one back; four
+  16 MB arrays are refused without stalling the window and a flood stops the frame; a plugin taking the focus cannot keep it, and the
+  pane's menu opens safe mode, whose plugins dialog removes a kept plugin; the marker stays whole in a narrow pane; the frame page
+  opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
   package loads through the dialog.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).

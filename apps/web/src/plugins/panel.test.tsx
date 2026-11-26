@@ -93,6 +93,32 @@ describe('a plugin panel in the window', () => {
     for (const flag of ['allow-same-origin', 'allow-forms', 'allow-popups', 'allow-modals', 'allow-top-navigation', 'allow-downloads']) expect(src.includes(`"${flag}`) || src.includes(`'${flag}`), flag).toBe(false);
   });
 
+  it('keeps the frame inert until the person clicks into it, and inert again once they click elsewhere', async () => {
+    const reg = withPlugins(BUILTIN_REGISTRY, [await loaded('Demo')]);
+    draw(ws({ type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [pane('p1', 'plugin.demo.main'), pane('p2', 'usage')] }), reg);
+    const frame = () => host.querySelector('iframe') as HTMLIFrameElement;
+    const box = host.querySelector('[data-plugin-box]') as HTMLElement;
+    expect(frame().hasAttribute('inert')).toBe(true);
+    expect(box.getAttribute('aria-label')).toBe('Demo (plugin): click or press Enter to use it');
+    act(() => { box.dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+    expect(frame().hasAttribute('inert')).toBe(false);
+    act(() => { (host.querySelector('[data-pane="p2"]') as HTMLElement).dispatchEvent(new Event('pointerdown', { bubbles: true })); });
+    expect(frame().hasAttribute('inert')).toBe(true);
+    // Enter on the frame's box is the keyboard's way in.
+    act(() => { box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(frame().hasAttribute('inert')).toBe(false);
+  });
+
+  it('offers safe mode in a plugin pane\'s menu', async () => {
+    const reg = withPlugins(BUILTIN_REGISTRY, [await loaded('Demo')]);
+    draw(ws({ type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [pane('p1', 'plugin.demo.main'), pane('p2', 'usage')] }), reg);
+    const menus = [...host.querySelectorAll('button[aria-haspopup]')] as HTMLButtonElement[];
+    act(() => { menus[0]?.click(); });
+    const items = [...document.querySelectorAll('[role=menuitem]')].map((x) => x.textContent);
+    expect(items).toContain('Open in safe mode');
+    act(() => { (document.activeElement as HTMLElement | null)?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  });
+
   it('shows the placeholder for a plugin panel this window does not have, and never replaces a built-in', async () => {
     draw(ws({ type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [pane('p1', 'plugin.gone.main'), pane('p2', 'usage')] }), BUILTIN_REGISTRY);
     expect(host.querySelector('[data-pane="p1"]')?.textContent).toContain('plugin.gone.main');
@@ -165,7 +191,8 @@ describe('safe mode', () => {
 
   it('keeps the stored theme and plugins out: neither store reads storage in safe mode', () => {
     expect(readFileSync(join(__dirname, '../themes/store.ts'), 'utf8')).toContain('kv: SAFE ? undefined : storage(),');
-    expect(readFileSync(join(__dirname, 'store.ts'), 'utf8')).toContain('createPluginStore({ kv: SAFE ? undefined : storage(), version: AGORA_VERSION, safe: SAFE })');
+    // The plugin store keeps its storage only to list and remove what is kept (grants.test.ts: nothing is checked or shown).
+    expect(readFileSync(join(__dirname, 'store.ts'), 'utf8')).toContain('createPluginStore({ kv: storage(), version: AGORA_VERSION, safe: SAFE })');
     // The key is listened for before the theme and the plugins start.
     const main = readFileSync(join(__dirname, '../main.tsx'), 'utf8');
     expect(main.indexOf('installSafeKey();')).toBeLessThan(main.indexOf('initTheme();'));

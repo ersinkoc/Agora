@@ -96,6 +96,27 @@ describe('the development store', () => {
     expect(read).toBe(false);
   });
 
+  it('lists what is kept by name in safe mode, and removes it there, without checking or showing anything', async () => {
+    const { m, kv } = memory();
+    const s0 = createPluginStore({ kv, version: '0.3.39' });
+    for (const id of ['p1', 'p2']) {
+      const files = { 'panel.js': `${ENTRY}//${id}` };
+      const text = new TextDecoder().decode(bundle(files, { manifest: baseManifest(files, { id, name: `Plugin ${id}` }) }));
+      const r = await checkPackage(new TextEncoder().encode(text), '0.3.39');
+      if (r.ok) s0.install(r.plugin, text, ['agents.read']);
+    }
+    const safe = createPluginStore({ kv, version: '0.3.39', safe: true });
+    await safe.start();
+    expect(safe.state().plugins).toEqual([]);
+    expect(safe.kept()).toEqual([{ id: 'p1', name: 'Plugin p1', version: '1.0.0' }, { id: 'p2', name: 'Plugin p2', version: '1.0.0' }]);
+    safe.remove('p1');
+    expect(safe.kept().map((k) => k.id)).toEqual(['p2']);
+    expect(Object.keys(JSON.parse(m.get(GRANTS_KEY) ?? '{}'))).toEqual(['p2']);
+    const after = createPluginStore({ kv, version: '0.3.39' });
+    await after.start();
+    expect(after.state().plugins.map((p) => p.plugin.manifest.id)).toEqual(['p2']);
+  });
+
   it('loads nothing in safe mode', async () => {
     const { kv } = memory();
     const s0 = createPluginStore({ kv, version: '0.3.39' });

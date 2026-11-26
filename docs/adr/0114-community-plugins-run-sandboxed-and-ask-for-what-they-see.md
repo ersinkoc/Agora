@@ -60,9 +60,13 @@ The maintainer wants community plugins next to community themes, "like herdr".
    - **The frame's page (Amendment A):** one page the hub serves beside the window's files (`/plugin-frame.html`), under a
      header policy of its own, never a page the window makes:
      - `sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob:
-       data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'`,
-       with `X-Frame-Options: SAMEORIGIN`.
-     - The `sandbox` directive keeps the page opaque even when it is opened on its own. No network at all, including WebSocket.
+       data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block';
+       frame-ancestors 'self'`, with `X-Frame-Options: SAMEORIGIN`.
+     - The `sandbox` directive keeps the page opaque even when it is opened on its own.
+     - No connection to any other origin: no fetch, WebSocket, image, font or page from anywhere else, and no WebRTC (the loader takes
+       its constructors away before the plugin runs, as not every engine enforces `webrtc 'block'`). Towards the hub itself it can
+       only make credential-less GET requests for the hub's own paths (a script, a stylesheet, its own frame going to a hub page),
+       whose answers it cannot read.
      - It runs only the window's loader (`/plugin-frame.js`).
    - **Loading:** the frame is built from the plugin's checked files (decision 5). The window sends the bytes to its own frame by
      message; the loader makes every file a blob inside the frame's opaque origin and runs the entry. Nothing is loaded from a
@@ -207,7 +211,7 @@ Decision 2 is worded with it.
 **Decided.**
 
 1. **The frame's page is served by the hub** at `/plugin-frame.html`, from the web app's files, with headers of its own: the policy in
-   decision 2 (with `sandbox allow-scripts`, so the page is opaque even on its own, and `frame-ancestors 'self'`) and
+   decision 2 (with `sandbox allow-scripts`, so the page is opaque even on its own, `webrtc 'block'` and `frame-ancestors 'self'`) and
    `X-Frame-Options: SAMEORIGIN`. A page from the network keeps only its own policy, so the window's does not stack on it.
 2. **The window's loader** (`/plugin-frame.js`) is the one script of that page. The window sends the plugin's checked files to that
    frame only, by message; the loader makes them into blobs inside the frame's opaque origin and runs the entry.
@@ -216,7 +220,8 @@ Decision 2 is worded with it.
    framed, and only by the hub's own pages. `web.rs` tests the headers of each path.
 
 **What it costs.** `script-src 'self'` in the frame page also allows the hub's other scripts there; they run in the frame's opaque
-origin with no network, like the plugin. A frame can navigate itself only to the hub's own pages (`frame-src 'self'`), which refuse to
+origin with no connections, like the plugin. `'self'` in `script-src` and `style-src`, and `frame-src 'self'` in the window, let the
+frame make credential-less GET requests for the hub's own paths, whose answers it cannot read. A frame can navigate itself only to the hub's own pages (`frame-src 'self'`), which refuse to
 be framed. The frame page is one more file the hub serves with headers of its own.
 
 **Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's headers per path (read from

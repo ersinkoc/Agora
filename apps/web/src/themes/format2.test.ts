@@ -444,7 +444,7 @@ describe('the floor in the stylesheet (review of #1206)', () => {
     const mark = /\.plugin-mark \{([^}]*)\}/.exec(css)?.[1] ?? '';
     expect(mark).toMatch(/background: var\(--surface-2\)/);
     expect(mark).not.toMatch(/--(cards|buttons|inputs|accent|state)-/);
-    expect(readFileSync('src/layout/Workspace.tsx', 'utf8')).toMatch(/<span className="plugin-mark" data-plugin-mark="">/);
+    expect(readFileSync("src/layout/Workspace.tsx", "utf8")).toMatch(/<span className="plugin-mark" data-plugin-mark="" title=/);
   });
 
   it('puts one state mark in a tab menu row, not one inside another', () => {

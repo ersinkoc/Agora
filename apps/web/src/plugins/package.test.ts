@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { setLanguage } from '../i18n';
 import { CAPABILITIES } from './capabilities';
-import { MAX_PACKAGE_BYTES, checkPackage, compareVersions, isPlainName } from './package';
+import { MAX_PACKAGE_BYTES, checkPackage, compareVersions, isPlainName, typeOf } from './package';
 import { packageErrorText } from './PluginsDialog';
 import { ENTRY, b64, baseManifest, bundle } from './testPackage';
 // @ts-expect-error: a plain script of the repository, without types
@@ -60,6 +60,11 @@ describe('a plugin package', () => {
     expect(await code(new TextEncoder().encode(JSON.stringify({ 'agora-plugin-bundle': 2, files: {} })))).toBe('newer-format');
     expect(await code(bundle(undefined, { top: { run: 'x' } }))).toBe('format');
     expect(await code(bundle({ 'panel.js': ENTRY, 'tool.exe': 'MZ' }))).toBe('type');
+    // A name whose extension is a property every object inherits is no kind of file either.
+    for (const name of ['a.constructor', 'a.__proto__', 'a.toString', 'a.hasOwnProperty', 'a.valueOf']) {
+      expect(typeOf(name), name).toBeUndefined();
+      expect(await code(bundle({ 'panel.js': ENTRY }, { extraFiles: { [name]: b64('x') } })), name).toMatch(/^(type|path)$/);
+    }
     expect(await code(bundle({ 'panel.js': ENTRY }, { extraFiles: { 'agora-plugin.json': 'not base64!' } }))).toBe('format');
   });
 

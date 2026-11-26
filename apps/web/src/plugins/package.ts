@@ -47,7 +47,10 @@ const TYPES: Record<string, string> = {
 };
 export const typeOf = (name: string): string | undefined => {
   const dot = name.lastIndexOf('.');
-  return dot > 0 ? TYPES[name.slice(dot + 1).toLowerCase()] : undefined;
+  if (dot <= 0) return undefined;
+  const ext = name.slice(dot + 1).toLowerCase();
+  // The table's own entries only: `a.constructor` or `a.__proto__` names nothing a plugin may hold.
+  return Object.prototype.hasOwnProperty.call(TYPES, ext) ? TYPES[ext] : undefined;
 };
 
 // A file name and nothing more: no folder, no "..", no drive, no leading dot, nothing a path could hide behind.
