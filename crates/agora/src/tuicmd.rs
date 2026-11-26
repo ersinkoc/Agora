@@ -4014,8 +4014,8 @@ fn console(
             Notice::Same => {}
         }
         // M6.7: an agent on screen is seen (its finished mark goes), and an alert that waited for the end of the gap is given if it
-        // still holds.
-        if !c.app.finished_unseen.is_empty() {
+        // still holds. What is on screen changes only with something to draw, so it is looked at only then.
+        if redraw && !c.app.finished_unseen.is_empty() {
             let on_screen = c.app.on_screen(area);
             let before = c.app.finished_unseen.len();
             c.app.finished_unseen.retain(|id| !on_screen.contains(id));
@@ -4288,17 +4288,22 @@ fn draw_console(
         .map(|(a, p)| (a, p.screen()))
         .chain(preview.map(|p| (p.agent.as_str(), p.screen())))
         .collect();
-    let (mut details, card) = c
+    let mut details = c
         .snapshot
         .as_ref()
-        .map(|s| {
-            let d = inspector_details(c, s, area, &text);
-            (d.lines, d.start.is_some())
-        })
+        .map(|s| inspector_details(c, s, area, &text).lines)
         .unwrap_or_default();
-    // M6.7: the finished mark in words, under the selected agent's name (a check alone says little without colours); never inside a
-    // start request's card, which is counted as read only when shown whole.
-    if !card && c.app.finished_unseen.contains(&c.selected) {
+    // M6.7: the finished mark in words, under the selected agent's name (a check alone says little without colours). Only when the
+    // inspector shows no request: a request there is judged in view from the lines `inspector_details` gives, so nothing may push it.
+    let shows_request = c.snapshot.as_ref().is_some_and(|s| {
+        displayed_request(
+            s,
+            &c.selected,
+            c.app.focus == agora_tui::app::Focus::Terminal,
+        )
+        .is_some()
+    });
+    if !shows_request && c.app.finished_unseen.contains(&c.selected) {
         details.insert(
             details.len().min(1),
             say.text(key!("tui-finished-unseen"), &[]),

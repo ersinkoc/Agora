@@ -2468,13 +2468,13 @@ pub fn attention_style(colors: ColorMode) -> Style {
     }
 }
 
-/// M6.7: the finished mark's colour: the Finished green (the theme's own green for its pane under a theme, the terminal's green
-/// otherwise), the check alone without colour (plain, where "needs you" is bold); never the attention style, so it cannot be read as
+/// M6.7: the finished mark's colour: the Finished green (the theme's `state-finished`, readable on its agents list, under a theme;
+/// the terminal's green otherwise), the check alone without colour (plain, where "needs you" is bold); never the attention style, so it cannot be read as
 /// "needs you".
 pub fn finished_style(colors: ColorMode, look: Option<&crate::theme::map::Shell>) -> Style {
     match (colors, look) {
         (ColorMode::Mono, _) => Style::default(),
-        (_, Some(l)) => Style::default().fg(l.styles.pane.ansi[2]),
+        (_, Some(l)) => Style::default().fg(l.styles.finished),
         _ => Style::default().fg(Color::Green),
     }
 }
@@ -5967,7 +5967,7 @@ mod theme_tests {
         }
     }
 
-    /// M6.7: the finished mark is the Finished green (the terminal's own without a theme, the theme's pane green under one), plain in
+    /// M6.7: the finished mark is the Finished green (the terminal's own without a theme, the theme's `state-finished` under one), plain in
     /// monochrome, never the attention style; on the selected row under a theme it takes the row's own colours.
     #[test]
     fn the_finished_mark_is_green_and_never_the_attention_colour() {
@@ -6274,6 +6274,37 @@ mod layout_tests {
     }
 
     /// ADR-0068 decision 7: only the panes on screen are watched.
+    /// M6.7: on screen, for the finished mark, is every agent drawn in a visible pane of a tiled layout (a chat agent's too, which has
+    /// no terminal to watch) and the agent in focus; never a tab behind another, a pane hidden by a maximized one, or another panel.
+    #[test]
+    fn on_screen_in_a_tiled_layout_is_every_visible_agent() {
+        let rows = rows(5);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        // agent-5 is a tab behind agent-4.
+        assert_eq!(
+            sorted(app.on_screen(AREA)),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-4"]
+        );
+        // Maximized: the one in focus.
+        let focus = app.active_agent().map(str::to_string).unwrap_or_default();
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(app.on_screen(AREA), [focus]);
+        key(&mut app, &rows, Key::Char('z'));
+        // A pane of another panel shows no agent.
+        let first = pane_ids(&app)[0].clone();
+        app.layout_act(layout_engine::Action::Bind {
+            pane: first,
+            bind: None,
+            panel: Some("approvals".into()),
+        });
+        assert!(!app.on_screen(AREA).contains(&"mac/agent-1".to_string()));
+    }
+
     #[test]
     fn only_the_panes_on_screen_are_watched() {
         let rows = rows(5);

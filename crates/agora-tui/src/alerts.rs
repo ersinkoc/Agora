@@ -204,9 +204,9 @@ pub fn next_unseen(
 pub enum Desktop {
     #[default]
     Off,
-    /// `OSC 9 ; text`: iTerm2, Windows Terminal, WezTerm, Ghostty, kitty and others.
+    /// `OSC 9 ; text`, in the terminals that implement it (iTerm2, WezTerm and Ghostty among them).
     Osc9,
-    /// `OSC 777 ; notify ; title ; text`: foot, rxvt-unicode, VTE-based terminals, WezTerm, Ghostty.
+    /// `OSC 777 ; notify ; title ; text`, in the terminals that implement it (foot, WezTerm and Ghostty among them).
     Osc777,
 }
 

@@ -12,8 +12,8 @@ use super::colour::{contrast, over, Rgb};
 use super::file::{region_colour, terminal_colour, SELECTION_ALPHA};
 use super::{
     Look, Scheme, Theme, ACCENT, BORDER, C_DENSITY, C_LINE_WIDTH, C_PANE_BORDERS, C_PANE_GAP,
-    ON_ACCENT, PART_LINE, PART_SURFACE, PART_TEXT, SIDEBAR, STATUS_LINE, SURFACE_0, SURFACE_1,
-    TAB_BAR, TEXT, TEXT_MUTED, T_ANSI, T_BACKGROUND, T_FOREGROUND, T_SELECTION,
+    ON_ACCENT, PART_LINE, PART_SURFACE, PART_TEXT, SIDEBAR, STATES, STATUS_LINE, SURFACE_0,
+    SURFACE_1, TAB_BAR, TEXT, TEXT_MUTED, T_ANSI, T_BACKGROUND, T_FOREGROUND, T_SELECTION,
 };
 use crate::pane::{nearest16, nearest256, xterm_rgb, ColorMode};
 
@@ -128,6 +128,9 @@ pub struct Styles {
     /// Dividers and rules.
     pub line: Style,
     pub pane: PanePalette,
+    /// M6.7: the finished mark in the agents list: the theme's `state-finished` on the list's background (3:1 at least where the
+    /// terminal's palette is mapped).
+    pub finished: Color,
 }
 
 /// A theme as the app shell draws it: the styles and the chrome.
@@ -237,6 +240,7 @@ pub fn styles(look: &Look, scheme: Scheme, mode: ColorMode) -> Styles {
     let (accent, accent_shown) = background(c[ACCENT], mode);
     let (_, base_shown) = background(c[SURFACE_0], mode);
     let line_colour = look.regions[SIDEBAR][PART_LINE].unwrap_or(c[BORDER]);
+    let (_, tree_shown) = background(region_colour(look, scheme, SIDEBAR, PART_SURFACE), mode);
     Styles {
         base,
         tree: region(look, scheme, SIDEBAR, mode),
@@ -253,6 +257,8 @@ pub fn styles(look: &Look, scheme: Scheme, mode: ColorMode) -> Styles {
             .bg(base.fill.bg.unwrap_or(Color::Reset))
             .fg(foreground(line_colour, base_shown, LINE_MIN, mode)),
         pane: pane_palette(look, scheme, mode),
+        // `state-finished` is the third of the five state colours.
+        finished: foreground(c[STATES[2]], tree_shown, ANSI_MIN, mode),
     }
 }
 
@@ -375,6 +381,12 @@ mod tests {
             shown(s.pane.fg, mode),
             shown(s.pane.bg, mode),
             TEXT_MIN,
+        ));
+        out.push((
+            "finished mark",
+            shown(s.finished, mode),
+            shown(s.tree.fill.bg.unwrap(), mode),
+            ANSI_MIN,
         ));
         out
     }

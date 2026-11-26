@@ -207,9 +207,9 @@ sign: everything it says is on screen too.
   `!` says), once until it leaves the list; the first look (the client just started) is taken as it is, and a machine asking to join
   has no alert. What differs, since a terminal is not a browser:
   - the alert is the terminal's own **bell** (BEL), **on by default** (the person's terminal already decides how a bell sounds or
-    whether it flashes); and, **off by default**, a **desktop notification** asked of the terminal: `OSC 9` (iTerm2, Windows Terminal,
-    WezTerm, Ghostty, kitty…) or `OSC 777 ; notify` (foot, rxvt-unicode, VTE terminals…), only one of the two, so a terminal that knows
-    both shows one. Its title is the product name and its text a fixed phrase in the person's language ("claude · amber finished",
+    whether it flashes); and, **off by default**, a **desktop notification** asked of the terminal: `OSC 9` (in the terminals that
+    implement it, iTerm2, WezTerm and Ghostty among them) or `OSC 777 ; notify` (foot, WezTerm and Ghostty among them), only one of the
+    two, so a terminal that knows both shows one; a terminal that knows neither ignores it. Its title is the product name and its text a fixed phrase in the person's language ("claude · amber finished",
     "… needs you") with the agent's name made safe: no control, bidirectional or invisible character and no `;`, at most 40
     characters. Nothing at all is written when the client's output is not a terminal. Inside tmux or screen a notification needs their
     pass-through; the bell works as it always does there;
@@ -218,8 +218,8 @@ sign: everything it says is on screen too.
   - at most one alert every **2 seconds** (a bell or a notification is louder than the web's soft notes), the most urgent of a burst
     (needs you before finished); one that waited is given only if it still holds and its agent is not in focus by then;
   - no volume, per-sound switch, per-agent mute or safe mode here.
-  The **finished mark** is a green `✓` in the marker place of the agent's row in the list (before its name, where `!` and `•` go; plain
-  without colours, never the attention colour), and the inspector says "Finished while you were away. Open it to clear this mark."
+  The **finished mark** is a green `✓` in the marker place of the agent's row in the list (before its name, where `!` and `•` go; the
+  theme's Finished colour under a theme, checked to read on its list; plain without colours; never the attention colour), and the inspector says "Finished while you were away. Open it to clear this mark."
   It goes when the agent is on screen (its tab in front, or a visible pane of a tiled layout), works again or waits on you, or leaves
   the list; it is kept in memory only. **Settings** are in `tui-settings` in the Agora folder (`$AGORA_HOME/tui-settings`, else
   `~/.agora/tui-settings`, beside `tui-theme`), one `name = value` a line, `#` for a comment: `sound = on|off` (default `on`) and
