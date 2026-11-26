@@ -407,6 +407,106 @@ fn spawn_detached_with(
     result
 }
 
+/// One process of a Toolhelp snapshot, as ADR-0094's lookup needs it: its id, its parent's id and its image name in lower case without
+/// `.exe`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entry {
+    pid: u32,
+    parent: u32,
+    name: Box<str>,
+}
+
+/// Programs the lookup goes through to the program a person started in them (ADR-0094 Amendment A): shells, and `cmd.exe`, which also
+/// runs a `.cmd` shim.
+const SHELLS: [&str; 5] = ["cmd", "pwsh", "powershell", "sh", "bash"];
+
+/// How deep the lookup follows shells started in shells.
+const MAX_SHELL_DEPTH: usize = 8;
+
+/// How long one snapshot answers every terminal's lookup: the node asks for each watched or busy shell once per 2 s tick, and one
+/// snapshot of the machine costs 15 to 30 ms (ADR-0094 Amendment A), so the shells of one tick share it.
+const SHARE_SNAPSHOT_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// ADR-0094 Amendment A: the program in front of the pseudoconsole whose shell is `shell`. That is the shell's newest direct child (by
+/// creation time, and created after the shell, so a reused parent id is not followed), followed down while that child is itself a
+/// shell. `shell` itself when nothing runs in it. Windows has no foreground group: a program started in the background is a child too.
+/// Image names only; arguments are never read.
+pub(crate) fn foreground(shell: u32) -> io::Result<u32> {
+    let tree = shared_snapshot()?;
+    Ok(front_of(&tree, shell, &start_time))
+}
+
+/// The rule of [`foreground`] on a given tree; `born` gives a process's creation time, `None` once it has ended.
+fn front_of(tree: &[Entry], shell: u32, born: &dyn Fn(u32) -> Option<u64>) -> u32 {
+    let mut at = shell;
+    let mut at_born = born(shell);
+    for _ in 0..MAX_SHELL_DEPTH {
+        let newest = tree
+            .iter()
+            .filter(|e| e.parent == at && e.pid != at)
+            .filter_map(|e| born(e.pid).map(|b| (b, e)))
+            .filter(|(b, _)| started_after(at_born, Some(*b)))
+            .max_by_key(|(b, e)| (*b, e.pid));
+        let Some((b, child)) = newest else {
+            return at;
+        };
+        if !SHELLS.contains(&&*child.name) {
+            return child.pid;
+        }
+        at = child.pid;
+        at_born = Some(b);
+    }
+    at
+}
+
+/// A Toolhelp snapshot of the machine, taken at most once per [`SHARE_SNAPSHOT_FOR`] and shared by every caller meanwhile.
+fn shared_snapshot() -> io::Result<std::sync::Arc<[Entry]>> {
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    static SHARED: Mutex<Option<(Instant, Arc<[Entry]>)>> = Mutex::new(None);
+    // Held while a new snapshot is taken, so callers of one tick wait for that one instead of taking their own.
+    let mut shared = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, tree)) = shared.as_ref() {
+        if at.elapsed() < SHARE_SNAPSHOT_FOR {
+            return Ok(Arc::clone(tree));
+        }
+    }
+    let tree: Arc<[Entry]> = snapshot()?.into();
+    *shared = Some((Instant::now(), Arc::clone(&tree)));
+    Ok(tree)
+}
+
+fn snapshot() -> io::Result<Vec<Entry>> {
+    // SAFETY: plain call.
+    let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snap == INVALID_HANDLE_VALUE {
+        return Err(last_error());
+    }
+    let snap = Process(snap);
+    // SAFETY: an all-zero entry with its size set is the documented starting state.
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut out = Vec::with_capacity(1024);
+    // SAFETY: a live snapshot and an entry with its size set.
+    let mut more = unsafe { Process32FirstW(snap.0, &mut entry) } != 0;
+    while more {
+        let file = &entry.szExeFile;
+        let len = file.iter().position(|&c| c == 0).unwrap_or(file.len());
+        let mut name = String::from_utf16_lossy(&file[..len]).to_ascii_lowercase();
+        if name.ends_with(".exe") {
+            name.truncate(name.len() - 4);
+        }
+        out.push(Entry {
+            pid: entry.th32ProcessID,
+            parent: entry.th32ParentProcessID,
+            name: name.into(),
+        });
+        // SAFETY: as above.
+        more = unsafe { Process32NextW(snap.0, &mut entry) } != 0;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -424,6 +524,127 @@ mod tests {
         assert!(started_after(None, Some(1)));
         assert!(started_after(Some(1), None));
         assert!(started_after(None, None));
+    }
+
+    /// A fake tree for ADR-0094's rule: `(pid, parent, name, born)`; a `None` birth is a process that has ended.
+    fn tree(rows: &[(u32, u32, &str, Option<u64>)]) -> (Vec<Entry>, impl Fn(u32) -> Option<u64>) {
+        let entries = rows
+            .iter()
+            .map(|&(pid, parent, name, _)| Entry {
+                pid,
+                parent,
+                name: name.into(),
+            })
+            .collect();
+        let births: std::collections::HashMap<u32, Option<u64>> =
+            rows.iter().map(|&(pid, _, _, b)| (pid, b)).collect();
+        (entries, move |pid| births.get(&pid).copied().flatten())
+    }
+
+    #[test]
+    fn the_shell_is_in_front_when_nothing_runs_in_it() {
+        let (t, born) = tree(&[(10, 1, "cmd", Some(100)), (11, 10, "cmd", None)]);
+        assert_eq!(front_of(&t, 10, &born), 10);
+    }
+
+    /// Amendment A: Claude Code starts helpers below itself; they are newer, but never in front.
+    #[test]
+    fn the_helpers_a_program_starts_never_win() {
+        let (t, born) = tree(&[
+            (10, 1, "cmd", Some(100)),
+            (20, 10, "claude", Some(200)),
+            (21, 20, "conhost", Some(300)),
+            (22, 20, "reg", Some(301)),
+            (23, 20, "git", Some(302)),
+            (24, 23, "conhost", Some(303)),
+        ]);
+        assert_eq!(front_of(&t, 10, &born), 20);
+    }
+
+    /// Codex installed with bun: the shim, then node, then the real binary. The shim is what the shell started, and it is named codex.
+    #[test]
+    fn a_bun_shim_is_the_program_in_front() {
+        let (t, born) = tree(&[
+            (10, 1, "pwsh", Some(100)),
+            (20, 10, "codex", Some(200)),
+            (21, 20, "node", Some(201)),
+            (22, 21, "codex", Some(202)),
+        ]);
+        assert_eq!(front_of(&t, 10, &born), 20);
+    }
+
+    #[test]
+    fn a_shell_started_in_the_shell_is_followed_down() {
+        let (t, born) = tree(&[
+            (10, 1, "cmd", Some(100)),
+            (20, 10, "pwsh", Some(200)),
+            (30, 20, "claude", Some(300)),
+            (31, 30, "conhost", Some(400)),
+        ]);
+        assert_eq!(front_of(&t, 10, &born), 30);
+        // With nothing in the inner shell, the inner shell is in front (no manifest names a shell).
+        let (t, born) = tree(&[(10, 1, "cmd", Some(100)), (20, 10, "pwsh", Some(200))]);
+        assert_eq!(front_of(&t, 10, &born), 20);
+    }
+
+    /// An npm-style `.cmd` shim run from pwsh: cmd.exe is followed, and the program is node, which no manifest names (no mark).
+    #[test]
+    fn a_cmd_shim_ends_at_node() {
+        let (t, born) = tree(&[
+            (10, 1, "pwsh", Some(100)),
+            (20, 10, "cmd", Some(200)),
+            (30, 20, "node", Some(300)),
+        ]);
+        assert_eq!(front_of(&t, 10, &born), 30);
+    }
+
+    /// The newest direct child wins (a program started in the background earlier loses to the one started after it); one that ended,
+    /// and one older than the shell that holds a reused parent id, are not children.
+    #[test]
+    fn only_the_newest_live_child_started_after_the_shell_counts() {
+        let (t, born) = tree(&[
+            (10, 1, "cmd", Some(100)),
+            (20, 10, "codex", Some(200)),
+            (21, 10, "claude", Some(300)),
+            (22, 10, "wstack", None),
+            (23, 10, "old", Some(50)),
+        ]);
+        assert_eq!(front_of(&t, 10, &born), 21);
+        let (t, born) = tree(&[(10, 1, "cmd", Some(100)), (23, 10, "old", Some(50))]);
+        assert_eq!(front_of(&t, 10, &born), 10);
+    }
+
+    #[test]
+    fn a_chain_of_shells_stops_at_the_depth_limit() {
+        let rows: Vec<(u32, u32, &str, Option<u64>)> = (0..20u32)
+            .map(|i| {
+                (
+                    100 + i,
+                    if i == 0 { 1 } else { 99 + i },
+                    "cmd",
+                    Some(u64::from(i)),
+                )
+            })
+            .collect();
+        let (t, born) = tree(&rows);
+        assert_eq!(front_of(&t, 100, &born), 100 + MAX_SHELL_DEPTH as u32);
+    }
+
+    /// Amendment A on a real machine: a snapshot lists this process under its own parent with its name.
+    #[test]
+    fn a_snapshot_lists_this_process_with_its_parent_and_name() {
+        let me = std::process::id();
+        let t = snapshot().unwrap();
+        let mine = t.iter().find(|e| e.pid == me).unwrap();
+        assert_eq!(*mine.name, name(me).unwrap().to_ascii_lowercase());
+        assert_ne!(mine.parent, 0);
+        // Shared: lookups right after one another read one snapshot (a second try covers a window that ended between the first two).
+        let shared = (0..2).any(|_| {
+            let a = shared_snapshot().unwrap();
+            let b = shared_snapshot().unwrap();
+            std::sync::Arc::ptr_eq(&a, &b)
+        });
+        assert!(shared);
     }
 
     #[test]

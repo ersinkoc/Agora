@@ -1,7 +1,8 @@
 //! Windows terminals (ADR-0045): ConPTY. The child runs attached to a pseudo-console fed by two anonymous pipes, inside a job object
 //! that kills the whole process tree when it is closed (the Windows counterpart of the Unix process group).
 //!
-//! There is no foreground process group on Windows, so [`Pty::foreground_pid`] is the child itself.
+//! There is no foreground process group on Windows: [`Pty::foreground_pid`] is the shell's newest direct child, followed down through
+//! shells (ADR-0094 Amendment A, `winproc::foreground`), or the child itself when nothing runs in it.
 
 use std::ffi::{c_void, OsString};
 use std::io;
@@ -313,7 +314,7 @@ impl PtyControlOps for Inner {
     }
 
     fn foreground_pid(&self) -> io::Result<u32> {
-        Ok(self.pid)
+        crate::winproc::foreground(self.pid)
     }
 
     fn pid(&self) -> u32 {
@@ -766,7 +767,7 @@ impl Pty for ConPty {
     }
 
     fn foreground_pid(&self) -> io::Result<u32> {
-        Ok(self.inner.pid)
+        crate::winproc::foreground(self.inner.pid)
     }
 
     fn control(&self) -> io::Result<PtyControl> {
@@ -952,6 +953,40 @@ mod tests {
         control.kill().unwrap();
         assert!(p.wait().unwrap().code.is_some());
         assert!(p.try_wait().unwrap().is_some());
+    }
+
+    /// ADR-0094 Amendment A on a real pseudoconsole: a program typed into the shell is in front (for the `Pty` and its control alike),
+    /// and the shell is again once it ends.
+    #[test]
+    fn a_program_typed_into_the_shell_is_in_front_until_it_ends() {
+        fn front_is(p: &dyn Pty, want: &dyn Fn(u32, &str) -> bool) -> bool {
+            let end = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < end {
+                // Drained, so the console never waits on a full pipe.
+                while p.output().try_recv().is_ok() {}
+                let a = p.foreground_pid().unwrap();
+                let b = p.control().unwrap().foreground_pid().unwrap();
+                let name = crate::winproc::name(a).unwrap_or_default();
+                if a == b && want(a, &name) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            false
+        }
+        let mut p = cmd(&[]);
+        let shell = p.pid();
+        assert!(front_is(&*p, &|pid, _| pid == shell), "the shell first");
+        // About 4 s, long enough to be seen and short enough to end on its own.
+        p.write_input(b"ping -n 5 127.0.0.1\r").unwrap();
+        assert!(
+            front_is(&*p, &|pid, name| pid != shell
+                && name.eq_ignore_ascii_case("ping")),
+            "ping in front"
+        );
+        assert!(front_is(&*p, &|pid, _| pid == shell), "the shell again");
+        p.kill().unwrap();
+        p.wait().unwrap();
     }
 
     #[test]

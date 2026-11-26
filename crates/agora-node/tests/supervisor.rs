@@ -610,19 +610,22 @@ fn terminal_limit_and_disk_usage() {
 
 /// ADR-0094: a program a person starts by hand in a plain terminal is recognised by its foreground program's name (a manifest's
 /// `[process] names`), never by its screen; while it runs its kind's screen rules read the terminal, and when it ends the mark ends.
-/// A renamed program is not recognised. Unix only: a pseudoconsole has no foreground group, so nothing is marked on Windows yet.
+/// A renamed program is not recognised. On Windows the shell is `cmd.exe` and the program in front is its newest direct child
+/// (Amendment A).
 #[test]
 fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() {
-    if std::env::consts::FAMILY != "unix" || !sh_on_path() {
+    let windows = std::env::consts::OS == "windows";
+    if !windows && !sh_on_path() {
         return;
     }
     let e = env("inside");
     let bin = e.dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     // The fake agent under a name of its own: the system reports a process by its executable's file name.
-    let named = bin.join("probeagent");
+    let exe = std::env::consts::EXE_SUFFIX;
+    let named = bin.join(format!("probeagent{exe}"));
     std::fs::copy(fake_agent(), &named).unwrap();
-    let renamed = bin.join("otherprog");
+    let renamed = bin.join(format!("otherprog{exe}"));
     std::fs::copy(fake_agent(), &renamed).unwrap();
     let slow = e.dir.join("slow.toml");
     std::fs::write(
@@ -637,18 +640,26 @@ fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() 
     fake.process.names = vec!["probeagent".into()];
     sup.register(fake);
     sup.register(
-        Manifest::parse(
-            "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-i\"]\n",
-        )
+        Manifest::parse(&format!(
+            "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = {}\n",
+            if windows {
+                r#"["cmd.exe"]"#
+            } else {
+                r#"["sh", "-i"]"#
+            }
+        ))
         .unwrap(),
     );
     let mut req = request(&e, "plain");
     req.kind = "shell".into();
     let id = sup.start(&req, Instant::now()).unwrap();
+    let enter = if windows { "\r" } else { "\n" };
     let type_line = |sup: &Supervisor, prog: &Path| {
         sup.terminal(&id)
             .unwrap()
-            .send_input(format!("{} --script {}\n", prog.display(), slow.display()).into_bytes())
+            .send_input(
+                format!("{} --script {}{enter}", prog.display(), slow.display()).into_bytes(),
+            )
             .unwrap();
     };
 

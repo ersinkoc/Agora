@@ -529,9 +529,9 @@ impl TerminalHandle {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "terminal stopped"))
     }
 
-    /// ADR-0094: the name of the program in the terminal's foreground (its foreground process group's leader) when that is not the
-    /// terminal's own program: what a person started by hand in a plain terminal. `None` while the terminal's own program is in front,
-    /// and always where the system has no foreground group for a pseudoconsole (Windows, which reports the terminal's own program).
+    /// ADR-0094: the name of the program in the terminal's foreground (its foreground process group's leader; on Windows, which has no
+    /// foreground group for a pseudoconsole, the shell's newest direct child followed down through shells, Amendment A) when that is not
+    /// the terminal's own program: what a person started by hand in a plain terminal. `None` while the terminal's own program is in front.
     /// The name only (the system's short name for the process), never its arguments; read-only, and never in the output path.
     pub fn foreground_program(&self) -> io::Result<Option<String>> {
         let front = self.control()?.foreground_pid()?;

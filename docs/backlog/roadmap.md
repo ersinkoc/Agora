@@ -124,12 +124,12 @@ fixes it.
   - [ ] schema: "accepted by a person", parent link, links to conversation, workspace and branch
   - [ ] the Review column; a person moves a task to Done or back; subtasks with their limits
 - [ ] **M3.3 Chat history survives the node** (ADR-0089, **schema**): node writer and paging, resume and purge, pages in the window
-- [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3)
+- [x] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3)
   - [x] Unix lookup and the node's mark: a program a manifest's `[process] names` lists, started by hand in a `shell` agent, is read
     with its kind's screen rules (state, needs you) until it ends
   - [x] the event and the snapshot field (`AgentRunsInside`, `AgentSnapshot.runs_inside`; schema approved 2026-11-26)
   - [x] the "Claude Code in Shell" chip in the windows and the TUI line
-  - [ ] the **win** lookup (step 3, measured on WHITE first)
+  - [x] the **win** lookup (step 3, measured on WHITE first; ADR-0094 Amendment A)
 - [ ] **M3.5 The diff names every changed file** (ADR-0071, **schema**): `GitDiffResult.paths`, the review screen says what is not shown
 - [ ] **M3.6 A reply keeps its link across machines** (ADR-0074, **schema**): `MeshPost.message_id` / `reply_to`, the broker and hub checks
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap
@@ -186,7 +186,7 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   Cursor, Amp, Kiro, Droid, Qwen, Cline, ...); the 41 ACP registry kinds checked with real programs. The largest gap.
 - [ ] **M6.2 Detection engine and self-reported state** (G2): ADR-0117 and ADR-0118 (#1219, M0.3), then built; the manifests' `hooks`
   table runs
-- [ ] **M6.3 A plain terminal shows its agent** (G3): M3.4
+- [x] **M6.3 A plain terminal shows its agent** (G3): M3.4
 - [ ] **M6.4 A pushed event stream and a published API description** (G9, **decision**): `agora events` polls every 200 ms today
 - [x] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
   agent can write a theme, a layout or a plugin for its person

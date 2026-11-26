@@ -39,7 +39,8 @@ Agora's own pseudoconsole and job setup.
   lookup reads one Toolhelp snapshot of the machine (p50 14 to 30 ms, p95 27 to 44 ms, max 53 ms), shared by every terminal and taken
   at most once per 2 s tick, only while some Shell is watched or not idle (about 1% of a core). An ended program leaves the tree within
   35 ms, so the mark ends at the next tick.
-- Built in `agora-platform/src/windows.rs` behind the existing foreground-program call; nothing else changes.
+- Built in `agora-platform/src/winproc.rs` (with the other Windows process lookups) behind the existing foreground-program call; nothing
+  else changes.
 
 ## Context
 - A plain terminal is the `shell` kind. The node knows the shell it started and nothing about the programs the person runs in it. A
