@@ -616,19 +616,7 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
             // Windows cannot rename a file that is still open.
             drop(f);
             std::fs::rename(&tmp, path)?;
-            // The rename itself is kept through a power loss only once the folder is on disk (Unix; Windows does this at the rename).
-            // A folder that cannot be opened or synced for this does not undo the write.
-            #[cfg(unix)]
-            if let Some(dir) = path.parent() {
-                let dir = if dir.as_os_str().is_empty() {
-                    std::path::Path::new(".")
-                } else {
-                    dir
-                };
-                if let Ok(d) = std::fs::File::open(dir) {
-                    let _ = d.sync_all();
-                }
-            }
+            sync_parent_dir(path);
             Ok(())
         })();
         if result.is_err() {
@@ -640,6 +628,68 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
     {
         std::fs::write(path, contents)
     }
+}
+
+/// Makes a rename or a new name in `path`'s folder last through a power loss or a hard reset: Unix syncs the folder itself (a file's
+/// own `sync_all` does not cover the name that points at it). Windows records the name with the rename, and there this does nothing.
+/// Best effort: a folder that cannot be opened or synced does not undo what was done in it. For a file replaced whole by hand (written
+/// to a temporary, synced, renamed over it); [`write_private`] already does this.
+pub fn sync_parent_dir(path: &std::path::Path) {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        let dir = if dir.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            dir
+        };
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Moves a saved file that could not be read out of the way, keeping it for a person to look at, so the program starts with a fresh one
+/// instead of losing it or refusing to start: `path` becomes `<path>.<tag>` in the same folder (`-2`, `-3`, ... added when that name is
+/// taken; an existing file is never replaced), and the rename is synced ([`sync_parent_dir`]). `tag` is reduced to `[A-Za-z0-9._-]`
+/// (others become `_`, at most 64 characters). Returns the new path. `NotFound` when there is no file at `path`.
+pub fn set_aside(path: &std::path::Path, tag: &str) -> io::Result<std::path::PathBuf> {
+    let tag: String = tag
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let tag = if tag.is_empty() { "_".to_string() } else { tag };
+    std::fs::symlink_metadata(path)?;
+    let named = |n: u32| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(".");
+        name.push(&tag);
+        if n > 1 {
+            name.push(format!("-{n}"));
+        }
+        std::path::PathBuf::from(name)
+    };
+    let mut n = 1;
+    let mut aside = named(n);
+    // The names a person may have kept from earlier times stay theirs. Checked, then renamed: the folder is the program's own.
+    while std::fs::symlink_metadata(&aside).is_ok() {
+        n += 1;
+        if n > 1000 {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        aside = named(n);
+    }
+    std::fs::rename(path, &aside)?;
+    sync_parent_dir(&aside);
+    Ok(aside)
 }
 
 /// `std::fs::canonicalize`, spelled the way programs expect: on Windows without the verbatim `\\?\` prefix whenever the ordinary
@@ -2328,13 +2378,18 @@ pub fn catch_stop_requests() -> io::Result<()> {
 /// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
 /// have without the catch. A request less than a second after the first is that first one reaching the process again, not a second
 /// (#1119 item 4: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor, which passes its own on), and is
-/// not acted on. Windows: nothing, as [`catch_stop_requests`].
+/// not acted on. Windows (herdr G11): the session's end (a log off, a shutdown, a restart) and the console's closing are the stop
+/// request, and the system is held off while the process stops (a few seconds at most); `agora down` still ends the node outright.
 pub fn catch_stop_requests_once() -> io::Result<()> {
     #[cfg(unix)]
     {
         unix::catch_stop_requests_once()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::catch_session_end()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Ok(())
     }
@@ -2348,9 +2403,9 @@ pub fn forward_stop_to(pid: Option<u32>) {
     let _ = pid;
 }
 
-/// Whether [`catch_stop_requests`] catches anything here: Unix only (Windows ends a detached process with `TerminateProcess`, which
-/// cannot be caught).
-pub const STOP_REQUESTS_CAUGHT: bool = cfg!(unix);
+/// Whether [`catch_stop_requests_once`] catches anything here: Unix (the signals), and Windows (the session's end, herdr G11; `agora
+/// down` ends a detached process there with `TerminateProcess`, which cannot be caught).
+pub const STOP_REQUESTS_CAUGHT: bool = cfg!(any(unix, windows));
 
 /// Ends this process as the stop request caught by [`catch_stop_requests`] would have ended it without the catch (Unix: that signal,
 /// with its default action again; `SIGTERM` when none was caught), so whoever waits for it (a supervisor, a shell, a service manager)
@@ -2367,13 +2422,17 @@ pub fn end_as_stopped() -> ! {
     }
 }
 
-/// Whether a stop request was caught since [`catch_stop_requests`].
+/// Whether a stop request was caught since [`catch_stop_requests`] or [`catch_stop_requests_once`] (Windows: the session's end).
 pub fn stop_requested() -> bool {
     #[cfg(unix)]
     {
         unix::stop_requested()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows::session_ending()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         false
     }
@@ -3680,7 +3739,7 @@ mod rename_no_replace_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod atomic_replace_tests {
-    use super::write_private;
+    use super::{set_aside, sync_parent_dir, write_private};
 
     fn dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("agora-plat-repl-{}-{name}", std::process::id()));
@@ -3723,6 +3782,50 @@ mod atomic_replace_tests {
             std::fs::read_dir(&d).unwrap().count(),
             1,
             "a temporary file stayed behind"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Herdr G11: a process killed in the middle of a replace (here: its temporary file written half, as a kill or a power cut leaves
+    /// it) leaves the old file whole, and the next replace is not stopped by what was left.
+    #[test]
+    fn a_replace_killed_half_way_leaves_the_old_file_whole_and_the_next_one_goes_through() {
+        let d = dir("killed");
+        let ledger = d.join("ledger.json");
+        write_private(&ledger, b"{\"entries\":[1,2,3]}").unwrap();
+        let mut left = ledger.as_os_str().to_owned();
+        left.push(format!(".tmp-{}", std::process::id()));
+        std::fs::write(&left, b"{\"entries\":[1,2").unwrap();
+        assert_eq!(std::fs::read(&ledger).unwrap(), b"{\"entries\":[1,2,3]}");
+        write_private(&ledger, b"{\"entries\":[4]}").unwrap();
+        assert_eq!(std::fs::read(&ledger).unwrap(), b"{\"entries\":[4]}");
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        sync_parent_dir(&ledger);
+        sync_parent_dir(std::path::Path::new("relative-name-in-the-current-folder"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Herdr G11: a saved file that cannot be read is moved aside, never deleted and never over another one set aside before.
+    #[test]
+    fn a_file_set_aside_keeps_its_bytes_and_never_replaces_an_earlier_one() {
+        let d = dir("aside");
+        let file = d.join("events.log");
+        std::fs::write(&file, b"one").unwrap();
+        let first = set_aside(&file, "unreadable-7").unwrap();
+        assert_eq!(first, d.join("events.log.unreadable-7"));
+        assert!(!file.exists());
+        std::fs::write(&file, b"two").unwrap();
+        let second = set_aside(&file, "unreadable-7").unwrap();
+        assert_eq!(second, d.join("events.log.unreadable-7-2"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
+        // A tag is reduced to a plain name: it never leaves the folder.
+        std::fs::write(&file, b"three").unwrap();
+        let third = set_aside(&file, "../x y").unwrap();
+        assert_eq!(third, d.join("events.log..._x_y"));
+        assert_eq!(
+            set_aside(&d.join("missing"), "x").unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
         );
         let _ = std::fs::remove_dir_all(&d);
     }

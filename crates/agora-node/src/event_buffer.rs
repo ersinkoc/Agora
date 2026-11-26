@@ -120,18 +120,7 @@ impl DiskEventLog {
             write_log(&log_path, 1, &[])?;
         }
         let mut file = OpenOptions::new().read(true).write(true).open(&log_path)?;
-        let mut header = [0u8; HEADER_LEN as usize];
-        file.read_exact(&mut header)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "event log header missing"))?;
-        if &header[..8] != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "not an event log",
-            ));
-        }
-        let mut first = [0u8; 8];
-        first.copy_from_slice(&header[8..]);
-        let first_seq = u64::from_le_bytes(first).max(1);
+        let first_seq = read_header(&mut file)?;
 
         let mut offsets = Vec::new();
         let mut pos = HEADER_LEN;
@@ -163,6 +152,28 @@ impl DiskEventLog {
             end: pos,
             max_bytes,
         })
+    }
+
+    /// [`Self::open`], and a log that is not one (its header damaged or missing: a disk fault, a file put there by hand) is set aside
+    /// first, never deleted, with its ack (`events.log.unreadable-<unix_secs>`, see `agora_platform::set_aside`), so the node still
+    /// starts, with a fresh log. Returns where the unreadable log went. Herdr G11: a node that could not read its log did not start.
+    pub fn open_or_set_aside(
+        dir: &Path,
+        max_bytes: u64,
+        unix_secs: u64,
+    ) -> io::Result<(Self, Option<PathBuf>)> {
+        match Self::open(dir, max_bytes) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                let tag = format!("unreadable-{unix_secs}");
+                let log = agora_platform::set_aside(&dir.join("events.log"), &tag)?;
+                match agora_platform::set_aside(&dir.join("ack"), &tag) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+                Ok((Self::open(dir, max_bytes)?, Some(log)))
+            }
+            r => r.map(|log| (log, None)),
+        }
     }
 
     /// The number the next appended event will get.
@@ -416,6 +427,29 @@ impl DiskEventLog {
     }
 }
 
+/// The first sequence number the log's header holds. `InvalidData` only for a file that is not a log (a header cut short, another
+/// format): [`DiskEventLog::open_or_set_aside`] sets those aside. Any other error (a disk error, no permission) is returned as it is, so
+/// a good log that cannot be read just now is never set aside.
+fn read_header(r: &mut impl Read) -> io::Result<u64> {
+    let mut header = [0u8; HEADER_LEN as usize];
+    r.read_exact(&mut header).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            io::Error::new(io::ErrorKind::InvalidData, "event log header missing")
+        } else {
+            e
+        }
+    })?;
+    if &header[..8] != MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not an event log",
+        ));
+    }
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&header[8..]);
+    Ok(u64::from_le_bytes(first).max(1))
+}
+
 /// Write a complete log file atomically: temporary file, flush to disk, rename over the target.
 fn write_log(path: &Path, first_seq: u64, records: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp");
@@ -426,7 +460,9 @@ fn write_log(path: &Path, first_seq: u64, records: &[u8]) -> io::Result<()> {
         f.write_all(records)?;
         f.sync_data()?;
     }
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    agora_platform::sync_parent_dir(path);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -703,6 +739,47 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("events.log"), b"this is not an event log at all").unwrap();
         assert!(DiskEventLog::open(&d, 1 << 20).is_err());
+        // Herdr G11: the node's own open sets such a file aside, with its ack, and starts a fresh log.
+        fs::write(d.join("ack"), 9u64.to_le_bytes()).unwrap();
+        let (mut log, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 77).unwrap();
+        assert_eq!(aside, Some(d.join("events.log.unreadable-77")));
+        assert_eq!(
+            fs::read(d.join("events.log.unreadable-77")).unwrap(),
+            b"this is not an event log at all"
+        );
+        assert!(d.join("ack.unreadable-77").exists() && !d.join("ack").exists());
+        assert_eq!((log.next_seq(), log.acked()), (1, 0));
+        log.append(b"a").unwrap();
+        drop(log);
+        let (log, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 78).unwrap();
+        assert_eq!((aside, log.next_seq()), (None, 2));
+        // A header cut short (a file of a few bytes) is set aside too.
+        fs::write(d.join("events.log"), b"AGORA").unwrap();
+        let (_, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 79).unwrap();
+        assert_eq!(aside, Some(d.join("events.log.unreadable-79")));
+        // A log that cannot be read just now (here: a folder where the file should be) is an error, never set aside.
+        let e = dir();
+        fs::create_dir_all(e.join("events.log")).unwrap();
+        assert!(DiskEventLog::open_or_set_aside(&e, 1 << 20, 80).is_err());
+        assert!(e.join("events.log").is_dir() && !e.join("events.log.unreadable-80").exists());
+        // A read that fails other than by ending early keeps its kind; one that ends early is a file that is not a log.
+        struct Failing(io::ErrorKind);
+        impl Read for Failing {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(self.0))
+            }
+        }
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::Other] {
+            assert_eq!(read_header(&mut Failing(kind)).unwrap_err().kind(), kind);
+        }
+        assert_eq!(
+            read_header(&mut &b"AGORAEV1\x01"[..]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_header(&mut &b"AGORAEV1\x07\0\0\0\0\0\0\0"[..]).unwrap(),
+            7
+        );
         let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
         let huge = vec![0u8; MAX_PAYLOAD as usize + 1];
         assert!(log.append(&huge).is_err());

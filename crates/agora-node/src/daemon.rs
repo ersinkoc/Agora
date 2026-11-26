@@ -395,7 +395,17 @@ impl EventSink {
     /// another node than the certificate. The old log is set aside (renamed, never deleted, see [`DiskEventLog::set_aside`]) and
     /// a fresh one starts; [`set_aside`](Self::set_aside) says so.
     pub fn open_with_cap(dir: &Path, producer: &str, max_bytes: u64) -> io::Result<Self> {
-        let mut log = DiskEventLog::open(dir, max_bytes)?;
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // Herdr G11: a log that cannot be read is set aside, so the node still starts (operational log, not UI text).
+        let (mut log, unreadable) = DiskEventLog::open_or_set_aside(dir, max_bytes, secs)?;
+        if let Some(path) = unreadable {
+            eprintln!(
+                "events: the event log could not be read; set aside as {} and started again",
+                path.display()
+            );
+        }
         // Whose log this is: the `producer` file says so (its events may all be acknowledged and compacted away, but the numbering
         // still belongs to that name); a log from before the file existed is judged by any event it still holds.
         let recorded = fs::read_to_string(dir.join(PRODUCER_FILE))
@@ -411,16 +421,12 @@ impl EventSink {
         };
         let mut set_aside = None;
         if let Some(old_id) = foreign.filter(|_| !log.is_pristine()) {
-            let secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
             let path = log.set_aside(&old_id, secs)?;
             log = DiskEventLog::open(dir, max_bytes)?;
             set_aside = Some(SetAside { old_id, path });
         }
-        let tmp = dir.join(format!("{PRODUCER_FILE}.tmp"));
-        fs::write(&tmp, producer)?;
-        fs::rename(&tmp, dir.join(PRODUCER_FILE))?;
+        // Replaced whole and synced (herdr G11): a power loss never leaves it empty.
+        agora_platform::write_private(&dir.join(PRODUCER_FILE), producer.as_bytes())?;
         Ok(Self {
             producer: producer.to_string(),
             log: Mutex::new(log),
@@ -432,6 +438,12 @@ impl EventSink {
             usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
             secrets: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Herdr G11: makes the events recorded so far last through a power loss (each append only reaches the system). The node calls
+    /// it when it stops, as an OS shutdown or reboot may follow.
+    pub fn sync(&self) -> io::Result<()> {
+        self.log.lock().unwrap_or_else(|e| e.into_inner()).sync()
     }
 
     /// #1147 (audit of #1157): the store whose secret values are replaced in the agent's words an event carries. Set once.
@@ -956,7 +968,7 @@ impl EventSink {
                     // Stopped on request: the exit code is not known (same convention as the terminal exit frame).
                     self.record(Body::AgentExited(v1::AgentExited {
                         agent_id: agent.as_str().to_string(),
-                        exit_code: i32::MIN,
+                        exit_code: crate::ledger::STOPPED_ON_REQUEST,
                     }));
                     self.record(Body::TerminalClosed(v1::TerminalClosed {
                         terminal_id: crate::control::terminal_id_of(agent),
@@ -1854,6 +1866,9 @@ impl Node {
         )?);
         // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
         let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
+        // Herdr G11: an agent's end seen once a stop request reached this process (an OS shutdown signals the agents too) is not an end.
+        // Only a process that catches stop requests (`agora node`) ever has one.
+        ledger.stops_when(agora_platform::stop_requested);
         events.set_ledger(Arc::clone(&ledger));
         // ADR-0089, #1147: the store of chat transcripts, and the node's secret values it reads, which every event that carries the
         // agent's own words has replaced (from the first event recorded, the agents taken up included).
@@ -2931,6 +2946,8 @@ impl Drop for Node {
     fn drop(&mut self) {
         // Before the control server ends (it can take up to its poll time): a command that comes meanwhile is refused, not run.
         self.stop.store(true, Ordering::Release);
+        // Herdr G11: an agent's end seen from here on is the stop's doing, never an end in the ledger.
+        self.ledger.stopping();
         drop(self.server.take());
         if self.crashed {
             self.join_threads();
@@ -2939,6 +2956,14 @@ impl Drop for Node {
             return;
         }
         let began = Instant::now();
+        // Herdr G11: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: the usage, the ledger and
+        // the event log are written first, and again below with what the drain adds. The conversation keeps its one last batch after
+        // the drain (its held-back words are taken whole only then), as before.
+        if self.keep_agents {
+            self.events.flush_all_usage();
+            let _ = self.ledger.flush_all();
+            let _ = self.events.sync();
+        }
         let supervisor = Arc::clone(&self.supervisor);
         let mut sup = lock_by(&supervisor, began + LOCK_WAIT);
         let missed = sup.is_none();
@@ -3014,8 +3039,8 @@ impl Drop for Node {
 
 impl Node {
     /// ADR-0104 O2: the conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
-    /// gathered, then the ledger and the kept session files: none needs the supervisor's lock, and each is quick local work. Can be
-    /// called again (with what came since).
+    /// gathered, then the ledger and the kept session files, then the event log synced to disk (herdr G11): none needs the supervisor's
+    /// lock, and each is quick local work. Can be called again (with what came since).
     fn write_held(&mut self) {
         if let Some(t) = self.transcript_writer.take() {
             if let Some(w) = self.chat.wake() {
@@ -3026,6 +3051,7 @@ impl Node {
         crate::transcript::flush(&self.chat);
         self.events.flush_all_usage();
         let _ = self.ledger.flush_all();
+        let _ = self.events.sync();
     }
 
     /// Joins the node's threads (each ends on the stop flag); the transcript writer is woken first.

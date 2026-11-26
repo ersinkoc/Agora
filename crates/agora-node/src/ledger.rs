@@ -11,7 +11,10 @@
 //! The ledger learns from the events the node records (see [`Ledger::observe`]), so every way an agent starts, reports its session,
 //! or ends is covered without a call at each place. It writes when an agent starts, when its session id is reported, and when it
 //! ends; a state change is kept in memory and written with the next write (and when the node stops cleanly, [`Ledger::flush`]).
-//! An agent the node stops with itself does not end: that is exactly what makes it interrupted at the next start.
+//! An agent the node stops with itself does not end: that is exactly what makes it interrupted at the next start. Nor does one whose
+//! end the node sees once its own stop began (herdr G11): an OS shutdown or reboot signals the node, its terminal holder and its agents
+//! at once, and those ends are the shutdown's, so the agents are interrupted at the next start and offered to Resume. A stop someone
+//! asked for ([`STOPPED_ON_REQUEST`]) is an end whenever it is recorded.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
@@ -21,6 +24,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use agora_protocol::v1::{self, event::Body};
 use serde_json::{json, Value};
 
+/// The exit code an `AgentExited` carries for an agent stopped on request (`SupervisorEvent::Stopped`; its own code is not known).
+pub const STOPPED_ON_REQUEST: i32 = i32::MIN;
 /// The ledger's folder in the node's data folder.
 pub const LEDGER_DIR: &str = "sessions";
 /// The ledger file in [`LEDGER_DIR`].
@@ -142,9 +147,19 @@ struct State {
     kept_writer: bool,
     /// Something changed that is not on disk yet.
     dirty: bool,
+    /// Herdr G11: the node's stop began ([`Ledger::stopping`]), or [`Ledger::stops_when`]'s check says it did.
+    stopping: bool,
+    stops_when: Option<fn() -> bool>,
 }
 
 impl State {
+    /// Herdr G11: whether the node is stopping. An OS shutdown (a login session's end, launchd's, a reboot) signals the node, its
+    /// terminal holder and its agents at once: an agent's end the node sees then is the shutdown's doing, not the agent's, and is not
+    /// recorded as an end, so the next start finds the agent interrupted and offers it to Resume. A stop someone asked for still is.
+    fn stopping(&self) -> bool {
+        self.stopping || self.stops_when.is_some_and(|f| f())
+    }
+
     fn mark_kept_pending(&mut self, agent: String) {
         self.kept_seq += 1;
         self.kept_pending.insert(agent, self.kept_seq);
@@ -627,9 +642,14 @@ impl Ledger {
         };
         match std::fs::metadata(&path) {
             Ok(meta) => {
-                let parsed = (meta.len() <= MAX_FILE_BYTES)
-                    .then(|| std::fs::read(&path).ok())
-                    .flatten()
+                // A file that cannot be read now (a disk error, no permission) is an error, never set aside: the next start may read
+                // it. Only one that was read and is not a ledger is.
+                let bytes = if meta.len() <= MAX_FILE_BYTES {
+                    Some(std::fs::read(&path)?)
+                } else {
+                    None
+                };
+                let parsed = bytes
                     .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
                     .filter(|v| number(v, "version") == VERSION);
                 match parsed {
@@ -646,9 +666,7 @@ impl Ledger {
                         }
                     }
                     None => {
-                        let mut aside = path.as_os_str().to_owned();
-                        aside.push(format!(".unreadable-{now_ms}"));
-                        std::fs::rename(&path, PathBuf::from(aside))?;
+                        agora_platform::set_aside(&path, &format!("unreadable-{now_ms}"))?;
                         // The ids it gave are not known any more: start above any id a node could have given until now (one a
                         // second at most), so no agent id is given twice.
                         state.next_id = now_ms / 1000;
@@ -1039,6 +1057,17 @@ impl Ledger {
         }
     }
 
+    /// Herdr G11: the node's stop began. From now on an agent's end is not recorded as one (see the module documentation).
+    pub fn stopping(&self) {
+        self.st().stopping = true;
+    }
+
+    /// Herdr G11: `check` says the node's stop began, from the moment the stop request came (`agora_platform::stop_requested`, which
+    /// the signal handler itself sets), before the node acts on it: an agent's end it records meanwhile counts as [`Self::stopping`].
+    pub fn stops_when(&self, check: fn() -> bool) {
+        self.st().stops_when = Some(check);
+    }
+
     /// Writes what changed since the last write, if anything (the node calls it when it stops cleanly).
     pub fn flush(&self) -> io::Result<()> {
         let _writing = self.write.lock().unwrap_or_else(|e| e.into_inner());
@@ -1248,6 +1277,9 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             }
             false
         }
+        // Herdr G11: see `State::stopping`. A stop someone asked for (`STOPPED_ON_REQUEST`: the person, an agent stopping its helper)
+        // is an end whenever it comes, so it is never resumed by itself.
+        Body::AgentExited(x) if x.exit_code != STOPPED_ON_REQUEST && st.stopping() => false,
         Body::AgentExited(x) => match st.entries.get_mut(&x.agent_id) {
             Some(e) if !e.ended => {
                 e.ended = true;
@@ -1420,6 +1452,61 @@ mod tests {
         // The held state is used once: a later start of the same id does not bring it back.
         l.observe(&started("agent-1", "/wt/a", ""), 14);
         assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+    }
+
+    /// Herdr G11: an OS shutdown signals the node and its agents at once. An agent's end the node sees once its stop began (the stop
+    /// request caught, before the node acts on it, or the stop itself) is the shutdown's doing: the agent is interrupted at the next
+    /// open and offered to Resume. One that ended before is still an end.
+    #[test]
+    fn an_end_seen_once_the_node_is_stopping_is_an_interruption_not_an_end() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static REQUESTED: AtomicBool = AtomicBool::new(false);
+        let exited = |id: &str| {
+            Body::AgentExited(v1::AgentExited {
+                agent_id: id.into(),
+                exit_code: 143,
+            })
+        };
+        let dir = temp("stopping");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.stops_when(|| REQUESTED.load(Ordering::SeqCst));
+        for (n, id) in ["agent-1", "agent-2", "agent-3"].into_iter().enumerate() {
+            l.observe(&started(id, &format!("/wt/{n}"), ""), 2);
+        }
+        l.observe(&exited("agent-1"), 3);
+        assert!(l.get("agent-1").unwrap().ended);
+        // The stop request reached the process: the node has not acted on it yet.
+        REQUESTED.store(true, Ordering::SeqCst);
+        l.observe(&exited("agent-2"), 4);
+        assert!(!l.get("agent-2").unwrap().ended);
+        REQUESTED.store(false, Ordering::SeqCst);
+        // The node's own stop.
+        l.stopping();
+        l.observe(&exited("agent-3"), 5);
+        l.observe(&exited("agent-4"), 5);
+        l.observe(&started("agent-4", "/wt/4", ""), 5);
+        // A stop the person asked for, recorded while the node stops (a stop that was already running): an end all the same, never
+        // offered to Resume or resumed by itself after the restart.
+        l.observe(&started("agent-6", "/wt/6", ""), 5);
+        l.observe(
+            &Body::AgentExited(v1::AgentExited {
+                agent_id: "agent-6".into(),
+                exit_code: STOPPED_ON_REQUEST,
+            }),
+            6,
+        );
+        assert!(l.get("agent-6").unwrap().ended);
+        l.flush_all().unwrap();
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
+        assert_eq!(offered, ["agent-2", "agent-3", "agent-4"]);
+        assert!(l.get("agent-1").unwrap().ended);
+        assert!(l.get("agent-6").unwrap().ended);
+        // A reopened ledger is not stopping: an end is an end again.
+        l.observe(&started("agent-5", "/wt/5", ""), 21);
+        l.observe(&exited("agent-5"), 22);
+        assert!(l.get("agent-5").unwrap().ended);
     }
 
     /// F1620: a process that ended at once can have its exit recorded by the tick before the control thread records its start; the
@@ -2232,6 +2319,15 @@ mod tests {
         // Ids continue from a floor no earlier run can have reached, not from 1.
         assert_eq!(l.next_id(), 1_800_000_000);
         assert!(dir
+            .join(LEDGER_DIR)
+            .join(format!("{LEDGER_FILE}.unreadable-1800000000000"))
+            .exists());
+        // One that cannot be read just now (here: a folder where the file should be) is an error, never set aside.
+        let dir = temp("unreadable-now");
+        std::fs::create_dir_all(dir.join(LEDGER_DIR).join(LEDGER_FILE)).unwrap();
+        assert!(Ledger::open(&dir, 1_800_000_000_000).is_err());
+        assert!(dir.join(LEDGER_DIR).join(LEDGER_FILE).is_dir());
+        assert!(!dir
             .join(LEDGER_DIR)
             .join(format!("{LEDGER_FILE}.unreadable-1800000000000"))
             .exists());

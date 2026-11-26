@@ -1553,6 +1553,136 @@ pub(crate) fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) 
         .unwrap_or(unchanged)
 }
 
+/// Herdr G11: the session ends (a log off, a shutdown or a restart) or this process's console is closed: see [`catch_session_end`].
+static SESSION_ENDING: AtomicBool = AtomicBool::new(false);
+
+/// How long a session-end notice is held once it came: the system ends the process as soon as its handler returns, so the handler
+/// waits while the process stops cleanly (`agora node`: its ledger, usage and event log first, within moments; its conversation's
+/// last batch after the drain, within its own 5 s deadline). Windows ends a process with only a hidden window about 5 s after
+/// `WM_ENDSESSION` anyway, so a stop that takes that long loses the conversation's last batch (up to a second of it).
+///
+/// A Restart Manager close (an installer replacing a file the node holds: `ENDSESSION_CLOSEAPP` in `lParam`) is heard the same way and
+/// stops the node cleanly; its supervisor does not start it again after that clean end, so the node is down until the next logon or
+/// `agora up`.
+const SESSION_END_HOLD: Duration = Duration::from_secs(5);
+
+fn hold_for_stop() {
+    SESSION_ENDING.store(true, Ordering::SeqCst);
+    let end = std::time::Instant::now() + SESSION_END_HOLD;
+    while std::time::Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// See [`crate::stop_requested`] on Windows.
+pub(crate) fn session_ending() -> bool {
+    SESSION_ENDING.load(Ordering::SeqCst)
+}
+
+unsafe extern "system" fn session_window(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DefWindowProcW, WM_ENDSESSION, WM_QUERYENDSESSION,
+    };
+    match msg {
+        // The session may end: this process never holds it up.
+        WM_QUERYENDSESSION => 1,
+        WM_ENDSESSION => {
+            if wparam != 0 {
+                hold_for_stop();
+            }
+            0
+        }
+        // SAFETY: the arguments the system passed to this window procedure, handed on unchanged.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+unsafe extern "system" fn console_stop(kind: u32) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::System::Console::{
+        CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+    match kind {
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            hold_for_stop();
+            1
+        }
+        // Ctrl-C and Ctrl-Break: the default handler, as before.
+        _ => 0,
+    }
+}
+
+/// The session-end window's thread: a hidden top-level window (a message-only one hears no session end) and its message loop.
+fn session_window_loop() {
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage, MSG,
+        WNDCLASSW,
+    };
+    let class = wide("AgoraSessionEnd");
+    // SAFETY: plain calls with valid arguments: a null module name (this program), a class that names a live window procedure and a
+    // NUL-terminated name that outlives the window, and a message buffer this thread owns.
+    unsafe {
+        let instance = GetModuleHandleW(null());
+        let wc = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(session_window),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: instance,
+            hIcon: null_mut(),
+            hCursor: null_mut(),
+            hbrBackground: null_mut(),
+            lpszMenuName: null(),
+            lpszClassName: class.as_ptr(),
+        };
+        if RegisterClassW(&wc) == 0 {
+            return;
+        }
+        let hwnd = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        );
+        if hwnd.is_null() {
+            return;
+        }
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// See [`crate::catch_stop_requests_once`] on Windows (herdr G11): the session's end and the console's closing become a stop request.
+/// A process with no console (the node, started detached) hears the session end only through a window: a hidden one, on a thread of
+/// its own. With a console, its closing is heard too (a log off or a shutdown reaches a console handler only in a process without
+/// windows, so the window hears those). Each holds the notice ([`SESSION_END_HOLD`]) while the process stops.
+pub(crate) fn catch_session_end() -> io::Result<()> {
+    // SAFETY: registers a handler that only stores to an atomic and sleeps; a process without a console may fail this, which is fine.
+    unsafe {
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(console_stop), 1);
+    }
+    std::thread::Builder::new()
+        .name("agora-session-end".into())
+        .spawn(session_window_loop)
+        .map(|_| ())
+}
+
 /// [`crate::rename_no_replace`] on Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` (nor `MOVEFILE_COPY_ALLOWED`), which
 /// fails when anything has the new name.
 pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
