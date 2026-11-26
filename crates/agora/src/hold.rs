@@ -525,6 +525,14 @@ impl Holder {
         self.agents.len() + self.pipes.len() < self.capacity
     }
 
+    /// The operational log (stderr: `run/hold.log` when the node started the holder) of a start refused because the holder is full.
+    fn log_full(&self, request: &str, agent: &str) {
+        eprintln!(
+            "hold: {request} {agent:?} refused (Failed): the holder keeps {} agents, its most",
+            self.agents.len() + self.pipes.len()
+        );
+    }
+
     fn agent(&mut self, id: &str) -> Option<&mut Agent> {
         self.agents.iter_mut().find(|a| a.id == id)
     }
@@ -631,6 +639,7 @@ impl Holder {
             return self.refuse(Refusal::AgentExists);
         }
         if !self.has_room() {
+            self.log_full("start", &s.agent);
             return self.refuse(Refusal::Failed);
         }
         let config = PtyConfig {
@@ -649,13 +658,40 @@ impl Holder {
         };
         let term = match HeldTerminal::start(&config) {
             Ok(t) => t,
-            Err(_) => return self.refuse(Refusal::Failed),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    start_failure(
+                        "start",
+                        &s.agent,
+                        "the terminal or the program did not start",
+                        &s.argv,
+                        s.cwd.as_deref(),
+                        &e
+                    )
+                );
+                return self.refuse(Refusal::Failed);
+            }
         };
         let mut term = term;
-        let Ok(handle) = term.handle() else {
-            // Never handed to the node: ended and reaped, so no process and no zombie is left behind.
-            term.kill_and_reap();
-            return self.refuse(Refusal::Failed);
+        let handle = match term.handle() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    start_failure(
+                        "start",
+                        &s.agent,
+                        "no copy of the terminal for the node",
+                        &s.argv,
+                        s.cwd.as_deref(),
+                        &e
+                    )
+                );
+                // Never handed to the node: ended and reaped, so no process and no zombie is left behind.
+                term.kill_and_reap();
+                return self.refuse(Refusal::Failed);
+            }
         };
         let pid = term.pid();
         self.had_agents = true;
@@ -730,11 +766,26 @@ impl Holder {
             return self.refuse(Refusal::AgentExists);
         }
         if !self.has_room() {
+            self.log_full("start-pipe", &s.agent);
             return self.refuse(Refusal::Failed);
         }
         let cwd = s.cwd.as_ref().map(PathBuf::from);
-        let Ok(mut proc) = HeldProcess::start(&s.argv, cwd.as_deref(), &s.env) else {
-            return self.refuse(Refusal::Failed);
+        let mut proc = match HeldProcess::start(&s.argv, cwd.as_deref(), &s.env) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    start_failure(
+                        "start-pipe",
+                        &s.agent,
+                        "the program did not start",
+                        &s.argv,
+                        s.cwd.as_deref(),
+                        &e
+                    )
+                );
+                return self.refuse(Refusal::Failed);
+            }
         };
         let lines = PipeLines::default();
         let wired = proc.take_io().and_then(|(stdin, stdout)| {
@@ -742,6 +793,10 @@ impl Holder {
             LineWriter::spawn(stdin).ok()
         });
         let Some(input) = wired else {
+            eprintln!(
+                "hold: start-pipe {:?} refused (Failed): its output reader or input writer did not start",
+                s.agent
+            );
             // Never handed to the node: ended and reaped, so no process and no zombie is left behind.
             proc.kill_and_reap();
             return self.refuse(Refusal::Failed);
@@ -849,6 +904,36 @@ impl Holder {
         }
         false
     }
+}
+
+/// The operational log line (stderr, `run/hold.log` when the node started the holder; not shown to a person) of a start refused with
+/// `Failed` at `step` (what failed), with `e`. The refusal on the link is frozen (`code`, `holder_version`) and cannot carry the reason,
+/// so it is said here: the error's kind and number, and whether the program and the folder exist now (a program missing for a moment,
+/// as when it is being replaced, is `NotFound` and exists again by the time this is read). The program's arguments and the
+/// environment are never written: they may hold secrets.
+fn start_failure(
+    request: &str,
+    agent: &str,
+    step: &str,
+    argv: &[String],
+    cwd: Option<&str>,
+    e: &std::io::Error,
+) -> String {
+    let program = argv.first().map(String::as_str).unwrap_or_default();
+    let mut line = format!(
+        "hold: {request} {agent:?} refused (Failed): {step}: {:?}, os error {}, {e}; program {program:?} exists now: {}",
+        e.kind(),
+        e.raw_os_error()
+            .map_or_else(|| "none".to_string(), |n| n.to_string()),
+        Path::new(program).exists(),
+    );
+    if let Some(cwd) = cwd {
+        line.push_str(&format!(
+            "; folder {cwd:?} exists now: {}",
+            Path::new(cwd).exists()
+        ));
+    }
+    line
 }
 
 fn refuse(stream: &mut LocalStream, code: Refusal) {
