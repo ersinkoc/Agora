@@ -1,6 +1,7 @@
 // `agora manual` (G10, docs/manual/): the examples and lists of the topics about the web window's files, read by the window's own
 // readers. The Rust side (command lines, the terminal client's readers, mesh tools, file names) is tested in
 // crates/agora/src/manualcmd.rs.
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -116,9 +117,20 @@ describe('agora manual plugins', () => {
     try {
       writeFileSync(join(dir, 'agora-plugin.json'), manifest);
       writeFileSync(join(dir, 'panel.js'), panel);
-      // The topic's own recipe: the manifest and the files, each as base64.
+      // The manifest as written, the files as base64: the package format.
       const byHand = JSON.stringify({ 'agora-plugin-bundle': 1, files: { 'agora-plugin.json': Buffer.from(manifest).toString('base64'), 'panel.js': Buffer.from(panel).toString('base64') } });
-      for (const text of [byHand, pack(dir) as string]) {
+      const packages = [byHand, pack(dir) as string];
+      // The topic's own Python recipe, run where Python is installed, starting from a manifest whose hash is wrong.
+      const recipe = /python3 - <<'EOF'\n([\s\S]*?)\nEOF\n/.exec(block('plugins', 'sh'))?.[1];
+      expect(recipe).toBeDefined();
+      const python = spawnSync('python3', ['--version']);
+      if (!python.error) {
+        writeFileSync(join(dir, 'agora-plugin.json'), manifest.replace(/[0-9a-f]{64}/, '0'.repeat(64)));
+        const run = spawnSync('python3', ['-'], { cwd: dir, input: recipe });
+        expect(run.status, String(run.stderr)).toBe(0);
+        packages.push(readFileSync(join(dir, 'agents-plugin.json'), 'utf8'));
+      }
+      for (const text of packages) {
         const r = await checkPackage(new TextEncoder().encode(text), __AGORA_VERSION__);
         expect(r.ok ? 'ok' : `${r.code} ${r.detail ?? ''}`).toBe('ok');
       }

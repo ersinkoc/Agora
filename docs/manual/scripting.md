@@ -93,11 +93,11 @@ agora manual files
   certificates.
 - `agora agent explain KIND --file SCREEN` replays a captured terminal screen and says which rule of the kind's manifest decides its
   state, and why each other rule did not. It needs no node.
-- `agora --help` lists every command.
+- `agora --help` lists the commands.
 
 ## Example
 
-Start an agent, give it a task, and act on how it ended:
+Give an agent a task, and act on how it ended:
 
 ```sh
 agora agent prompt agent-1 "run the tests and fix what fails" --wait --timeout 1800

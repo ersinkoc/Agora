@@ -70,20 +70,24 @@ into it. Messages over 20 a second are dropped, and many of them stop the frame;
 
 ## Packing
 
-Put the files in one flat folder, then write the package. With Python:
+Put the files in one flat folder. Run this there: it writes each file's hash into the manifest, then the package,
+`agents-plugin.json`. List every file but the manifest in `names`.
 
 ```sh
 python3 - <<'EOF'
-import base64, json, pathlib
-names = ["agora-plugin.json", "panel.js"]
-files = {n: base64.b64encode(pathlib.Path(n).read_bytes()).decode() for n in names}
+import base64, hashlib, json, pathlib
+names = ["panel.js"]
+read = lambda n: pathlib.Path(n).read_bytes()
+manifest = json.loads(read("agora-plugin.json"))
+manifest["files"] = {n: hashlib.sha256(read(n)).hexdigest() for n in names}
+pathlib.Path("agora-plugin.json").write_text(json.dumps(manifest, indent=2) + "\n")
+files = {n: base64.b64encode(read(n)).decode() for n in ["agora-plugin.json", *names]}
 pathlib.Path("agents-plugin.json").write_text(json.dumps({"agora-plugin-bundle": 1, "files": files}))
 EOF
-sha256sum panel.js
 ```
 
-`sha256sum` prints the hash to put in `files`. In a checkout of Agora's source, `node scripts/pack-plugin.mjs FOLDER --out FILE
---write-hashes` does both and checks the folder as the window would.
+In a checkout of Agora's source, `node scripts/pack-plugin.mjs FOLDER --out FILE --write-hashes` does the same and checks the
+folder as the window would.
 
 ## Example
 
