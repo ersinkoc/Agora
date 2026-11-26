@@ -61,6 +61,8 @@ pub struct Answer {
     /// Audit events the call produced, to be published as hub events.
     pub events: Vec<Body>,
     pub handoff: Option<Handoff>,
+    /// Board notices for agents to send with the answer (ADR-0115: the owners of tasks a merge of older boards gave new ids, #1150).
+    pub notices: Vec<Notice>,
 }
 
 fn answer(verdict: Verdict) -> Answer {
@@ -69,6 +71,7 @@ fn answer(verdict: Verdict) -> Answer {
         events: Vec::new(),
         handoff: None,
         fanout: None,
+        notices: Vec::new(),
     }
 }
 
@@ -124,6 +127,28 @@ pub struct Notice {
     pub to_node: String,
     pub to_agent: String,
     pub body: String,
+}
+
+/// A [`Notice`] for the agent `to` names (`<node>/<agent>`); none for an id without a node.
+fn notice_to(to: &str, body: Value) -> Option<Notice> {
+    let (to_node, to_agent) = to.split_once('/')?;
+    Some(Notice {
+        to_node: to_node.to_string(),
+        to_agent: to_agent.to_string(),
+        body: body.to_string(),
+    })
+}
+
+/// What [`Boards::merge_snapshots`] made of several boards (ADR-0115, #1150).
+pub struct Merged {
+    /// The merged board, as [`Boards::snapshot`] text.
+    pub bytes: Vec<u8>,
+    /// For the owner of each task given a new id: `task_moved`; for the holders of a path two boards' leases held: `lease_refused`
+    /// to the one whose lease was dropped, `lease_conflict` to the one who keeps it (as after a join).
+    pub notices: Vec<Notice>,
+    /// Each task given a new id, and each task that kept an id another board also had: a window keys a task by project and id, so
+    /// it showed the boards' tasks with one id as one, and each is stated again.
+    pub restated: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -424,64 +449,210 @@ impl Boards {
 
     /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
     /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
-    /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows), and
-    /// a lease on a path already held is dropped (the first holder keeps it). A damaged one is left out.
-    pub fn merge_snapshots(parts: &[Vec<u8>]) -> Vec<u8> {
+    /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
+    /// its owner is told, as `task_moved` after a join, unless the task is done), and where several boards' live leases hold one
+    /// path, one holder keeps it, the others' leases are passed on as ended and both are told (see the lease rules below; `running`
+    /// says whether an agent runs in the project).
+    /// A dependency on a task its own board no longer has stays unmet: when another board's task has that id, it is given an id of
+    /// its own that no task has or will have, instead of naming that task (#1150). A damaged one is left out.
+    pub fn merge_snapshots(
+        &self,
+        parts: &[Vec<u8>],
+        now_ms: u64,
+        running: impl Fn(&str) -> bool,
+    ) -> Merged {
         let boards: Vec<Value> = parts
             .iter()
             .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
             .filter(Value::is_object)
             .collect();
+        let tasks_of =
+            |b: &Value| -> Vec<Value> { b["tasks"].as_array().cloned().unwrap_or_default() };
+        let id_of = |t: &Value| t["id"].as_str().unwrap_or("").to_string();
         let task_number = |id: &str| id.strip_prefix("t-").and_then(|n| n.parse::<u64>().ok());
+        // Above every id any of them names, a dependency's included: a new id never meets one.
         let mut next = boards
             .iter()
             .map(|b| b["next"].as_u64().unwrap_or(1))
             .chain(boards.iter().flat_map(|b| {
-                b["tasks"]
-                    .as_array()
+                tasks_of(b)
                     .into_iter()
-                    .flatten()
-                    .filter_map(|t| t["id"].as_str().and_then(task_number))
+                    .flat_map(|t| {
+                        let deps = t["depends_on"].as_array().cloned().unwrap_or_default();
+                        std::iter::once(t["id"].clone()).chain(deps)
+                    })
+                    .filter_map(|id| id.as_str().and_then(task_number))
                     .map(|n| n + 1)
             }))
             .max()
             .unwrap_or(1);
-        let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
+        // Each board's new ids, and every id the merged board holds.
         let mut taken = BTreeSet::<String>::new();
-        let mut held = BTreeSet::<String>::new();
-        for board in boards {
-            let mine: Vec<Value> = board["tasks"].as_array().cloned().unwrap_or_default();
-            let mut renamed = std::collections::BTreeMap::<String, String>::new();
+        let mut renames = Vec::<BTreeMap<String, String>>::new();
+        let mut restated = BTreeSet::<String>::new();
+        let mut notices = Vec::new();
+        for board in &boards {
+            let mine = tasks_of(board);
+            let mut renamed = BTreeMap::<String, String>::new();
             for t in &mine {
-                let id = t["id"].as_str().unwrap_or("").to_string();
+                let id = id_of(t);
                 if taken.contains(&id) {
-                    renamed.insert(id, format!("t-{next}"));
+                    let to = format!("t-{next}");
                     next += 1;
+                    let done = t["done"].as_bool().unwrap_or(false);
+                    if let Some(owner) = t["owner"].as_str().filter(|_| !done) {
+                        notices.extend(notice_to(
+                            owner,
+                            json!({"board": "task_moved", "from": id, "to": to}),
+                        ));
+                    }
+                    restated.insert(id.clone());
+                    restated.insert(to.clone());
+                    renamed.insert(id, to);
                 }
             }
+            for t in &mine {
+                let id = id_of(t);
+                taken.insert(renamed.get(&id).cloned().unwrap_or(id));
+            }
+            renames.push(renamed);
+        }
+        let mut tasks = Vec::<Value>::new();
+        let mut all_leases = Vec::<Value>::new();
+        for (board, renamed) in boards.iter().zip(&renames) {
+            let mine = tasks_of(board);
+            let own: BTreeSet<String> = mine.iter().map(id_of).collect();
+            let mut unmet = BTreeMap::<String, String>::new();
             for mut t in mine {
                 let rename = |id: &str| renamed.get(id).cloned().unwrap_or_else(|| id.to_string());
-                let id = rename(t["id"].as_str().unwrap_or(""));
-                t["id"] = Value::String(id.clone());
+                t["id"] = Value::String(rename(&id_of(&t)));
                 if let Some(deps) = t["depends_on"].as_array_mut() {
                     for d in deps.iter_mut() {
-                        if let Some(x) = d.as_str() {
-                            *d = Value::String(rename(x));
-                        }
+                        let Some(x) = d.as_str() else {
+                            continue;
+                        };
+                        let to = if own.contains(x) {
+                            rename(x)
+                        } else if taken.contains(x) {
+                            // Another board's task has this id: an id no task has keeps it unmet, as it was on its own board.
+                            unmet
+                                .entry(x.to_string())
+                                .or_insert_with(|| {
+                                    next += 1;
+                                    format!("t-{}", next - 1)
+                                })
+                                .clone()
+                        } else {
+                            x.to_string()
+                        };
+                        *d = Value::String(to);
                     }
                 }
-                taken.insert(id);
                 tasks.push(t);
             }
-            for l in board["leases"].as_array().cloned().unwrap_or_default() {
-                if held.insert(l["path"].as_str().unwrap_or("").to_string()) {
-                    leases.push(l);
+            all_leases.extend(board["leases"].as_array().cloned().unwrap_or_default());
+        }
+        // Leases (#1150). A live lease whose holder runs keeps its path before one whose holder is gone (not running in the project,
+        // or on a node that started again since this hub opened: `load` and the next `sync` free those), first board first. Every
+        // other live lease on that path is passed on as ended, so `load` says it released (a window still shows the older hub's
+        // grant) and both holders are told, as when a join finds the path held. An ended lease is passed on too, for the same
+        // reason, unless the holder that keeps the path is its own (its release would end the kept lease in the window's view).
+        let restarted = self
+            .restarted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let gone = |holder: &str| {
+            !running(holder)
+                || holder
+                    .split_once('/')
+                    .is_some_and(|(node, _)| restarted.contains(node))
+        };
+        let fields = |l: &Value| -> Option<(String, String, u64)> {
+            Some((
+                l["path"].as_str()?.to_string(),
+                l["holder"].as_str()?.to_string(),
+                l["expires_at_ms"].as_u64()?,
+            ))
+        };
+        let live = |l: &&Value| fields(l).is_some_and(|(_, _, expires)| expires > now_ms);
+        let mut keeper = BTreeMap::<String, String>::new();
+        for pass_gone in [false, true] {
+            for (path, holder, _) in all_leases.iter().filter(live).filter_map(fields) {
+                if gone(&holder) == pass_gone {
+                    keeper.entry(path).or_insert(holder);
                 }
             }
         }
-        json!({"next": next, "tasks": tasks, "leases": leases})
-            .to_string()
-            .into_bytes()
+        let mut leases = Vec::<Value>::new();
+        // Live ones first: a holder's kept or refused lease is passed on once, and its ended one then adds nothing.
+        let mut passed = BTreeSet::<(String, String)>::new();
+        let (live_ones, ended_ones): (Vec<&Value>, Vec<&Value>) = all_leases.iter().partition(live);
+        for l in live_ones.into_iter().chain(ended_ones) {
+            let Some((path, holder, expires)) = fields(l) else {
+                continue;
+            };
+            let kept = keeper.get(&path).cloned().unwrap_or_default();
+            if !passed.insert((path.clone(), holder.clone())) {
+                continue;
+            }
+            if expires <= now_ms {
+                if kept != holder {
+                    leases.push(l.clone());
+                }
+                continue;
+            }
+            if kept == holder {
+                leases.push(l.clone());
+                continue;
+            }
+            let mut ended = l.clone();
+            ended["expires_at_ms"] = json!(0);
+            leases.push(ended);
+            notices.extend(notice_to(
+                &holder,
+                json!({"board": "lease_refused", "path": path, "holder": kept}),
+            ));
+            notices.extend(notice_to(
+                &kept,
+                json!({"board": "lease_conflict", "path": path, "other": holder}),
+            ));
+        }
+        Merged {
+            bytes: json!({"next": next, "tasks": tasks, "leases": leases})
+                .to_string()
+                .into_bytes(),
+            notices,
+            restated,
+        }
+    }
+
+    /// ADR-0115 (#1150): `TaskChanged` for each of `ids` the project's board holds, as the board says it when the task changes: what
+    /// a window must be told again after a merge.
+    pub fn task_changes(&self, project: &str, ids: &BTreeSet<String>) -> Vec<Body> {
+        use agora_mesh::broker::TaskStatus;
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = g.get(project) else {
+            return Vec::new();
+        };
+        let (_, tasks) = mesh.export_tasks();
+        tasks
+            .iter()
+            .filter(|t| t.project == project && ids.contains(t.id.as_str()))
+            .map(|t| {
+                Body::TaskChanged(agora_protocol::v1::TaskChanged {
+                    task_id: t.id.as_str().to_string(),
+                    project_id: project.to_string(),
+                    title: t.title.clone(),
+                    claimed_by_agent_id: t
+                        .owner
+                        .as_ref()
+                        .map(|o| o.as_str().to_string())
+                        .unwrap_or_default(),
+                    done: t.status == TaskStatus::Done,
+                })
+            })
+            .collect()
     }
 
     /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
@@ -718,6 +889,7 @@ impl Boards {
             events,
             handoff,
             fanout: None,
+            notices: Vec::new(),
         }
     }
 }
@@ -1036,6 +1208,234 @@ mod tests {
     use super::*;
     use crate::projection::{AgentView, NodeView};
     use agora_protocol::v1::AgentState;
+
+    /// #1150 (ADR-0115 note 4): a dependency on a task its own board no longer has stays unmet after a merge. It never names another
+    /// board's task with that id, whichever board came first; its new id is one no task has, and new tasks never get it.
+    #[test]
+    fn a_merged_dependency_never_names_another_boards_task() {
+        let board = |next: u64, tasks: Value| {
+            json!({"next": next, "tasks": tasks, "leases": []})
+                .to_string()
+                .into_bytes()
+        };
+        let task = |id: &str, title: &str, deps: &[&str]| json!({"id": id, "title": title, "detail": "", "depends_on": deps, "done": false, "owner": null, "summary": ""});
+        // The later board's `t-3` waits for its own `t-1`, gone; the first board's `t-5` waits for its own `t-2`, gone, which the
+        // later board has (and keeps: no earlier board had it).
+        let first = board(
+            6,
+            json!([
+                task("t-1", "first one", &[]),
+                task("t-5", "first five", &["t-2"])
+            ]),
+        );
+        let later = board(
+            4,
+            json!([
+                task("t-2", "later two", &[]),
+                task("t-3", "later three", &["t-1"])
+            ]),
+        );
+        let m = Boards::default().merge_snapshots(&[first, later], 0, |_| true);
+        let v: Value = serde_json::from_slice(&m.bytes).unwrap();
+        let tasks = v["tasks"].as_array().unwrap();
+        let by_title = |t: &str| tasks.iter().find(|x| x["title"] == t).unwrap();
+        let ids: BTreeSet<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(by_title("later two")["id"], "t-2");
+        assert_eq!(by_title("first one")["id"], "t-1");
+        let next = v["next"].as_u64().unwrap();
+        for (title, gone) in [("later three", "t-1"), ("first five", "t-2")] {
+            let dep = by_title(title)["depends_on"][0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_ne!(dep, gone, "{title} names another board's task: {v}");
+            assert!(!ids.contains(dep.as_str()), "{title} waits for a task: {v}");
+            let n: u64 = dep.strip_prefix("t-").unwrap().parse().unwrap();
+            assert!(n < next, "a new task could get {dep}: {v}");
+        }
+        assert!(
+            m.notices.is_empty() && m.restated.is_empty(),
+            "no id was taken twice"
+        );
+        // Loaded, both still wait.
+        let b = Boards::default();
+        b.load("p", &m.bytes, 0);
+        let entries = b.by_project.lock().unwrap()["p"].export_tasks().1;
+        for title in ["later three", "first five"] {
+            let e = entries.iter().find(|e| e.title == title).unwrap();
+            assert!(e.depends_on.iter().all(|d| !ids.contains(d.as_str())));
+        }
+    }
+
+    fn merge_lease(path: &str, holder: &str, expires: u64) -> Value {
+        json!({"path": path, "holder": holder, "expires_at_ms": expires})
+    }
+
+    fn lease_board(leases: Value) -> Vec<u8> {
+        json!({"next": 1, "tasks": [], "leases": leases})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// A merged board's leases as `(path, holder, live)`, and the `(path, holder)` loading it says were released.
+    type MergedLeases = (Vec<(String, String, bool)>, Vec<(String, String)>);
+
+    /// The merged board's leases, and what loading it says was released (see [`MergedLeases`]).
+    fn merged_leases(b: &Boards, m: &Merged, now: u64) -> MergedLeases {
+        let v: Value = serde_json::from_slice(&m.bytes).unwrap();
+        let leases = v["leases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| {
+                (
+                    l["path"].as_str().unwrap().to_string(),
+                    l["holder"].as_str().unwrap().to_string(),
+                    l["expires_at_ms"].as_u64().unwrap() > now,
+                )
+            })
+            .collect();
+        b.load("p", &m.bytes, now);
+        let released = b
+            .by_project
+            .lock()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Body::LeaseReleased(r) => Some((r.path, r.agent_id)),
+                _ => None,
+            })
+            .collect();
+        (leases, released)
+    }
+
+    fn told(node: &str, agent: &str, body: Value) -> Notice {
+        Notice {
+            to_node: node.into(),
+            to_agent: agent.into(),
+            body: body.to_string(),
+        }
+    }
+
+    /// #1150 (ADR-0115 note 4, first half): when two boards' live leases hold one path, the first board's holder keeps it and both
+    /// are told (`lease_refused`, `lease_conflict`), as after a join; the other lease is passed on as ended, so loading says it was
+    /// released. An ended lease never keeps a path from a live one.
+    #[test]
+    fn a_merged_lease_on_a_held_path_tells_both_holders() {
+        let first = lease_board(json!([
+            merge_lease("src/a", "n1/x", 500),
+            merge_lease("src/b", "n1/x", 50)
+        ]));
+        let later = lease_board(json!([
+            merge_lease("src/a", "n2/y", 500),
+            merge_lease("src/b", "n2/y", 500),
+            merge_lease("src/a", "n1/x", 500)
+        ]));
+        let b = Boards::default();
+        let m = b.merge_snapshots(&[first, later], 100, |_| true);
+        let (leases, released) = merged_leases(&b, &m, 100);
+        let live: Vec<(String, String)> = leases
+            .iter()
+            .filter(|l| l.2)
+            .map(|l| (l.0.clone(), l.1.clone()))
+            .collect();
+        assert_eq!(
+            live,
+            [
+                ("src/a".to_string(), "n1/x".to_string()),
+                ("src/b".into(), "n2/y".into())
+            ]
+        );
+        assert_eq!(
+            m.notices,
+            [
+                told(
+                    "n2",
+                    "y",
+                    json!({"board": "lease_refused", "path": "src/a", "holder": "n1/x"})
+                ),
+                told(
+                    "n1",
+                    "x",
+                    json!({"board": "lease_conflict", "path": "src/a", "other": "n2/y"})
+                ),
+            ]
+        );
+        let mut released = released;
+        released.sort();
+        assert_eq!(
+            released,
+            [
+                ("src/a".to_string(), "n2/y".to_string()),
+                ("src/b".into(), "n1/x".into())
+            ]
+        );
+    }
+
+    /// #1150 (review of #1223, H1): an ended lease of any merged board, the folded board's own included, is passed on, so loading says
+    /// it was released and a window that rebuilt its view from the log stops showing it held; but not when the holder that keeps
+    /// the path is its own (its release would end the kept lease in that view).
+    #[test]
+    fn a_merge_passes_ended_leases_on_to_be_released() {
+        let own = lease_board(json!([
+            merge_lease("src/old", "n1/x", 50),
+            merge_lease("src/c", "n1/x", 50)
+        ]));
+        let other = lease_board(json!([merge_lease("src/c", "n1/x", 500)]));
+        let b = Boards::default();
+        let m = b.merge_snapshots(&[own, other], 100, |_| true);
+        let (leases, released) = merged_leases(&b, &m, 100);
+        assert_eq!(released, [("src/old".to_string(), "n1/x".to_string())]);
+        assert!(leases.contains(&("src/c".into(), "n1/x".into(), true)));
+        assert!(m.notices.is_empty());
+    }
+
+    /// #1150 (review of #1223, L2): a lease whose holder is gone (not running in the project, or on a node that started again since
+    /// the hub opened) does not keep a path from a later board's running holder: `load` would free it and leave the path to no one.
+    #[test]
+    fn a_merged_lease_of_a_gone_holder_gives_way_to_a_running_one() {
+        for (first_holder, running) in [("n1/x", false), ("n3/z", true)] {
+            let first = lease_board(json!([merge_lease("src/a", first_holder, 500)]));
+            let later = lease_board(json!([merge_lease("src/a", "n2/y", 500)]));
+            let b2 = Boards::default();
+            b2.node_restarted("n3", 0);
+            let m = b2.merge_snapshots(&[first, later], 100, |h| running || h != first_holder);
+            let (leases, released) = merged_leases(&b2, &m, 100);
+            assert!(
+                leases.contains(&("src/a".into(), "n2/y".into(), true)),
+                "{first_holder}: {leases:?}"
+            );
+            assert_eq!(released, [("src/a".to_string(), first_holder.to_string())]);
+            let held = b2.by_project.lock().unwrap()["p"].export_leases("p", 100);
+            assert_eq!(held.len(), 1);
+            assert_eq!(held[0].1.as_str(), "n2/y");
+        }
+    }
+
+    /// #1150 (review of #1223, L1): the owner of a done task that got a new id is not told (it no longer works on it).
+    #[test]
+    fn a_done_task_moved_by_a_merge_tells_no_one() {
+        let task = |title: &str, done: bool| json!({"id": "t-1", "title": title, "detail": "", "depends_on": [], "done": done, "owner": "n2/y", "summary": ""});
+        let board = |t: Value| {
+            json!({"next": 2, "tasks": [t], "leases": []})
+                .to_string()
+                .into_bytes()
+        };
+        let b = Boards::default();
+        let m = b.merge_snapshots(
+            &[
+                board(task("first", false)),
+                board(task("later, done", true)),
+            ],
+            0,
+            |_| true,
+        );
+        assert!(m.notices.is_empty(), "{:?}", m.notices);
+        assert_eq!(m.restated.len(), 2);
+    }
 
     fn view(online: &[&str]) -> View {
         let mut v = View::default();

@@ -47,6 +47,49 @@ pub enum Announce {
 /// [`EventSink::resync`]). The announcer records `NodeOnline` too, for [`Announce::Restart`] only.
 type Announcer = Box<dyn Fn(&EventSink, Announce) + Send>;
 
+/// The node's announcer (see [`EventSink::announce`]): who it is (only when the hub lost this process's start), its checkouts, and
+/// its present. The supervisor's and the ledger's locks are each taken alone, to copy what they hold, and released before anything
+/// is recorded. The waiting approvals are not copied: they are recorded under the approval queue's lock
+/// ([`NodeApprovals::announce_waiting`](crate::approvals::NodeApprovals::announce_waiting)), so a request decided while the
+/// announcement runs is never stated again after its `ApprovalResolved` (#1150, review of #1216, N3). `before_record` runs once the
+/// copies are taken and before the first record (a test's pause; nothing in the node).
+fn node_announcer(
+    node: String,
+    sup: Arc<Mutex<Supervisor>>,
+    approvals: Arc<crate::approvals::NodeApprovals>,
+    ledger: Arc<crate::ledger::Ledger>,
+    known_checkouts: Vec<(String, PathBuf)>,
+    before_record: Box<dyn Fn() + Send>,
+) -> Announcer {
+    Box::new(move |ev, how| {
+        let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
+        // ADR-0060: the agents still offered to resume, said again after the others.
+        let interrupted: Vec<(crate::ledger::Entry, bool)> = {
+            let found = ledger.interrupted();
+            let s = sup.lock().unwrap_or_else(|e| e.into_inner());
+            found
+                .into_iter()
+                .map(|e| {
+                    let resumable = s.offers_resume(&e);
+                    (e, resumable)
+                })
+                .collect()
+        };
+        before_record();
+        if how == Announce::Restart {
+            ev.node_online(&node);
+        }
+        for (id, root) in &known_checkouts {
+            ev.checkout_discovered(&node, id, root);
+        }
+        ev.announce_present(&views, &[], how);
+        approvals.announce_waiting(|p| ev.approval_requested(p));
+        for (e, resumable) in &interrupted {
+            ev.agent_interrupted(e, *resumable);
+        }
+    })
+}
+
 /// How many resolved approvals a [`Announce::Present`] announcement says again (ADR-0055).
 pub const RESOLVED_KEPT: usize = 256;
 
@@ -465,9 +508,11 @@ impl EventSink {
     /// known name, or (see [`resync`](Self::resync)) a start of this process the hub lost. Without an announcer (a bare sink in
     /// tests) it says nothing.
     ///
-    /// Lock order: the announcer runs under the `announcer` lock and takes the supervisor's and the approvals' locks one at a time
-    /// to read them, then `reported` and `log` one at a time to write; it never holds two of them together. Nothing that holds the
-    /// supervisor's lock ever waits for the `announcer` lock, and `log` is never held while taking another lock.
+    /// Lock order: the announcer runs under the `announcer` lock and takes the supervisor's lock alone to read it, then `reported`
+    /// and `log` one at a time to write. The waiting approvals are recorded under the approval queue's lock (announcer, queue, then
+    /// the sink's own locks: the order is spawner, routes, queue, event sink, and nothing in this sink takes an approvals lock), so
+    /// a request decided meanwhile is never restated after its `ApprovalResolved`. Nothing that holds the supervisor's or an
+    /// approvals lock ever waits for the `announcer` lock, and `log` is never held while taking another lock.
     pub fn announce(&self) {
         self.announce_as(Announce::Restart);
     }
@@ -518,7 +563,8 @@ impl EventSink {
     /// registered, then every agent in `views` that is running, in the order a launch reports it, then `waiting` approvals. For
     /// [`Announce::Present`] also every agent in `views` that ended (`AgentExited` with the last exit code recorded for it, or the
     /// stop convention `i32::MIN`, and `TerminalClosed` if it had a terminal) and the last [`RESOLVED_KEPT`] resolved approvals.
-    /// The callers' locks are already released: `views` and `waiting` are copies.
+    /// The callers' locks are already released: `views` and `waiting` are copies. The node passes no `waiting` and records its
+    /// waiting approvals after this, under the queue's lock (see `node_announcer`): a copy can hold a request decided since.
     pub fn announce_present(
         &self,
         views: &[AgentView],
@@ -2054,43 +2100,15 @@ impl Node {
                 crate::grants::Place::Agent(agent) => ledger.get(agent).map(|e| e.project_id),
             }));
         }
-        {
-            // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): who it is (only when the hub
-            // lost this process's start), its checkouts, and its present. Each lock is taken alone and released before the next, and
-            // before anything is recorded (see `announce`).
-            let (node, sup, approvals, ledger) = (
-                cfg.node_id.clone(),
-                Arc::clone(&supervisor),
-                Arc::clone(&approvals),
-                Arc::clone(&ledger),
-            );
-            events.set_announcer(Box::new(move |ev, how| {
-                let views = sup.lock().unwrap_or_else(|e| e.into_inner()).list();
-                let waiting = approvals.waiting();
-                // ADR-0060: the agents still offered to resume, said again after the others.
-                let interrupted: Vec<(crate::ledger::Entry, bool)> = {
-                    let found = ledger.interrupted();
-                    let s = sup.lock().unwrap_or_else(|e| e.into_inner());
-                    found
-                        .into_iter()
-                        .map(|e| {
-                            let resumable = s.offers_resume(&e);
-                            (e, resumable)
-                        })
-                        .collect()
-                };
-                if how == Announce::Restart {
-                    ev.node_online(&node);
-                }
-                for (id, root) in &known_checkouts {
-                    ev.checkout_discovered(&node, id, root);
-                }
-                ev.announce_present(&views, &waiting, how);
-                for (e, resumable) in &interrupted {
-                    ev.agent_interrupted(e, *resumable);
-                }
-            }));
-        }
+        // What this node says when the hub's record of it cannot be continued (ADR-0054, ADR-0055): see `node_announcer`.
+        events.set_announcer(node_announcer(
+            cfg.node_id.clone(),
+            Arc::clone(&supervisor),
+            Arc::clone(&approvals),
+            Arc::clone(&ledger),
+            known_checkouts,
+            Box::new(|| {}),
+        ));
         // ADR-0089, ADR-0104 C1: the chat history of structured agents on this node's disk; the agents taken up from the holder get
         // theirs back before anything they wrote meanwhile is read (that happens in the supervision tick, which starts below).
         let chat = Arc::new(crate::chat::ChatBoard::saving(transcripts));
@@ -3651,6 +3669,86 @@ mod announce_tests {
             "probe",
             terminal,
         );
+    }
+
+    /// #1150 (review of #1216, N3): a request decided while an announcement runs (after it read what to say, before it records) is
+    /// never stated again after its `ApprovalResolved`, whatever kind it is; a request still waiting is stated. The announcer is the
+    /// one the node installs, paused where it has read the supervisor and the ledger.
+    #[test]
+    fn a_request_decided_during_an_announcement_is_not_restated_after_its_decision() {
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join(format!("agora-announce-{}-race", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sink = Arc::new(EventSink::open(&dir.join("events"), "n1").unwrap());
+        let sup = Arc::new(Mutex::new(Supervisor::new(SupervisorConfig {
+            node: NodeId::new("n1"),
+            restart: RestartPolicy::default(),
+            terminal: TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        })));
+        let approvals = Arc::new(crate::approvals::NodeApprovals::new(
+            "n1",
+            Box::new(crate::approvals::DenyAll),
+        ));
+        let ledger = Arc::new(crate::ledger::Ledger::open(&dir, 1).unwrap());
+        let agent = AgentId::new("agent-1");
+        let decided = approvals
+            .request(&agent, "a-1", "shell.exec", "rm -rf build", now_ms())
+            .unwrap();
+        let waits = approvals
+            .request(&agent, "a-2", "file.write", "notes.md", now_ms())
+            .unwrap();
+        sink.approval_requested(&decided);
+        sink.approval_requested(&waits);
+        let (reached_tx, reached_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let go_rx = Mutex::new(go_rx);
+        sink.set_announcer(node_announcer(
+            "n1".into(),
+            sup,
+            Arc::clone(&approvals),
+            ledger,
+            Vec::new(),
+            Box::new(move || {
+                let _ = reached_tx.send(());
+                let _ = go_rx.lock().unwrap().recv();
+            }),
+        ));
+        let mark = sink.next_seq() - 1;
+        let announcing = {
+            let sink = Arc::clone(&sink);
+            std::thread::spawn(move || sink.announce())
+        };
+        reached_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the announcement reached its pause");
+        // A decision while the announcement is paused: its request leaves the queue, then its resolution is recorded.
+        assert!(approvals.take_pending(&decided.id));
+        sink.approval_resolved(&decided.id, true, "dev-1");
+        go_tx.send(()).unwrap();
+        announcing.join().unwrap();
+        let said = said(&sink, mark);
+        let resolved_at = said
+            .iter()
+            .position(|b| matches!(b, Body::ApprovalResolved(r) if r.approval_id == decided.id))
+            .expect("the decision is recorded");
+        let restated: Vec<usize> = said
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| matches!(b, Body::ApprovalRequested(r) if r.approval_id == decided.id))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            restated.iter().all(|i| *i < resolved_at),
+            "the decided request was stated again after its decision: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|b| matches!(b, Body::ApprovalRequested(r) if r.approval_id == waits.id)),
+            "the request still waiting is stated: {said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An agent taken up from the holder, or said again by an announcement, is stated with where its state came from.
