@@ -1276,11 +1276,19 @@ impl App {
                 ),
                 Span::raw(label),
             ];
+            // Under a theme the selected row is in the accent: its secondary text takes the text on the accent, which is checked to read
+            // there (without one the row is inverted, which keeps it readable as it is).
+            let state_dim =
+                if i == self.selected && self.focus == Focus::Tree && self.look.is_some() {
+                    Style::default()
+                } else {
+                    tree.dim
+                };
             if !state.is_empty() {
                 spans.push(Span::raw(" ".repeat(gap)));
                 spans.push(Span::styled(
                     state,
-                    if row.needs_you { attention } else { tree.dim },
+                    if row.needs_you { attention } else { state_dim },
                 ));
             }
             let mut line = Line::from(spans);
@@ -4764,6 +4772,11 @@ mod theme_tests {
         let sel = &buf[(a.tree.x + 3, a.tree.y + 1)];
         assert_eq!(sel.bg, look.styles.chosen.bg.unwrap());
         assert!(!sel.modifier.contains(Modifier::REVERSED));
+        // Its secondary text (the state) takes the text on the accent, not the secondary colour that may not read on the accent.
+        assert_eq!(
+            buf[(a.tree.right() - 1, a.tree.y + 1)].fg,
+            look.styles.chosen.fg.unwrap()
+        );
         // Without a theme nothing is filled: the terminal's own colours.
         let (_, plain) = frame(None, ColorMode::Full, None);
         assert_eq!(plain[(a.terminal.x + 5, a.terminal.y + 5)].bg, Color::Reset);

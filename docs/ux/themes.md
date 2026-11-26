@@ -335,6 +335,16 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 `agora tui` reads the same theme files, format 1 and 2, with the same rules (ADR-0113 decision 4, build step 3;
 `crates/agora-tui/src/theme/`).
 
+![The terminal client in Slate, a request's box on top: drawn in the terminal's own colours, as are the "needs you" marks](../screenshots/adr113-tui-slate-dark.png)
+![The same in Sand (light), on a dark terminal](../screenshots/adr113-tui-sand-light.png)
+![Slate on a 16-colour terminal: every pair mapped to one that reads](../screenshots/adr113-tui-slate-16-colours.png)
+![The sample theme above: its terminal palette, and lines under the tab bar and above the footer (pane-borders: always)](../screenshots/adr113-tui-harbour-chrome.png)
+![The theme list on the sample theme, drawn in it, with what the terminal client does not use](../screenshots/adr113-tui-theme-list.png)
+![A file that cannot be used, with every reason](../screenshots/adr113-tui-theme-list-refused.png)
+
+These are drawn by the client into ratatui's test screen and shown in a browser (the terminal's own colours as #1c1c1c and
+#d0d0d0), so the cells are exactly what the client writes.
+
 - **Where themes come from.** The six built-in themes above, and every `*.json` file directly in the **themes folder**:
   `themes` in the Agora folder, so `~/.agora/themes` (or `$AGORA_HOME/themes`), beside the client's device key. The theme in use
   is kept in `tui-theme` there (one line: `terminal`, `built-in <id>` or `file <dark|light> <file name>`). The first entry,
