@@ -139,6 +139,9 @@ person relies on needs them (`FIXED_KEYS`):
 
 - An entry **replaces** that command's keys; `[]` takes them all away. A command the file does not name keeps its defaults.
 - The file holds only the person's changes. Export writes it as it is, and Import reads it back the same.
+- A [theme pack](themes.md#theme-packs) can carry a keybindings file. Importing one merges it over yours after a confirmation that
+  shows which of your keys it replaces and which keys would do two things; the rules here (fixed keys, no command that answers a
+  request) hold for it unchanged.
 
 ### Reading a file (validation)
 
