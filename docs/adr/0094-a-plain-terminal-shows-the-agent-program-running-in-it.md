@@ -22,6 +22,25 @@ user-visible viewport". Touches the threat model (a program name is untrusted da
 
 Origin: the maintainer, 2026-11-20: "I open a plain terminal and then run claude, codex, wrongstack inside it myself: will we notice them?"
 
+## Amendment A: the Windows lookup (2026-11-27)
+
+Approved by the maintainer on 2026-11-27 ("Evet, değiştir"), after step 3 was measured on a Windows 11 machine (about 800 processes) with
+Agora's own pseudoconsole and job setup.
+
+- **The rule.** The program in front is the newest direct child of the console's shell (a child created after its parent, by parent
+  pid), followed down while that child is a shell (`cmd`, `pwsh`, `powershell`, `sh`) or a `cmd.exe` running a `.cmd`. "The newest
+  descendant" is not stable: Claude Code starts `conhost.exe`, `reg.exe` and `git.exe` helpers and Codex starts `conhost.exe`, so at
+  10 ms polls the newest descendant changed 6 to 10 times in the first 1.3 s; the newest direct child never did.
+- **What it recognises.** A native install (`claude.exe`) and a bun install (`codex.exe` shim, then `node.exe`, then `codex.exe`) match by
+  image name. An agent installed as an npm `.cmd`/`.ps1` shim shows only as `node.exe` and is not recognised (arguments are never read).
+  A program started in the background (`start /b`, `Start-Process -NoNewWindow`) is a direct child too and stays marked while the prompt
+  is in front, since Windows has no foreground group; the window's help says both.
+- **The cost.** The terminal's job object misses programs started from Store-packaged PowerShell (the default `pwsh` install), so the
+  lookup reads one Toolhelp snapshot of the machine (p50 14 to 30 ms, p95 27 to 44 ms, max 53 ms), shared by every terminal and taken
+  at most once per 2 s tick, only while some Shell is watched or not idle (about 1% of a core). An ended program leaves the tree within
+  35 ms, so the mark ends at the next tick.
+- Built in `agora-platform/src/windows.rs` behind the existing foreground-program call; nothing else changes.
+
 ## Context
 - A plain terminal is the `shell` kind. The node knows the shell it started and nothing about the programs the person runs in it. A
   Claude Code, Codex or WrongStack started by hand shows as an idle shell: no kind, no state (working, asks you, idle), no needs-you card,
@@ -33,7 +52,8 @@ Origin: the maintainer, 2026-11-20: "I open a plain terminal and then run claude
 ## Decision
 1. **The node looks at the terminal's foreground program, not at the screen.** On Unix, the foreground process group of the agent's PTY
    (`tcgetpgrp` on the master) and the executable of its leader. On Windows, which has no foreground group on a pseudoconsole, the
-   newest descendant of the shell that owns the console. The lookup is OS-specific and lives only in `agora-platform`. It runs at a low
+   newest direct child of the shell that owns the console, followed down while that child is itself a shell (Amendment A; this
+   sentence said "the newest descendant" before it). The lookup is OS-specific and lives only in `agora-platform`. It runs at a low
    fixed rate (about every 2 s, only while someone watches the agent or the agent is not idle) and is never in the terminal byte path.
 2. **Names map to kinds through data.** A manifest may carry `[match] executables = ["claude", "claude.exe"]`. The node compares the
    executable's file name (never its arguments, never its path contents) with the installed manifests. The first match marks the shell
