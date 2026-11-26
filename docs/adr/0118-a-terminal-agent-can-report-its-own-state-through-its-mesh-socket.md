@@ -25,10 +25,10 @@ notifies on every `Blocked`/`Done` event and dedupes only for 60 s (`agora-hub::
 The manifest has a `[hooks]` section (`install = "builtin:example"` in the spec's example) that the engine parses and ignores
 (`crates/agora-adapters/src/manifest.rs`, P4-05 "Not done: hooks").
 
-herdr, another terminal multiplexer for coding agents (Apache-2.0; its design was read, no code was taken), installs hooks into the
+A comparable agent workspace, another terminal multiplexer for coding agents (its public design was read, no code was taken), installs hooks into the
 configuration of 18 agents and lets any agent call `pane report-agent --source --agent --state --seq [-- <resume argv>]` (study of
 2026-11-25, section G3). A sequence number drops late reports, and an approval visible on screen overrides a stale "working" from a
-hook. Agents then get exact state without a change to herdr.
+hook. Agents then get exact state without a change to that workspace.
 
 What the agents offer, as far as checked here:
 
@@ -75,7 +75,7 @@ Constraints:
 
 3. **The report carries a state and an order, nothing else.**
    `{"token": "...", "state": "working" | "blocked" | "idle" | "done", "seq": <u64>, "session_id": "..." (optional)}`.
-   - `unknown` cannot be reported. No resume command, no text, no approval, no permission decision: herdr's `-- <resume argv>` is not
+   - `unknown` cannot be reported. No resume command, no text, no approval, no permission decision: a resume command line passed by the hook is not
      taken (a command line from an agent would be a way to run something on the next restart; `[resume]` stays in the manifest).
    - `seq` orders reports of one run: a report whose `seq` is not greater than the last accepted one is dropped (hooks run as
      separate processes and can arrive out of order). `agora agent report` fills it with the wall clock in microseconds when the caller
@@ -193,7 +193,7 @@ Constraints:
   method only the hook command uses keeps it out of the model's tool list. (A model that runs shell commands can still run
   `agora agent report`; decision 4 bounds what that achieves.)
 - **A separate report socket per agent.** One more endpoint per agent, one more sandbox allow-list entry, the same identity.
-- **Writing hooks into the person's configuration (herdr's `integration install`).** It edits files the person owns, applies to every
+- **Writing hooks into the person's configuration (an "integration install" command).** It edits files the person owns, applies to every
   run of the tool including runs outside Agora and nested ones, and a write in the worktree replaces the file (`write_in_worktree`),
   which would drop the person's own project settings.
 - **Hook reports as sticky as an adapter's.** A stale `working` would hide a permission question on screen until the process ends.

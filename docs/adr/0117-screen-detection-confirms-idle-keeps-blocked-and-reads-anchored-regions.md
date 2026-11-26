@@ -17,24 +17,24 @@ order breaking ties (a stable sort in `Detector::new`, spec "Ties in priority ar
 opinion", the adaptive `Pacer`, `[[ready]]`/`[[typed]]` (ADR-0057), and `agora agent explain`, which decides exactly as detection does.
 Title rules for Claude Code and Codex are in review (PR #1204) and need no engine change.
 
-A comparison with herdr, another terminal multiplexer for coding agents (Apache-2.0; its design was read, no code was taken), found
+A comparison with a comparable agent workspace, another terminal multiplexer for coding agents (its public design was read, no code was taken), found
 detection layers Agora does not have (study of 2026-11-25, section G2):
 
-- **Timing guards.** herdr delays working→idle until three checks 100 ms apart agree, re-announces blocked every 800 ms, and allows
+- **Timing guards.** Another workspace delays working→idle until three checks 100 ms apart agree, re-announces blocked every 800 ms, and allows
   3 s at start. Agora applies every reading at once (`tick_agent`: `set_state(entry, state, Origin::Screen, ..)` on each check). A
   redraw that briefly shows the prompt box between two tool calls can read as idle, and a dialog being redrawn can read as not
   blocked for one check; each such flicker would be an `AgentStateChanged` on the wire and in the hub's event store. (No event log
   of such a flicker is at hand; the timed captures of the build measure it.)
-- **Regions relative to the input box.** herdr reads the inside of the prompt box, the rows above it, and what is below the last
+- **Regions relative to the input box.** Another workspace reads the inside of the prompt box, the rows above it, and what is below the last
   horizontal rule. With only bottom-anchored regions, an old approval question that scrolled to just above the input box can still be
   inside `bottom_lines(n)` and read as blocked after it was answered.
-- **Rules that freeze the state.** herdr has `skip_state_update`: while a transcript viewer or model picker is open, the state does not
+- **Rules that freeze the state.** Another workspace has a "skip state update" rule: while a transcript viewer or model picker is open, the state does not
   change. In Agora "no match" keeps the state, but a full-screen view shows old transcript text, and a lower rule (a prompt marker, an
   "esc to interrupt" line in the transcript) can match it.
 - **OSC 9;4 progress reports.** Some agents send the terminal progress sequence `ESC ] 9 ; 4 ; <state> ; <percent>`; the study says
   Claude Code sends state 0 when idle. `agora-vt` ignores it (`alacritty_terminal` does not report OSC 9). No shipped fixture holds
   that sequence today (checked: the captured Claude Code 2.1.319 screens have OSC 0 titles only), so the claim is not yet evidence.
-- **Rule updates without a release.** herdr fetches detection manifests from its website, unsigned. Agora reads only built-in
+- **Rule updates without a release.** Another workspace fetches detection manifests from its website, unsigned. Agora reads only built-in
   manifests and the node's manifests folder.
 
 Constraints that shape the answer:
@@ -64,7 +64,7 @@ Constraints that shape the answer:
    - **Blocked is kept, not re-announced.** While `blocked`, a reading of another state is applied only after no blocked rule matched
      on any check for `blocked_hold_ms`. Input the person sends to the terminal (keys, a paste, an answer) ends the hold at once, so an
      answered prompt shows `working` without the delay. Nothing is sent again while the state stays `blocked`: the node never
-     re-emits a state it already announced (herdr's periodic re-announce is rejected, see Alternatives).
+     re-emits a state it already announced (a periodic re-announce is rejected, see Alternatives).
    - **The pacer during a pending change.** While a change is pending, the next check is due at the visible floor (100 ms) whether the
      terminal is visible or not, and the pacer's back-off does not apply; the pacer records "changed" only when a change is applied.
      So a visible terminal shows idle within about `idle_confirm_ms` plus one check of the first idle reading, and a hidden one costs
@@ -78,7 +78,7 @@ Constraints that shape the answer:
      an open question.
 
 2. **Hold rules (`state = "hold"`, engine 7).** A `[[rules]]` entry may say `state = "hold"`: when it is the highest-priority
-   matching rule, detection stops there and the state stays as it is (this is herdr's `skip_state_update`). It differs from "no
+   matching rule, detection stops there and the state stays as it is (other workspaces call this a "skip state update" rule). It differs from "no
    match" because it stops lower rules that would match the old text a full-screen view shows. A manifest using it says
    `min_engine = 7` (an older engine would refuse the unknown state value anyway; `min_engine` makes the refusal name the reason).
    - `Detector::detect` returns one of three outcomes: a state, a hold (with the rule id), or no opinion. At the three call sites in
@@ -92,7 +92,7 @@ Constraints that shape the answer:
    - Hold is not allowed in `[[ready]]` or `[[typed]]` (they have `state = "idle"` only).
 
 3. **Anchored regions (engine 7).** A manifest defines anchors, rows found by a regex on the live screen, and rules read regions
-   relative to them. This is the generic form of herdr's `prompt_box_body`, `above_prompt_box` and `after_last_horizontal_rule`:
+   relative to them. This is the generic form of the named regions other workspaces use (inside the prompt box, above it, after the last horizontal rule):
    ```toml
    [[anchor]]
    id = "box_top"                 # a-z, 0-9, _ ; at most 32; at most 8 anchors
@@ -112,7 +112,7 @@ Constraints that shape the answer:
    ```
    - `below(a)` is every row under the lowest row matching `a`; `above(a, n)` is the `n` non-empty rows right above it (`n` 1..=200);
      `between(a, b)` is the rows strictly between the lowest row matching `b` and the lowest row matching `a` above it. Anchor rows
-     themselves are not in the region. The named herdr regions are recipes: the prompt box is `between` its top and bottom border, an
+     themselves are not in the region. Those named regions are recipes: the prompt box is `between` its top and bottom border, an
      approval left above the box is `above(box_top, n)`, "after the last horizontal rule" is `below` an anchor `^[─━]{8,}$`, and
      Codex's input is `below` an anchor on its `› ` marker.
    - **Live screen only.** Anchors are looked for in the bottom `search` rows of the screen grid, never scrollback and never a viewport
@@ -198,15 +198,15 @@ Constraints that shape the answer:
 
 ## Alternatives considered
 
-- **Re-announce blocked periodically (herdr).** Every re-announce is an event in the hub's store and on the wire, and the notifier
+- **Re-announce blocked periodically.** Every re-announce is an event in the hub's store and on the wire, and the notifier
   would notify again after its 60 s window. A hold inside the node gives the same stability with one event.
 - **One engine-wide debounce for every manifest.** Changes the behaviour of every manifest, community ones included, without fixtures
   for their timing. Kept as an open question once the shipped manifests have measured values.
-- **Named prompt-box regions as engine built-ins (herdr).** Each new box style would need engine code. Anchors express the same
+- **Named prompt-box regions as engine built-ins.** Each new box style would need engine code. Anchors express the same
   regions as data.
-- **herdr's `whole_recent` and `top_non_empty_lines` regions.** They read rows that can be above the live bottom of the buffer; not
+- **Regions that read the whole recent screen or its top non-empty lines.** They read rows that can be above the live bottom of the buffer; not
   taken.
-- **Unsigned remote manifests (herdr), or rules pushed by the hub.** Either lets a party other than the release key change what a node
+- **Unsigned remote manifests or rules pushed by the hub.** Either lets a party other than the release key change what a node
   believes about its agents; the hub cannot widen node policy (ADR-0020).
 - **Leave flicker to the window** (smooth it in the client). The events would still be stored and sent, and the hub's notifier and
   every client would each need the same logic.
@@ -247,11 +247,11 @@ Each step is its own PR; steps 2 to 5 raise `ENGINE_VERSION` to 7 once (the firs
 
 ## Open questions
 
-- Default values: `idle_confirm_ms = 300` and `blocked_hold_ms = 800` (herdr's numbers) until the timed captures say otherwise? And
+- Default values: `idle_confirm_ms = 300` and `blocked_hold_ms = 800` (the numbers another workspace uses) until the timed captures say otherwise? And
   should the engine apply defaults to manifests without a `[detection]` table?
 - Budget: `docs/design/performance.md` says a screen-detected change is visible within 300 ms. Should that row say it is measured for
   `blocked` and `working`, with `idle` after `working` allowed `idle_confirm_ms` more?
-- A start grace (herdr: 3 s) that keeps `unknown` while the agent draws its first screen: needed, or does "no opinion" already cover
+- A start grace (3 s elsewhere) that keeps `unknown` while the agent draws its first screen: needed, or does "no opinion" already cover
   it?
 - Signed updates: worth building before the release pipeline signs any list (the agent-package list is not signed yet either)? Default
   off, or on for the first-party list once it exists? Build the first-party public key into the binary, or keep it an owner-placed
