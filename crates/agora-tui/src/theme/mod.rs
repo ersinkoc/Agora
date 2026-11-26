@@ -11,6 +11,7 @@ pub mod file;
 pub mod folder;
 pub mod list;
 pub mod map;
+pub mod pack;
 
 pub use colour::Rgb;
 
