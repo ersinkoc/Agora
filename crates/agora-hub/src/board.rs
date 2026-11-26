@@ -1277,12 +1277,11 @@ mod tests {
             .into_bytes()
     }
 
-    /// The merged board's leases as `(path, holder, live)`, and what loading it says was released.
-    fn merged_leases(
-        b: &Boards,
-        m: &Merged,
-        now: u64,
-    ) -> (Vec<(String, String, bool)>, Vec<(String, String)>) {
+    /// A merged board's leases as `(path, holder, live)`, and the `(path, holder)` loading it says were released.
+    type MergedLeases = (Vec<(String, String, bool)>, Vec<(String, String)>);
+
+    /// The merged board's leases, and what loading it says was released (see [`MergedLeases`]).
+    fn merged_leases(b: &Boards, m: &Merged, now: u64) -> MergedLeases {
         let v: Value = serde_json::from_slice(&m.bytes).unwrap();
         let leases = v["leases"]
             .as_array()
