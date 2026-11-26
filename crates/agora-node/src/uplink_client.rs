@@ -971,8 +971,14 @@ where
                 // The hub saw a gap and says where to start again.
                 (STREAM_CONTROL, kinds::RESUME_OK) => {
                     if let Ok(r) = ResumeOk::decode(f.payload.as_slice()) {
+                        // As in the arms above: a suspension that ended with this frame is still seen, and the send is not counted.
+                        if waited.jumped(live.suspended_after) {
+                            return Err(LinkError::Suspended);
+                        }
                         let replay = up.on_gap(r.from_seq)?;
                         send_replay(&mut conn, replay, limit).await?;
+                        // F1700 (review of #1221): a slow resync announcement is not a suspension either.
+                        waited = Wake::now();
                     }
                 }
                 _ => {}
@@ -2343,5 +2349,203 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&dir);
         assert!(matches!(r, Ok(Err(LinkError::Silent))), "{r:?}");
+    }
+
+    /// How long [`SlowOnce`] holds its slow write: longer than [`SLOW_LIVE`]'s `suspended_after`, well within its send deadline
+    /// (as a send of 10 to 25 s is with the real [`Liveness::DEFAULT`]).
+    const SLOW_SEND: Duration = Duration::from_millis(1200);
+
+    const SLOW_LIVE: Liveness = Liveness {
+        // No ping while the test runs, so the slow write is the one under test.
+        ping_every: Duration::from_secs(3600),
+        deadline: Duration::from_secs(5),
+        suspended_after: Duration::from_millis(500),
+        post_deadline: POST_DEADLINE,
+    };
+
+    /// The node's end of an in-memory link whose first write after `armed` is set takes [`SLOW_SEND`]: a hub that reads slowly.
+    struct SlowOnce {
+        inner: tokio::io::DuplexStream,
+        armed: Arc<AtomicBool>,
+        delay: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+    }
+
+    impl AsyncRead for SlowOnce {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for SlowOnce {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            b: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            use std::future::Future;
+            let this = &mut *self;
+            if this.delay.is_none() && this.armed.swap(false, Ordering::AcqRel) {
+                this.delay = Some(Box::pin(tokio::time::sleep(SLOW_SEND)));
+            }
+            if let Some(d) = this.delay.as_mut() {
+                std::task::ready!(d.as_mut().poll(cx));
+                this.delay = None;
+            }
+            std::pin::Pin::new(&mut this.inner).poll_write(cx, b)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    /// What makes the node send while the hub reads slowly.
+    #[derive(Clone, Copy, Debug)]
+    enum SlowSend {
+        /// A routed command, whose answer the node sends.
+        Answer,
+        /// A gap the node can no longer serve (ADR-0054), so it sends `SnapshotRequired`.
+        Resync,
+    }
+
+    /// Runs a node's conversation where the one send `trigger` causes takes [`SLOW_SEND`], then stops it a moment after the hub has
+    /// read that send; returns how the conversation ended.
+    fn slow_send(
+        name: &str,
+        trigger: SlowSend,
+    ) -> Result<Result<(), LinkError>, tokio::time::error::Elapsed> {
+        let dir =
+            std::env::temp_dir().join(format!("agora-link-{}-slow-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sink = Arc::new(match trigger {
+            SlowSend::Answer => EventSink::open(&dir, "n1").unwrap(),
+            // A small buffer that already dropped its oldest events.
+            SlowSend::Resync => {
+                let sink = EventSink::open_with_cap(&dir, "n1", 600).unwrap();
+                for i in 0..40 {
+                    sink.node_resources("n1", i, i, 0);
+                }
+                assert!(sink.oldest_retained() > 1);
+                sink
+            }
+        });
+        let tail = sink.next_seq();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let r = rt.block_on(async {
+            let (node_io, hub_io) = tokio::io::duplex(64 * 1024);
+            let armed = Arc::new(AtomicBool::new(false));
+            let hub_armed = Arc::clone(&armed);
+            let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+            let hub = tokio::spawn(async move {
+                let mut c = ws::accept(hub_io).await.unwrap();
+                assert_eq!(c.recv().await.unwrap().unwrap().kind, kinds::HELLO);
+                let welcome = Welcome {
+                    chosen_generation: 1,
+                    ..Default::default()
+                };
+                let w = frame(STREAM_CONTROL, kinds::WELCOME, welcome.encode_to_vec());
+                c.send(&w).await.unwrap();
+                assert_eq!(c.recv().await.unwrap().unwrap().kind, kinds::RESUME);
+                let ok = |from_seq| {
+                    frame(
+                        STREAM_CONTROL,
+                        kinds::RESUME_OK,
+                        ResumeOk { from_seq }.encode_to_vec(),
+                    )
+                };
+                c.send(&ok(tail)).await.unwrap();
+                // The node's next write is slow: the one this frame makes it send.
+                hub_armed.store(true, Ordering::Release);
+                let expected = match trigger {
+                    SlowSend::Answer => {
+                        let req = CommandRequest {
+                            request_id: "r1".into(),
+                            command: Some(command_request::Command::DirectoryInspect(
+                                Default::default(),
+                            )),
+                            ..Default::default()
+                        };
+                        c.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
+                            .await
+                            .unwrap();
+                        (STREAM_COMMANDS, 1)
+                    }
+                    SlowSend::Resync => {
+                        c.send(&ok(1)).await.unwrap();
+                        (STREAM_CONTROL, kinds::SNAPSHOT_REQUIRED)
+                    }
+                };
+                let mut seen = Some(seen_tx);
+                while let Ok(Some(f)) = c.recv().await {
+                    if (f.stream_id, f.kind) == expected {
+                        if let Some(tx) = seen.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            });
+            let io = SlowOnce {
+                inner: node_io,
+                armed,
+                delay: None,
+            };
+            let conn = ws::connect(io, "ws://hub/").await.unwrap();
+            let stop = AtomicBool::new(false);
+            let none = AtomicBool::new(false);
+            let talk = converse(
+                conn, &sink, &stop, None, None, None, None, SLOW_LIVE, None, &none, None,
+            );
+            let stopper = async {
+                if seen_rx.await.is_ok() {
+                    // Long enough for the conversation to come back to the top of its loop after the slow send.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                stop.store(true, Ordering::Release);
+                std::future::pending::<()>().await;
+            };
+            let r = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::select! {
+                    r = talk => r,
+                    () = stopper => unreachable!(),
+                }
+            })
+            .await;
+            hub.abort();
+            r
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    }
+
+    /// F1700: a send that takes longer than a ping interval but less than the send deadline (a hub that reads slowly) is not taken
+    /// for a suspension: the link stays up. Before, the time the send took counted as time the process did not run, and the link was
+    /// given up and dialled again. Both for an answer to a routed command and for the resync announcement after a gap (review of
+    /// #1221: that send was still counted).
+    #[test]
+    fn a_slow_send_is_not_taken_for_a_suspension() {
+        for trigger in [SlowSend::Answer, SlowSend::Resync] {
+            let started = std::time::Instant::now();
+            let r = slow_send(&format!("{trigger:?}"), trigger);
+            assert!(matches!(r, Ok(Ok(()))), "{trigger:?}: {r:?}");
+            assert!(
+                started.elapsed() >= SLOW_SEND,
+                "{trigger:?}: the send was slow"
+            );
+        }
     }
 }
