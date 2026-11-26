@@ -328,6 +328,9 @@ async function livePart() {
     await page.waitForTimeout(800);
     await each('terminal', async () => { await page.goto(`${origin}/#/agent/${key(shell)}`); await page.waitForSelector('.xterm-rows'); await page.waitForTimeout(800); });
 
+    // The conversation is driven on a desktop width (the shots above may have left the page a phone, where a request folds to a line).
+    await page.setViewportSize(WIDTHS.desktop);
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
     await page.goto(`${origin}/#/agent/${key(chat)}`);
     await page.waitForSelector('form textarea', { timeout: 30000 });
     const say = async (text) => { for (let i = 0; i < 5; i++) { await page.fill('form textarea', text); await page.waitForTimeout(300); if ((await page.inputValue('form textarea')) === text) break; } await page.click('button:has-text("Send")'); };

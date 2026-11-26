@@ -8,7 +8,7 @@ after the fixes of this pass.
 
 ## How the pictures were made
 
-`scripts/screenshots-visual-pass.mjs` makes all 78 of them (its header has the commands). It also measures each shot and prints leads:
+`scripts/screenshots-visual-pass.mjs` makes all 86 of them (its header has the commands). It also measures each shot and prints leads:
 controls under 44 px on the phone, text cut off without an ellipsis, a page that scrolls sideways, internal words in visible text or in
 a control's name, and text below 4.5:1 (3:1 when large) on its own background. The leads were checked against the pictures by eye.
 
@@ -44,8 +44,10 @@ Each row has four pictures (dark and light, desktop and phone) unless it says ot
 | Safe mode | `safe-mode` | demo | `?safe` with a plugin's pane in the layout |
 | Terminal | `terminal` | live | a shell with a little output |
 | Chat agent | `chat` | live | the fake agent's thinking, a tool call, a plan, and a request to run a command |
-| Board | `board` | live | Backlog, Doing and Done over real tasks. Desktop only: the phone has no way to the board (finding 15) |
-| Team chat | `team-chat` | live | two messages between agents in the Team chat pane. Desktop only, as the board |
+| Board | `board` | live | Backlog, Doing and Done over real tasks; on the phone the board's screen (`#/board`, from More, finding 15) with the board open |
+| Team chat | `team-chat` | live | two messages between agents in the Team chat pane; on the phone its own screen (`#/messages`) |
+| More (phone) | `phone-more` | demo | the phone's bottom bar with More open: the board, Team chat and Usage. Phone only |
+| Usage (phone) | `usage` | demo | Usage as a phone screen of its own (`#/usage`). Phone only; on a desktop it is a side panel subject |
 
 ## Findings
 
@@ -65,13 +67,13 @@ needs a decision; it has a proposal instead.
 | 9 | Changes, Files | Line numbers were the secondary ink at 70 %: 3.2:1 on light, 4.3:1 on dark, 2.9:1 on a deleted line | Contrast 4.5:1 | Fixed: the secondary ink at full strength (4.5:1 or better). `changes-*`, `files-*` |
 | 10 | Home (phone) | A closed agent's row was faded to 70 %: its folder name read 3.3:1 on light, 4.2:1 on dark | Contrast | Fixed: the row is not faded; the name is in the secondary ink. `home-phone-*` |
 | 11 | Agent list (desktop) | The filter's hint was cut off: "Filter by agent, machine or projec" | No text cut off; short sidebar text | Fixed: the hint is "Filter"; its accessible name keeps the whole sentence. `home-desktop-*` |
-| 12 | Theme editor, agent list, Settings | Section titles in small capitals: THEME, PREVIEW, COLOURS, AGENTS, THIS DEVICE, MY MACHINES | Section titles are sentence case | Follow-up: the global `h2`, `.ide-section` and Settings' `.set-nav__overline` are documented debt of the redesign plan; a sentence-case title at the strong size (14, semibold, no letter spacing), as Home's and the phone's already are |
-| 13 | Every page | A language menu ("Browser default") in the title bar of every page, with no label, and again in Settings | Complexity budget: every setting justifies itself | Follow-up: keep Language in Settings and in the palette ("Language: …"), take it out of the title bar |
+| 12 | Theme editor, agent list, Settings | Section titles in small capitals: THEME, PREVIEW, COLOURS, AGENTS, THIS DEVICE, MY MACHINES | Section titles are sentence case | Fixed in the follow-up branch (`claude/visual-followups`): the global `h2`, `.ide-section`, the Agents title and Settings' side index are sentence case at the strong step (14, semibold, no letter spacing). `theme-editor-*`, `home-desktop-*`, `settings-desktop-*` |
+| 13 | Every page | A language menu ("Browser default") in the title bar of every page, with no label, and again in Settings | Complexity budget: every setting justifies itself | Fixed in the follow-up branch: no language menu in any title bar; Settings (Appearance), the palette ("Language: …") and the sign-in page keep it. Every `*-desktop-*` with a title bar |
 | 14 | Pairing | Two primary buttons on My machines while a machine asks: Add a machine and Numbers match…; the open box's **Close** does not say what it closes | One primary action per screen | Follow-up: Add a machine becomes secondary while a request is shown; Close reads "Stop allowing new machines" |
-| 15 | Board, Team chat, Usage (phone) | The phone has no way to the board, Team chat or Usage: no panes, and the dock has Search, Start, Machines and Settings | Deep layer reached on demand | Follow-up: a phone screen for each with Back (as the theme editor), opened from the palette |
-| 16 | Chat agent (phone) | With a request open, the request card, the Needs you strip, the composer and the dock leave about two lines for the conversation | Focus layer: the agent's work is visible | Follow-up: while the dock holds the request, the card at the top folds to one line |
-| 17 | Changes (light) | Word-level marks in a changed line: text on the green mark 4.0:1, on the red mark 3.7:1 | Contrast | Follow-up: draw the marks from the `--tint-*` tokens so text keeps 4.5:1 |
-| 18 | Agent list (desktop) | A machine row shows the memory Agora uses ("30 MB") beside its agent count | Short sidebar text | Follow-up: leave memory to My machines, where it already is |
+| 15 | Board, Team chat, Usage (phone) | The phone has no way to the board, Team chat or Usage: no panes, and the dock has Search, Start, Machines and Settings | Deep layer reached on demand | Fixed in the follow-up branch: **More** in the phone's bottom bar (rows of 44 px) opens the board (`#/board`), Team chat (`#/messages`) and Usage (`#/usage`), each a screen with Back as the theme editor. `phone-more-phone-*`, `board-phone-*`, `team-chat-phone-*`, `usage-phone-*` |
+| 16 | Chat agent (phone) | With a request open, the request card, the Needs you strip, the composer and the dock leave about two lines for the conversation | Focus layer: the agent's work is visible | Fixed in the follow-up branch: while the bar holds the request, the card above folds to one line (icon, the ask's title, a chevron) that answers nothing; a tap on it or the bar's Review and decide opens it in place, whose answers wait a fresh dwell. `chat-phone-*`, `approval-phone-*` |
+| 17 | Changes (light) | Word-level marks in a changed line: text on the green mark 4.0:1, on the red mark 3.7:1 | Contrast | Fixed in the follow-up branch: the marks are the `--tint-finished` / `--tint-danger` fill with a 2 px underline in the role's colour; the weakest code ink (muted) keeps 5.7:1 on them in light, 5.9:1 in dark. `changes-*` |
+| 18 | Agent list (desktop) | A machine row shows the memory Agora uses ("30 MB") beside its agent count | Short sidebar text | Fixed in the follow-up branch: the machine row shows its agent count only; memory stays on My machines. `first-run-desktop-*` |
 | 19 | Home (demo only) | The demo window's desktop Home says "0 Machines online" and Usage lists Laptop, Build server and Windows PC twice, because the demo gives the desktop no machines and some demo agents no machine id | Not a product bug; misleading pictures | Follow-up: the demo passes its machines to the desktop view too |
 | 20 | Changes (phone, long diffs) | In a diff drawn in a window (very long), "Show unchanged lines" keeps the fixed row height | 44 px | Follow-up: a taller row for the gap on touch |
 | 21 | Theme import | The preview's "$ npm test" line is 3.9:1 | Contrast | No change: it is the imported theme's own comment colour, shown as it is so the person can judge it |
@@ -82,8 +84,11 @@ needs a decision; it has a proposal instead.
 Honest notes from looking at the pictures, beyond the table:
 
 - **Repeated requests.** One request can be on screen three times on a desktop (the agent's pane, a Needs you pane, the side panel) and
-  twice on a phone (the list and the dock). Each is by design on its own; together they are heavy. Worth a look in the approvals redesign.
-- **Tab names.** With three tabs open at 1440 px the pane tabs cut agent names short ("w… · rose") while the strip has room.
+  twice on a phone (the list and the dock). Each is by design on its own; together they are heavy. Worth a look in the approvals redesign;
+  left for it (not a small change). On a phone agent's screen the card now folds to one line while the dock holds it (finding 16).
+- **Tab names.** With three tabs open at 1440 px the pane tabs cut agent names short ("w… · rose") while the strip has room. The room was
+  the slot of a fourth tab, cut off and not drawn, and the three drawn sat at their floor because the strip overflowed anyway. Fixed in the
+  follow-up branch: tabs shrink only when that makes them all fit; otherwise each keeps its whole name and the strip scrolls. `home-desktop-*`
 - **The import dialog** lists VS Code setting names (`editor.background`, `semanticHighlighting`). They are the source app's words, but
   they read as engineering text.
 - **Colour.** Calm surfaces hold everywhere; colour comes from state pills and the amber Needs you. The light theme is as careful as the
