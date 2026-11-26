@@ -5,13 +5,8 @@ ADR-0114 (Accepted) lets community plugins add panels to the web window (and the
 a package from a local file for development. Storing plugins on the hub, installing them for a hub and keeping grants per person are
 step 3; the reviewed catalog is step 4.
 
-**Waiting on the maintainer:** a frame is a blob page, and a blob page keeps the window's own page policy as well as its own. With the
-window's policy as ADR-0114 decision 2 has it (only `frame-src blob:` added), the frame loads but no script can run in it. ADR-0114
-Amendment A (Proposed) adds `blob:` to the window's `script-src` and the window's loader to the frame's `script-src`; until it is
-accepted, plugin panes show an empty frame when served by the hub. Everything else on this page is built and tested.
-
-The code is in `apps/web/src/plugins/`; the frame's loader is `apps/web/public/plugin-frame.js`; a sample plugin is
-`apps/web/plugins/sample/`.
+The code is in `apps/web/src/plugins/`; the frame page and its loader are `apps/web/public/plugin-frame.html` and `plugin-frame.js`;
+the hub's headers for them are in `crates/agora-hub/src/web.rs`; a sample plugin is `apps/web/plugins/sample/`.
 
 ## What a plugin is
 
@@ -83,24 +78,30 @@ A plugin panel's body is `<iframe sandbox="allow-scripts">`: never `allow-same-o
 window's storage, its IndexedDB signing key, its cookies or its connection to the hub), and no `allow-forms`, `allow-popups`,
 `allow-modals`, `allow-top-navigation` or `allow-downloads`.
 
-Its page is a blob the window makes (`plugins/frameDoc.ts`). The first thing in it is its own page policy:
+Its page is one the hub serves beside the window's files, `/plugin-frame.html` (ADR-0114 Amendment A), under headers of its own
+(`web.rs`, `PLUGIN_FRAME_CSP`):
 
 ```
-default-src 'none'; script-src blob: <window>/plugin-frame.js; style-src blob: 'unsafe-inline'; img-src blob: data:; font-src blob:;
-connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'
+Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline';
+  img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'
+X-Frame-Options: SAMEORIGIN
 ```
 
-ADR-0114's, with the window's loader added to `script-src` (Amendment A). Then the loader, and nothing of the plugin's.
+- **Opaque on its own too:** the `sandbox` directive gives the page an opaque origin even when it is opened directly, outside any
+  window, and the loader does nothing there.
+- **No network at all:** `connect-src 'none'`, WebSocket included; no images, fonts or pages from anywhere.
+- **Framed only by the hub's own pages:** `frame-ancestors 'self'` and `SAMEORIGIN`.
+- **The window's policy is not loosened.** It gains only `frame-src 'self'`; every other path of the hub keeps its headers exactly
+  (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), so the frame page is the only page that can be framed. A frame can navigate itself
+  only to the hub's own pages, which refuse to be framed. `web.rs` tests the headers of each path.
+- The page itself holds the same policy in a `<meta>` (without what only a header can say) for the development server, which sends no
+  headers.
 
-**Why a loader.** Chromium does not let an opaque frame load a blob the window made ("Not allowed to load local resource"), so the
-plugin's files cannot be blobs of the window's. The loader, the window's own script served beside its files, takes the checked files
-from the window by message, makes them into blobs inside the frame and runs the entry. Stylesheets become `<style>` elements; images
-are given as `data:` addresses through `agora.file(name)`.
-
-**Two policies at once.** A blob page keeps the window's policy too, so whatever runs in the frame must pass both. The window's
-`connect-src` allows `ws:`/`wss:`; the frame's `connect-src 'none'` takes it away. The window's `frame-src blob:` is what stops the frame
-navigating itself to any address outside a blob, and a blob page the frame makes and goes to keeps the frame's policies (its maker's). In step 2, with the window's `img-src 'self' data:` and no `font-src`, a plugin's
-images work as `data:` addresses and its fonts do not load (it draws in the system's fonts).
+**Why a page of the hub's, and a loader.** A blob page the window made would keep the window's policy as well as its own, so no script
+could run in it without `blob:` in the window's own `script-src`; and Chromium does not let an opaque frame load a blob the window made
+("Not allowed to load local resource"). So the page is the hub's, and its one script is the window's loader: it takes the checked files
+from the window by message (the window sends them to that frame only), makes them into blobs inside the frame's opaque origin and runs
+the entry. Stylesheets become `<style>` elements; `agora.file(name)` gives a `blob:` address of one of the plugin's images or fonts.
 
 ## Messages
 
@@ -109,7 +110,7 @@ A small set over `postMessage`, version 1 (`plugins/protocol.ts`). Every message
 | From | Type | Fields | |
 | --- | --- | --- | --- |
 | frame | `boot` | | the loader is ready (once) |
-| window | `load` | `plugin`, `panel`, `granted`, `entry`, `scheme`, `files` | the checked files (once) |
+| window | `load` | `plugin`, `panel`, `granted`, `entry`, `scheme`, `lang`, `dir`, `files` | the checked files (once) |
 | frame | `read` | `id`, `cap` | one answer |
 | frame | `watch` | `id`, `cap` | an answer now and an `update` on each change (at most 16 at once) |
 | frame | `unwatch` | `id` | |
@@ -184,9 +185,11 @@ runs.
 
 - Unit (`apps/web/src/plugins/*.test.ts*`): the package checks, the message filter by source, type, size and rate, grants, the store,
   the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode.
-- Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's page policy read from `web.rs`): every probe of
-  ADR-0114's Verification list fails from inside a frame, and so does the frame going to a blob page it made, judged by the servers'
-  request logs; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read answers
-  and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a package loads through the dialog.
-  `--amendment-a` runs the same under the policy Amendment A proposes.
-- Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`).
+- Hub (`web.rs`): the exact headers of each path; only `/plugin-frame.html` has the frame page's.
+- Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's headers per path, read from `web.rs` by
+  `scripts/hub-headers.mjs`): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
+  and the frame going to a blob page it made, judged by the servers' request logs; the frame page opened on its own is opaque and
+  reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
+  answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
+  package loads through the dialog.
+- Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).

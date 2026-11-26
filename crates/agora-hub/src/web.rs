@@ -592,10 +592,41 @@ where
         return Ok(First::Answered);
     }
     match assets.and_then(|a| a.get(path)) {
-        Some(a) => respond(&mut stream, 200, a.content_type, &a.body, head_only).await?,
+        Some(a) => {
+            // A plugin's frame page (ADR-0114 Amendment A) is the one file framed, by this hub's own window only, under its own
+            // policy; every other file keeps the window's headers.
+            let page = if path == PLUGIN_FRAME_PATH {
+                Page::PluginFrame
+            } else {
+                Page::App
+            };
+            respond_as(&mut stream, 200, a.content_type, &a.body, head_only, page).await?
+        }
         None => respond(&mut stream, 404, "text/plain", b"not found", head_only).await?,
     }
     Ok(First::Answered)
+}
+
+/// The page a plugin's sandboxed frame shows (ADR-0114 decision 2 and Amendment A), from the web app's files.
+pub const PLUGIN_FRAME_PATH: &str = "/plugin-frame.html";
+
+/// The window's page policy. The only frame it shows is its own plugin frame page (`frame-src 'self'`): every other page of the hub
+/// refuses to be framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
+const APP_CSP: &str = "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
+                       frame-src 'self'; frame-ancestors 'none'";
+
+/// The plugin frame page's own policy: opaque even when opened on its own (`sandbox allow-scripts`), the window's loader and the
+/// blobs it makes inside the frame, no network at all (WebSocket included), no frames, forms or base, and framed only by this hub's
+/// own pages. `apps/web/src/plugins/panel.test.tsx` holds `frameDoc.ts` `FRAME_POLICY` equal to it.
+const PLUGIN_FRAME_CSP: &str = "sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; \
+                                style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; \
+                                frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+
+/// Which headers an answer carries.
+#[derive(Clone, Copy)]
+enum Page {
+    App,
+    PluginFrame,
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -608,6 +639,17 @@ async fn respond<S: AsyncWrite + Unpin>(
     content_type: &str,
     body: &[u8],
     head_only: bool,
+) -> io::Result<()> {
+    respond_as(stream, status, content_type, body, head_only, Page::App).await
+}
+
+async fn respond_as<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    page: Page,
 ) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
@@ -624,14 +666,16 @@ async fn respond<S: AsyncWrite + Unpin>(
         429 => "Too Many Requests",
         _ => "Request Header Fields Too Large",
     };
-    // The app talks only to its own origin; nothing is framed, sniffed or loaded from elsewhere. The one frame it shows is a plugin's
-    // sandboxed blob page (ADR-0114 decision 2), whose own policy takes away the network and everything else.
+    // The app talks only to its own origin; nothing is sniffed or loaded from elsewhere, and nothing is framed but the plugin frame
+    // page, by this hub's own window (ADR-0114 Amendment A).
+    let (frame_options, csp) = match page {
+        Page::App => ("DENY", APP_CSP),
+        Page::PluginFrame => ("SAMEORIGIN", PLUGIN_FRAME_CSP),
+    };
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data:; frame-src blob:; frame-ancestors 'none'\r\n\
-         Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
+         X-Content-Type-Options: nosniff\r\nX-Frame-Options: {frame_options}\r\nReferrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: {csp}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
@@ -728,6 +772,65 @@ mod tests {
         assert_eq!(a.get("/").unwrap().body, b"shell");
     }
 
+    // The window's headers, exactly: framed by no one, framing only the hub's own plugin frame page (ADR-0114 Amendment A).
+    const APP_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n\
+        Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
+        img-src 'self' data:; frame-src 'self'; frame-ancestors 'none'\r\nCache-Control: no-cache\r\n";
+    // The plugin frame page's headers, exactly: opaque even on its own, no network, framed only by the hub's own pages.
+    const FRAME_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: SAMEORIGIN\r\nReferrer-Policy: no-referrer\r\n\
+        Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; \
+        style-src 'self' blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; \
+        form-action 'none'; base-uri 'none'; frame-ancestors 'self'\r\nCache-Control: no-cache\r\n";
+
+    async fn get(path: &str, assets: &dyn Assets) -> String {
+        let (mut c, s) = tokio::io::duplex(1 << 16);
+        let req = format!("GET {path} HTTP/1.1\r\nHost: h\r\n\r\n");
+        c.write_all(req.as_bytes()).await.unwrap();
+        route(s, None, Some(assets), None).await.unwrap();
+        let mut out = String::new();
+        c.read_to_string(&mut out).await.unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn only_the_plugin_frame_page_has_headers_of_its_own() {
+        static FILES: &[(&str, &[u8])] = &[
+            ("index.html", b"shell"),
+            ("plugin-frame.html", b"frame"),
+            ("plugin-frame.js", b"loader"),
+            ("assets/app.js", b"js"),
+        ];
+        let a = EmbeddedAssets(FILES);
+        let frame = get("/plugin-frame.html", &a).await;
+        assert!(frame.starts_with("HTTP/1.1 200 OK"), "{frame}");
+        assert!(frame.contains(FRAME_HEADERS), "{frame}");
+        assert!(frame.ends_with("frame"));
+        // A query does not change the path.
+        assert!(get("/plugin-frame.html?x=1", &a)
+            .await
+            .contains(FRAME_HEADERS));
+        for path in [
+            "/",
+            "/index.html",
+            "/plugin-frame.js",
+            "/assets/app.js",
+            "/plugin-frame.html/",
+            "//plugin-frame.html",
+            "/a/../plugin-frame.html",
+            "/route",
+            "/missing.js",
+        ] {
+            let out = get(path, &a).await;
+            assert!(out.contains(APP_HEADERS), "{path}: {out}");
+            assert!(!out.contains("SAMEORIGIN"), "{path}");
+        }
+        // Without a frame page among the files, the path is a 404 with the window's headers.
+        static NONE: &[(&str, &[u8])] = &[("index.html", b"shell")];
+        let out = get("/plugin-frame.html", &EmbeddedAssets(NONE)).await;
+        assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+        assert!(out.contains(APP_HEADERS), "{out}");
+    }
+
     #[tokio::test]
     async fn a_plain_get_is_answered_and_an_upgrade_is_handed_on() {
         struct One;
@@ -751,14 +854,7 @@ mod tests {
         let mut out = String::new();
         c.read_to_string(&mut out).await.unwrap();
         assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
-        // The page policy, exactly: the only frames are blob pages (a plugin's, ADR-0114 decision 2).
-        assert!(
-            out.contains(
-                "Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
-                 img-src 'self' data:; frame-src blob:; frame-ancestors 'none'\r\n"
-            ),
-            "{out}"
-        );
+        assert!(out.contains(APP_HEADERS), "{out}");
         assert!(out.ends_with("hello"));
         assert!(task.await.unwrap().unwrap());
 

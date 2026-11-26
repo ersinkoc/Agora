@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { hubHeaders } from './hub-headers.mjs';
 import { pack } from './pack-plugin.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -25,10 +26,13 @@ const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('pla
 const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
 
+// Every answer carries the headers the hub sends for its path (scripts/hub-headers.mjs, from web.rs), so the pages are captured under
+// the hub's real page policies, the plugin frame page's own included.
 const server = createServer((req, res) => {
-  const path = join(dist, !req.url || req.url === '/' ? 'index.html' : req.url.split('?')[0]);
-  if (!existsSync(path)) { res.writeHead(404).end(); return; }
-  res.writeHead(200, { 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
+  const url = (req.url ?? '/').split('?')[0];
+  const path = join(dist, url === '/' ? 'index.html' : url);
+  if (!existsSync(path)) { res.writeHead(404, hubHeaders(url, false)).end(); return; }
+  res.writeHead(200, { ...hubHeaders(url), 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
 }).listen(0, '127.0.0.1');
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}/`;

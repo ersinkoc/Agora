@@ -6,7 +6,7 @@
 //   watch   { id, cap }           an answer now and an `update` each time it changes, until `unwatch`
 //   unwatch { id }
 // Window → frame:
-//   load    { plugin, panel, granted, entry, files }   the checked files (once, in answer to `boot`)
+//   load    { plugin, panel, granted, entry, scheme, lang, dir, files }   the checked files (once, in answer to `boot`)
 //   result  { id, ok: true, data } | { id, ok: false, error }   error: not-granted | unknown-capability | unavailable | too-many
 //   update  { id, data }
 //
@@ -27,7 +27,7 @@ export type Inbound =
   | { type: 'unwatch'; id: number };
 export type ReadError = 'not-granted' | 'unknown-capability' | 'unavailable' | 'too-many';
 export type Outbound =
-  | { agora: 1; type: 'load'; plugin: { id: string; name: string; version: string }; panel: string; granted: readonly Capability[]; entry: string; scheme: 'dark' | 'light'; files: { name: string; type: string; bytes: Uint8Array }[] }
+  | { agora: 1; type: 'load'; plugin: { id: string; name: string; version: string }; panel: string; granted: readonly Capability[]; entry: string; scheme: 'dark' | 'light'; lang: string; dir: 'ltr' | 'rtl'; files: { name: string; type: string; bytes: Uint8Array }[] }
   | { agora: 1; type: 'result'; id: number; ok: true; data: unknown }
   | { agora: 1; type: 'result'; id: number; ok: false; error: ReadError }
   | { agora: 1; type: 'update'; id: number; data: unknown };

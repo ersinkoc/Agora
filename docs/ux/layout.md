@@ -99,7 +99,7 @@ an agent makes a pane `agent`.
 - **Plugins (ADR-0114 build step 2, `plugins.md`):** the plugin bridge (`apps/web/src/plugins/registry.tsx`) registers each panel of a
   loaded, granted plugin after the built-ins as `plugin.<plugin id>.<panel id>`, with `kind` `global` or `tool`, never `lone` or
   `streams`, the Fluent label "Plugin", and the plugin's name as plain text (`plugin`, which the pane's name and the pane bar's marker
-  read). Its drawing turns the pane's context into the plugin view at once and gives the sandboxed frame only that.
+  read). Its drawing turns the pane's context into the plugin view at once and gives the sandboxed frame (the hub's `/plugin-frame.html`) only that.
 
 ## Reading a layout (validation)
 

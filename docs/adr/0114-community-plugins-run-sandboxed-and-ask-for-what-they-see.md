@@ -3,6 +3,7 @@ Status: Accepted
 Date: 2026-11-25
 
 Accepted: 2026-11-25 (the maintainer, in the merger chat, chose "Sandboxed" for decision 1, the trade-off). The open questions were not answered; the proposed answers stand.
+Amended: 2026-11-26 (Amendment A below: the frame is a page the hub serves under its own header policy).
 
 Answers ADR-0068's open question on custom panels ("the contract first, the loader later, or a plugin system now?"). Touches
 ADR-0020 and ADR-0028 (approvals are signed by a device key in the window), ADR-0048 (the desktop app), ADR-0097 (Proposed: the hub
@@ -56,15 +57,18 @@ The maintainer wants community plugins next to community themes, "like herdr".
      - It is `sandbox="allow-scripts"` and never `allow-same-origin`. So it has an opaque origin and cannot reach the window's
        storage, its IndexedDB key, its cookies or its connection to the hub.
      - It has no `allow-forms`, `allow-popups`, `allow-modals`, `allow-top-navigation` or `allow-downloads`.
-   - **Loading:** the frame is built from the plugin's checked files (decision 5). Every file is a blob made from those bytes,
-     never loaded from a URL.
-   - **The frame's own page policy:**
-     - It is put first in the frame and combines with the window's: `default-src 'none'; script-src blob:; style-src blob:
-       'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none';
-       base-uri 'none'`.
-     - No network at all, including WebSocket. The window's own policy allows `ws:`/`wss:` anywhere, so this one must not
-       inherit that.
-   - **The window's policy** gains only `frame-src blob:`.
+   - **The frame's page (Amendment A):** one page the hub serves beside the window's files (`/plugin-frame.html`), under a
+     header policy of its own, never a page the window makes:
+     - `sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; style-src 'self' blob: 'unsafe-inline'; img-src blob:
+       data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'`,
+       with `X-Frame-Options: SAMEORIGIN`.
+     - The `sandbox` directive keeps the page opaque even when it is opened on its own. No network at all, including WebSocket.
+     - It runs only the window's loader (`/plugin-frame.js`).
+   - **Loading:** the frame is built from the plugin's checked files (decision 5). The window sends the bytes to its own frame by
+     message; the loader makes every file a blob inside the frame's opaque origin and runs the entry. Nothing is loaded from a
+     plugin's URL.
+   - **The window's policy** is not loosened: it gains only `frame-src 'self'`, and every other page of the hub still refuses to be
+     framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
    - **The desktop app:** its webview grants the hub's page nothing (ADR-0048 decision 2), so a frame inside it has nothing to
      reach either.
 3. **The interface: a small, versioned message set over `postMessage`, and capabilities the person grants.**
@@ -157,7 +161,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
 1. **The panel registry** (ADR-0068 rung 3): built-in panels move onto it. Plugins need it. Done: `docs/ux/layout.md`, "The
    panel registry (rung 3)".
 2. **The sandbox host:** the frame, the page policy, the message set with the read capabilities, the host-drawn header, safe
-   mode, and local development loading. Done: `docs/ux/plugins.md`; under the hub, frames run once Amendment A is accepted.
+   mode, and local development loading. Done: `docs/ux/plugins.md`.
 3. **Storage on the hub,** install and remove, and per-person grants (schema messages, fixtures).
 4. **The catalog:** repository, review rules, signatures, `agora hub plugin` commands.
 5. **Further capabilities,** each by amendment.
@@ -186,36 +190,34 @@ The maintainer wants community plugins next to community themes, "like herdr".
   panel" placeholder (ADR-0113 decision 5).
 - **Node-side automations on events:** a separate ADR when wanted.
 
-## Amendment A (Proposed, 2026-11-26): a plugin frame needs a loader, and blob scripts in the window's policy
+## Amendment A (accepted by the maintainer 2026-11-26, in the merger chat): the frame is a page the hub serves under its own header policy; the window's policy is not loosened
 
-Not accepted. Nothing in this amendment is final until the maintainer decides; build step 2 is built with it and waits on it.
+Accepted: 2026-11-26 (the maintainer, in the merger chat, chose the hub-served frame page over loosening the window's `script-src`).
+Decision 2 is worded with it.
 
-**Why.** Found while building step 2 (`docs/ux/plugins.md`), in Chromium 156:
+**Why.** Found while building step 2, in Chromium 156:
 
-- **A blob page keeps the window's policy.** A frame whose page is a blob the window made applies the window's page policy as well as
-  its own (the policy container is inherited by local-scheme pages). The window's policy has no `script-src`, so `default-src 'self'`
-  governs scripts in the frame. Decision 2's frame policy allows scripts only from `blob:`. No address passes both, so no script can
-  run in the frame: "Loading the script 'blob:null/…' violates the following Content Security Policy directive: "default-src 'self'"".
-- **An opaque frame cannot load the window's blobs.** A script blob the window made is refused in the frame ("Not allowed to load local
-  resource": blob addresses are partitioned by origin), so the plugin's files cannot simply be blobs of the window's.
+- **The window's policy stacks on a blob frame.** A frame whose page is a blob the window made keeps the window's page policy as well as
+  its own (local-scheme pages inherit their maker's policy container). The window has no `script-src`, so `default-src 'self'` governs
+  scripts in the frame, while the frame allowed scripts only from `blob:`: no script could run in it. Making it run would have meant
+  `blob:` in the window's own `script-src`.
+- **An opaque frame cannot load the window's blobs.** A script blob the window made is refused in an opaque frame ("Not allowed to load
+  local resource": blob addresses are partitioned by origin), so the plugin's files could not be blobs of the window's either.
 
-**Proposed.**
+**Decided.**
 
-1. **A loader.** The frame's page names one script by its full address: the window's own loader, served beside the window's files
-   (`plugin-frame.js`). The frame's policy is decision 2's with that address added to `script-src`. The loader takes the checked files
-   from the window by message, makes them into blobs inside the frame and runs the entry; stylesheets become `<style>` elements (both
-   policies allow `'unsafe-inline'` styles), images are `data:` addresses.
-2. **The window's policy** gains `script-src 'self' blob:` beside `frame-src blob:`, so the plugin's blob scripts made in the frame can
-   run. Nothing else changes: `img-src`, `style-src` and `font-src` stay as they are, so a plugin's images work as `data:`, its styles
-   inline, and its fonts are the system's.
+1. **The frame's page is served by the hub** at `/plugin-frame.html`, from the web app's files, with headers of its own: the policy in
+   decision 2 (with `sandbox allow-scripts`, so the page is opaque even on its own, and `frame-ancestors 'self'`) and
+   `X-Frame-Options: SAMEORIGIN`. A page from the network keeps only its own policy, so the window's does not stack on it.
+2. **The window's loader** (`/plugin-frame.js`) is the one script of that page. The window sends the plugin's checked files to that
+   frame only, by message; the loader makes them into blobs inside the frame's opaque origin and runs the entry.
+3. **The window's policy** gains only `frame-src 'self'` (it was to gain `frame-src blob:`). Every other path of the hub keeps today's
+   headers exactly, `X-Frame-Options: DENY` and `frame-ancestors 'none'` included, so the frame page is the only page that can be
+   framed, and only by the hub's own pages. `web.rs` tests the headers of each path.
 
-**What it costs.** `blob:` in the window's `script-src` also lets a blob script run in the window itself. Making one needs script
-already running in the window, so it adds no way in for markup injected into the page; it is the one widening of the window's policy.
+**What it costs.** `script-src 'self'` in the frame page also allows the hub's other scripts there; they run in the frame's opaque
+origin with no network, like the plugin. A frame can navigate itself only to the hub's own pages (`frame-src 'self'`), which refuse to
+be framed. The frame page is one more file the hub serves with headers of its own.
 
-**Alternative.** The hub serves the frame's page from an address of its own with a page policy of its own (no inheritance), and the
-window's policy gains `frame-src 'self'` instead. The window's `script-src` stays as it is, but the hub's `X-Frame-Options: DENY` and
-`frame-ancestors 'none'` need an exception for that one page, and the frame's page is no longer made from the checked bytes alone.
-
-**Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's policy read from `web.rs`
-(with only `frame-src blob:` added, the frame never runs and the positive checks fail) and, with `--amendment-a`, under the policy
-above (every check passes).
+**Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's headers per path (read from
+`web.rs`), the frame page opened on its own included; the real hub binary serves the same headers and the sample plugin draws in it.

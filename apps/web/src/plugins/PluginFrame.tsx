@@ -8,7 +8,7 @@ import { mergeLines, type ChatLine } from '../net/chat';
 import { themeStore } from '../themes/store';
 import { COLOR_TOKENS } from '../themes/tokens';
 import type { Capability } from './capabilities';
-import { FRAME_SANDBOX, frameDocument, loaderUrl } from './frameDoc';
+import { FRAME_SANDBOX, frameUrl } from './frameDoc';
 import { type CheckedPlugin, type PluginPanelDecl, typeOf } from './package';
 import { type PluginView, type ThemeFacts, project, projectChanges, projectChat } from './projection';
 import { type Inbound, type MessageRouter, type Outbound, MAX_WATCHES, frameFilter, gate, messageRouter } from './protocol';
@@ -44,14 +44,6 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   const [dropped, setDropped] = useState(0);
   const flushNow = useRef<() => void>(() => {});
   const m = plugin.manifest;
-  // The frame's page, made for this pane when it is drawn and let go when it is not; its address is a blob only this window made.
-  const [src, setSrc] = useState<string>();
-  useEffect(() => {
-    const url = URL.createObjectURL(new Blob([frameDocument(loaderUrl(location.origin, import.meta.env.BASE_URL), getLanguage(), directionOf(getLanguage()))], { type: 'text/html;charset=utf-8' }));
-    setSrc(url);
-    return () => URL.revokeObjectURL(url);
-  }, []);
-
   useEffect(() => {
     const win = frame.current?.contentWindow;
     if (!win) return;
@@ -114,7 +106,7 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
         if (booted) return;
         booted = true;
         const files = [...plugin.files].map(([name, bytes]) => ({ name, type: typeOf(name) ?? 'application/octet-stream', bytes }));
-        post({ agora: 1, type: 'load', plugin: { id: m.id, name: m.name, version: m.version }, panel: panel.id, granted: [...granted], entry: m.entry, scheme: themeStore.scheme(), files });
+        post({ agora: 1, type: 'load', plugin: { id: m.id, name: m.name, version: m.version }, panel: panel.id, granted: [...granted], entry: m.entry, scheme: themeStore.scheme(), lang: getLanguage(), dir: directionOf(getLanguage()), files });
         return;
       }
       if (msg.type === 'unwatch') { watches.get(msg.id)?.close?.(); watches.delete(msg.id); return; }
@@ -148,7 +140,7 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   useEffect(() => { flushNow.current(); });
 
   return (
-    <iframe ref={frame} src={src} sandbox={FRAME_SANDBOX} referrerPolicy="no-referrer" title={t('plugin-frame-title', { name: panel.name ?? m.name })}
+    <iframe ref={frame} src={frameUrl(import.meta.env.BASE_URL)} sandbox={FRAME_SANDBOX} referrerPolicy="no-referrer" title={t('plugin-frame-title', { name: panel.name ?? m.name })}
       className="block min-h-0 w-full flex-1 border-0 bg-transparent" data-plugin-frame={m.id} data-plugin-dev={dev ? '' : undefined} data-dropped={dropped} />
   );
 }

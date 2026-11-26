@@ -1,20 +1,16 @@
-// End-to-end check of sandboxed plugin panels (ADR-0114 build step 2, its Verification list) in a real Chromium, under the page policy
-// the hub really sends (read from crates/agora-hub/src/web.rs). Each probe is a plugin of its own, loaded in a fresh window, and each must
-// fail: storage (IndexedDB, localStorage, cookies), the network (fetch and WebSocket to the hub and to an outside host, an outside image
-// and font), a popup, top navigation, the frame navigating itself away, a form post, and reading the window's document. Network
-// probes are judged from outside the frame: by the two servers' request logs and the browser's own request log, never by the frame's
-// word alone. Then: a granted read answers, one not granted answers "not granted", unknown and oversized messages are ignored and
-// counted, the window's pane bar and marker cannot be covered, `?safe` and the safe-mode key load no plugin and the built-in theme,
-// and a package is loaded through the window's own dialog with the person's grant.
+// End-to-end check of sandboxed plugin panels (ADR-0114 build step 2, its Verification list, and Amendment A) in a real Chromium, under
+// the headers the hub really sends per path (scripts/hub-headers.mjs reads them from crates/agora-hub/src/web.rs): the window's own
+// policy for every page, and the plugin frame page's own for `/plugin-frame.html`. Each probe is a plugin of its own, loaded in a fresh
+// window, and each must fail: storage (IndexedDB, localStorage, cookies), the network (fetch to the hub, to a hub endpoint and to an
+// outside host, WebSocket to both, an outside image and font), a popup, top navigation, the frame navigating itself away (to an outside
+// address and to a blob page it made), a form post, and reading the window's document; and the frame page opened on its own stays
+// opaque. Network probes are judged from outside the frame: by the two servers' request logs and the browser's finished requests, never
+// by the frame's word alone, and a probe counts only when the frame ran. Then: a granted read answers, one not granted answers "not
+// granted", unknown and oversized messages are ignored and counted, the window's pane bar and marker cannot be covered, `?safe` and the
+// safe-mode key load no plugin and the built-in theme, and a package is loaded through the window's own dialog with the person's grant.
 //
 //   (cd apps/web && npm ci && npm run gen && npm run build)
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-plugin-sandbox.mjs
-//   PW_DIR=... node scripts/e2e-plugin-sandbox.mjs --amendment-a   # under the policy ADR-0114 Amendment A proposes (Proposed, not built)
-//
-// A frame is a blob page, so the window's policy applies inside it as well as its own. Under the hub's policy as it is (`frame-src blob:`
-// added, decision 2) the frame loads but no script runs in it, so every probe below reports nothing and the positive checks fail:
-// that is the evidence for Amendment A, which adds `blob:` to the window's `script-src`. `--amendment-a` runs the same checks under that
-// policy; it changes only this test's server, never the hub.
 //
 // Needs a Chromium (CHROME=<path>, default: Playwright's cache). Starts two local servers on 127.0.0.1; changes nothing else.
 import { createHash } from 'node:crypto';
@@ -23,6 +19,7 @@ import { createRequire } from 'node:module';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
+import { hubHeaders, APP_CSP, PLUGIN_FRAME_CSP } from './hub-headers.mjs';
 import { pack } from './pack-plugin.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
@@ -31,16 +28,8 @@ const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('pla
 const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
-// The hub's response headers, as web.rs writes them (its line continuations joined).
-const rs = readFileSync(join(root, 'crates/agora-hub/src/web.rs'), 'utf8');
-const at = rs.indexOf('Content-Security-Policy: ');
-const HUB_CSP = rs.slice(at + 'Content-Security-Policy: '.length, rs.indexOf('\\r\\n', at)).replace(/\\\n\s*/g, '');
-if (!HUB_CSP.includes("frame-ancestors 'none'")) throw new Error(`could not read the hub's policy: ${HUB_CSP}`);
-const amendment = process.argv.includes('--amendment-a');
-const CSP = amendment ? HUB_CSP.replace("default-src 'self';", "default-src 'self'; script-src 'self' blob:;") : HUB_CSP;
-if (amendment) console.log('PROPOSED policy (ADR-0114 Amendment A), not what the hub sends today:');
-const HEADERS = { 'content-security-policy': CSP, 'x-frame-options': 'DENY', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'cache-control': 'no-cache' };
-console.log(`hub policy: ${CSP}`);
+console.log(`window policy: ${APP_CSP}`);
+console.log(`frame page policy: ${PLUGIN_FRAME_CSP}`);
 
 const hubLog = [];
 const loaderOrigins = [];
@@ -48,10 +37,14 @@ const outLog = [];
 const hub = createServer((req, res) => {
   hubLog.push(req.url);
   if (req.url?.startsWith('/plugin-frame.js')) loaderOrigins.push(req.headers.origin ?? '');
-  if (req.url?.startsWith('/probe')) { res.writeHead(200, { ...HEADERS, 'access-control-allow-origin': '*' }).end('ok'); return; }
-  const path = join(dist, !req.url || req.url.split('?')[0] === '/' ? 'index.html' : req.url.split('?')[0]);
-  if (!existsSync(path)) { res.writeHead(404, HEADERS).end(); return; }
-  res.writeHead(200, { ...HEADERS, 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
+  const url = (req.url ?? '/').split('?')[0];
+  // The hub's own endpoints answer as a careless one would (CORS open), so only the frame's limits can stop a request.
+  if (url.startsWith('/probe') || url.startsWith('/api/')) { res.writeHead(200, { ...hubHeaders(url), 'access-control-allow-origin': '*', 'content-type': 'application/json' }).end('{}'); return; }
+  // As web.rs `resolve`: `/` and a missing path without an extension are the app shell; a missing file is a 404.
+  let file = join(dist, url === '/' ? 'index.html' : url);
+  if (!existsSync(file) && !extname(url)) file = join(dist, 'index.html');
+  if (!existsSync(file)) { res.writeHead(404, hubHeaders(url, false)).end(); return; }
+  res.writeHead(200, { ...hubHeaders(url), 'content-type': types[extname(file)] ?? 'application/octet-stream' }).end(readFileSync(file));
 }).listen(0, '127.0.0.1');
 // An outside host: another origin that answers everything, CORS open, so only the frame's own limits can stop a request.
 const out = createServer((req, res) => { outLog.push(req.url); res.writeHead(200, { 'access-control-allow-origin': '*', 'content-type': 'text/plain' }).end('ok'); }).listen(0, '127.0.0.1');
@@ -111,6 +104,7 @@ const probes = [
   { name: 'localStorage', code: "localStorage.setItem('x', '1'); report('stored: ' + localStorage.getItem('x'));" },
   { name: 'document.cookie', code: "document.cookie = 'a=1'; report('cookie: ' + document.cookie);" },
   { name: 'fetch to the hub', mark: '/probe/fetch-hub', host: 'hub', code: `fetch(${JSON.stringify(`${HUB}/probe/fetch-hub`)}).then(function () { report('fetched'); }, function (e) { report('blocked: ' + e.name); });` },
+  { name: 'fetch to a hub endpoint (/api/session)', mark: '/api/session?from=plugin', host: 'hub', code: `fetch(${JSON.stringify(`${HUB}/api/session?from=plugin`)}).then(function () { report('fetched'); }, function (e) { report('blocked: ' + e.name); });` },
   { name: 'fetch to an outside host', mark: '/probe/fetch-out', host: 'out', code: `fetch(${JSON.stringify(`${OUT}/probe/fetch-out`)}).then(function () { report('fetched'); }, function (e) { report('blocked: ' + e.name); });` },
   { name: 'new WebSocket to the hub', mark: '/probe/ws-hub', host: 'hub', code: `var w = new WebSocket(${JSON.stringify(`${HUB.replace('http', 'ws')}/probe/ws-hub`)}); w.onopen = function () { report('open'); }; w.onerror = function () { report('blocked: error'); };` },
   { name: 'new WebSocket to an outside host', mark: '/probe/ws-out', host: 'out', code: `var w = new WebSocket(${JSON.stringify(`${OUT.replace('http', 'ws')}/probe/ws-out`)}); w.onopen = function () { report('open'); }; w.onerror = function () { report('blocked: error'); };` },
@@ -119,8 +113,8 @@ const probes = [
   { name: 'window.open', mark: '/probe/popup', host: 'out', popup: true, code: `var w = window.open(${JSON.stringify(`${OUT}/probe/popup`)}); report(w ? 'opened' : 'blocked: null');` },
   { name: 'top navigation', mark: '/probe/top', host: 'out', top: true, code: `top.location.href = ${JSON.stringify(`${OUT}/probe/top`)}; report('assigned');` },
   { name: 'the frame navigating itself away', mark: '/probe/self', host: 'out', self: true, code: `setTimeout(function () { location.href = ${JSON.stringify(`${OUT}/probe/self`)}; }, 50); report('assigned');` },
-  // A blob page the frame makes itself, with no policy of its own, that tries to load from both hosts: the window's `frame-src blob:`
-  // lets the frame go there, so the frame's own policy must come with it (a blob page keeps its maker's policies).
+  // A blob page the frame makes itself, with no policy of its own, that tries to load from both hosts: the window's `frame-src 'self'`
+  // refuses the navigation, and the page would keep the frame's policies anyway (a blob page keeps its maker's).
   { name: 'the frame navigating itself to a blob page it made', mark: '/probe/blobnav', host: 'both', code: `var html = '<!doctype html><img src="${HUB}/probe/blobnav-hub.png"><img src="${OUT}/probe/blobnav-out.png"><link rel="stylesheet" href="${OUT}/probe/blobnav.css"><script>fetch("${OUT}/probe/blobnav-fetch")<\\/script>';
     var u = URL.createObjectURL(new Blob([html], { type: 'text/html' })); setTimeout(function () { location.href = u; }, 50); report('assigned');` },
   { name: 'a form post', mark: '/probe/form', host: 'out', self: true, code: `var f = document.createElement('form'); f.method = 'post'; f.action = ${JSON.stringify(`${OUT}/probe/form`)}; var i = document.createElement('input'); i.name = 'k'; i.value = 'secret'; f.appendChild(i); document.body.appendChild(f); f.submit(); report('submitted');` },
@@ -142,13 +136,39 @@ for (const p of probes) {
   if (!p.mark) ok = /^blocked/.test(said ?? '');
   if (p.popup) ok = ok && w.pages.length === 1 && said === 'blocked: null';
   if (p.top) ok = ok && w.page.url().startsWith(HUB);
+  // The frame went nowhere outside: it shows the frame page still, or the browser's own error page for a refused navigation.
   if (p.self) {
-    const src = await w.page.locator('iframe[data-plugin-frame]').getAttribute('src');
-    ok = ok && /^blob:/.test(src ?? '');
+    const frame = w.page.frames().find((f) => f !== w.page.mainFrame());
+    ok = ok && !!frame && !frame.url().startsWith(OUT);
   }
   const blocked = p.mark ? w.refused.filter((u) => u.includes(p.mark)).map((u) => u.split(' ').pop()) : [];
   check(ok, `from inside a plugin frame, ${p.name} fails (frame said: ${said ?? 'nothing'}; request left: ${left ? 'yes' : 'no'}${blocked.length ? `; browser: ${blocked.join(', ')}` : ''})`);
   await w.ctx.close();
+}
+
+// The frame page opened on its own, outside any window: its header's `sandbox` keeps it opaque, so it reaches no storage, and its policy
+// keeps it off the network; the loader does nothing there.
+{
+  const d = await open({}, '/plugin-frame.html');
+  const res = await d.page.goto(`${HUB}/plugin-frame.html`);
+  const h = res?.headers() ?? {};
+  const before = hubLog.length;
+  const r = await d.page.evaluate(async () => {
+    const t = (f) => { try { f(); return 'allowed'; } catch (e) { return `blocked: ${e.name}`; } };
+    return {
+      origin: self.origin, localStorage: t(() => localStorage.length), indexedDB: t(() => indexedDB.open('x')), cookie: t(() => document.cookie),
+      agora: typeof window.agora, fetch: await fetch('/api/direct').then(() => 'fetched', (e) => `blocked: ${e.name}`),
+    };
+  });
+  await d.page.waitForTimeout(500);
+  const left = hubLog.slice(before).some((u) => u.includes('/api/direct'));
+  check(h['content-security-policy'] === PLUGIN_FRAME_CSP && h['x-frame-options'] === 'SAMEORIGIN', 'the frame page is served under its own policy (sandbox, no network, framed by the hub only)');
+  check(r.origin === 'null' && [r.localStorage, r.indexedDB, r.cookie].every((x) => x.startsWith('blocked')) && r.agora === 'undefined' && r.fetch.startsWith('blocked') && !left,
+    `the frame page opened on its own stays opaque and reaches nothing (${JSON.stringify(r)}; request left: ${left ? 'yes' : 'no'})`);
+  const app = await d.page.goto(`${HUB}/`);
+  const ah = app?.headers() ?? {};
+  check(ah['content-security-policy'] === APP_CSP && ah['x-frame-options'] === 'DENY' && !APP_CSP.includes('blob:'), `the window keeps its own policy, framing only its own origin (${APP_CSP})`);
+  await d.ctx.close();
 }
 
 // The hub refuses a request whose Origin is not its own when it sits behind a proxy (ADR-0067, `proxy.rs`, `Origin: null` included):

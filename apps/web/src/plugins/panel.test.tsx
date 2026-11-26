@@ -16,7 +16,7 @@ import { workspaceOf, type Workspace as WorkspaceState } from '../layout/engine'
 import type { PanelRegistry, PanelState } from '../layout/panels';
 import { LAYOUT_VERSION, type LayoutNode } from '../layout/tree';
 import { Workspace, panelName } from '../layout/Workspace';
-import { FRAME_SANDBOX, framePolicy, frameDocument, loaderUrl } from './frameDoc';
+import { FRAME_POLICY, FRAME_SANDBOX, frameUrl } from './frameDoc';
 import { checkPackage } from './package';
 import { pluginPanels, withPlugins } from './registry';
 import { isSafe, isSafeKey, safeAddress, unsafeAddress } from './safe';
@@ -25,8 +25,6 @@ import { ENTRY, baseManifest, bundle } from './testPackage';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 (globalThis as { ResizeObserver?: unknown }).ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-URL.createObjectURL = () => 'blob:http://localhost/frame';
-URL.revokeObjectURL = () => {};
 
 let host: HTMLElement;
 let root: Root;
@@ -87,7 +85,7 @@ describe('a plugin panel in the window', () => {
     draw(ws({ type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [pane('p1', 'plugin.demo.main'), pane('p2', 'usage')] }), reg);
     const frame = host.querySelector('iframe') as HTMLIFrameElement;
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
-    expect(frame.getAttribute('src')).toMatch(/^blob:/);
+    expect(frame.getAttribute('src')).toBe('/plugin-frame.html');
     expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
     expect(frame.closest('[data-pane]')?.getAttribute('data-pane')).toBe('p1');
     expect(FRAME_SANDBOX).toBe('allow-scripts');
@@ -111,21 +109,35 @@ describe('a plugin panel in the window', () => {
 });
 
 describe('the frame\'s page', () => {
-  const L = 'https://hub.example:7443/plugin-frame.js';
-  it('puts its own policy first: ADR-0114\'s, with only the loader added to script-src', () => {
-    const adr = "default-src 'none'; script-src blob:; style-src blob: 'unsafe-inline'; img-src blob: data:; font-src blob:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
-    expect(framePolicy(L).replace(` ${L}`, '')).toBe(adr);
-    const doc = new DOMParser().parseFromString(frameDocument(L, 'tr', 'ltr'), 'text/html');
+  // A Rust string constant of web.rs, its line continuations joined.
+  const rs = readFileSync(join(__dirname, '../../../../crates/agora-hub/src/web.rs'), 'utf8');
+  const constant = (name: string) => {
+    const m = new RegExp(`const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`, 's').exec(rs);
+    return m?.[1]?.replace(/\\\n\s*/g, '');
+  };
+
+  it('is served by the hub under the policy the window expects, and the window frames only its own origin', () => {
+    expect(constant('PLUGIN_FRAME_CSP')).toBe(FRAME_POLICY);
+    expect(constant('PLUGIN_FRAME_PATH')).toBe(`/${'plugin-frame.html'}`);
+    expect(frameUrl('/')).toBe(constant('PLUGIN_FRAME_PATH'));
+    expect(frameUrl('/app')).toBe('/app/plugin-frame.html');
+    const app = constant('APP_CSP') ?? '';
+    expect(app).toContain("frame-src 'self'");
+    expect(app).toContain("frame-ancestors 'none'");
+    // The window's own policy is not loosened for plugins: no blob scripts, no other frames.
+    expect(app).not.toContain('blob:');
+    expect(app).not.toMatch(/script-src/);
+    for (const d of ["sandbox allow-scripts", "default-src 'none'", "connect-src 'none'", "frame-src 'none'", "form-action 'none'", "base-uri 'none'", "frame-ancestors 'self'"]) expect(FRAME_POLICY).toContain(d);
+  });
+
+  it('holds the same policy in the page itself, without what only a header can say, and runs only the loader', () => {
+    const html = readFileSync(join(__dirname, '../../public/plugin-frame.html'), 'utf8');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
     const first = doc.head.firstElementChild as HTMLMetaElement;
     expect(first.httpEquiv).toBe('Content-Security-Policy');
-    expect(first.content).toBe(framePolicy(L));
-    expect([...doc.scripts].map((s) => s.getAttribute('src'))).toEqual([L]);
-    expect(doc.documentElement.lang).toBe('tr');
-    expect(doc.body.innerHTML).toBe('');
-    expect(loaderUrl('https://hub.example:7443')).toBe(L);
-    expect(loaderUrl('http://127.0.0.1:5173', '/app/')).toBe('http://127.0.0.1:5173/app/plugin-frame.js');
-    // A language tag that is not one is not written into the page.
-    expect(frameDocument(L, '"><script>x</script>')).toContain('lang="en"');
+    expect(first.content).toBe(FRAME_POLICY.replace('sandbox allow-scripts; ', '').replace("; frame-ancestors 'self'", ''));
+    expect([...doc.scripts].map((x) => x.getAttribute('src'))).toEqual(['plugin-frame.js']);
+    expect(doc.body.innerHTML.trim()).toBe('');
   });
 
   it('ships the loader beside the window\'s files, refusing to run anywhere but an opaque frame', () => {

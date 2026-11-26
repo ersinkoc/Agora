@@ -1,11 +1,12 @@
 // The window's loader inside a plugin's sandboxed frame (ADR-0114 and its Amendment A; docs/ux/plugins.md, "The frame"). It is the
-// window's own code, the one script the frame's page policy names by its address; the plugin's files arrive from the window by message
-// and run from blobs made here, inside the frame's opaque origin (a blob the window made is not loadable in an opaque frame).
+// window's own code, the one script of the frame page the hub serves (`plugin-frame.html`, under its own header policy); the plugin's
+// files arrive from the window by message and run from blobs made here, inside the frame's opaque origin (a blob the window made is not
+// loadable in an opaque frame).
 //
 // It runs only in an opaque frame inside another page, takes only the window's one `load` message, and then gives the plugin `agora`:
 //   agora.read(cap)                 a Promise of the answer; rejected with an Error whose message is the code ("not-granted", …)
 //   agora.watch(cap, onData, onErr) answers now and on every change; returns a function that stops it
-//   agora.file(name)                a data: address of one of the plugin's own images, or undefined
+//   agora.file(name)                a blob: address, made in the frame, of one of the plugin's own images or fonts, or undefined
 //   agora.granted, agora.plugin, agora.panel, agora.scheme
 (function () {
   'use strict';
@@ -18,14 +19,16 @@
   var files = new Map();
   function send(m) { m.agora = 1; host.postMessage(m, '*'); }
   function text(bytes) { return new TextDecoder().decode(bytes); }
-  function dataUrl(f) {
-    var s = '';
-    for (var i = 0; i < f.bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, f.bytes.subarray(i, i + 0x8000));
-    return 'data:' + f.type + ';base64,' + btoa(s);
+  var urls = new Map();
+  function blobUrl(f) {
+    if (!urls.has(f.name)) urls.set(f.name, URL.createObjectURL(new Blob([f.bytes], { type: f.type })));
+    return urls.get(f.name);
   }
   function start(m) {
     for (var i = 0; i < m.files.length; i++) files.set(m.files[i].name, m.files[i]);
     document.documentElement.style.colorScheme = m.scheme === 'light' ? 'light' : 'dark';
+    if (typeof m.lang === 'string' && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/.test(m.lang)) document.documentElement.lang = m.lang;
+    document.documentElement.dir = m.dir === 'rtl' ? 'rtl' : 'ltr';
     m.files.forEach(function (f) {
       if (f.type !== 'text/css') return;
       var s = document.createElement('style');
@@ -53,7 +56,7 @@
       },
       file: function (name) {
         var f = files.get(name);
-        return f && /^image\//.test(f.type) ? dataUrl(f) : undefined;
+        return f && /^(image|font)\//.test(f.type) ? blobUrl(f) : undefined;
       },
     };
     Object.defineProperty(window, 'agora', { value: Object.freeze(api), enumerable: true });
