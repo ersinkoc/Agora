@@ -12,6 +12,8 @@
 - **Notifications:** per trigger and channel, quiet hours.
 - **Appearance:** theme (`themes.md`: a theme for light and one for dark, the theme editor), density, terminal font. In
   the web window today: the title bar's scheme buttons, This device → Appearance, and **Edit theme** in the command palette.
+- **Keyboard:** every command and its keys (`keybindings.md`): change, clear, reset, import and export the keybindings file. In the
+  web window today: Settings → Keyboard (`#/device/keyboard`), and **Keyboard settings** in the command palette.
 - **Advanced:** diagnostics (`agora doctor` download), backups, telemetry opt-in.
 
 ## Interface language

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import type { IconName } from './components/Icon';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects, demoQuota } from './fixtures';
 import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
@@ -62,6 +61,11 @@ import { TOOL_PANELS } from './net/paneTools';
 import { decodeHash, isMachinesHash, isSettingsHash, machineOfHash, settingsSectionOf, paletteExtras, projectsOf } from './net/paletteExtras';
 import { themeStore } from './themes/store';
 import { themeName } from './themes/messages';
+import { COMMANDS, commandById } from './keys/commands';
+import { type Handler, handlerOf, listenForKeys, runCommand, useCommands, useCommandsVersion } from './keys/registry';
+import { keyStore } from './keys/store';
+import { IS_MAC } from './keys/strokes';
+import { ariaKey, commandLabel, shownKey, useKeymap } from './keys/view';
 import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
 import { SAFE, safeAddress } from './plugins/safe';
 
@@ -82,7 +86,6 @@ function useHash(): [string, (h: string) => void] {
 }
 
 // The icon of each tool in the command palette (the same ones the tool panes use).
-const TOOL_ICON: Record<(typeof TOOL_PANELS)[number], IconName> = { terminal: 'terminal', changes: 'diff', files: 'files', manager: 'folder' };
 
 export function App() {
   const language = useSyncExternalStore(subscribeLanguage, getLanguage);
@@ -543,41 +546,64 @@ export function App() {
   }, [go, phone]);
   // Back to the window (the panes live there); from the window itself (the demo included) nothing moves.
   const toWindow = useCallback(() => { if (!['', '#/', '#/demo'].includes(hash)) go('#/'); }, [hash, go]);
-  const items: PaletteItem[] = useMemo(() => [
-    { id: 'next', label: t('palette-next-attention'), run: next, group: 'go', icon: 'bell', keys: 'N' },
-    { id: 'home', label: t('palette-go-home'), run: () => { go('#/'); if (!phone) requestPanel('fleet'); }, group: 'go', icon: 'grid' },
-    ...(hub && changes ? [{ id: 'start', label: t('action-start-agent'), run: () => { toWindow(); openStart(); }, icon: 'plus' as const }] : []),
+  // The palette's searchable objects beside the commands: machines and projects by name (paletteExtras), and its three actions, which are
+  // commands here (machines.allow, window.lock, go.settings) offered exactly where paletteExtras offers them.
+  const extras = paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
+    showProject: (id) => { go('#/'); requestProject(id); }, showPairing, lock: hub ? lockNow : undefined });
+  const extra = (id: string): Handler | false => { const it = extras.find((x) => x.id === id); return it ? { run: it.run } : false; };
+  // The window's commands this part runs (docs/ux/keybindings.md); the window, the side panel and plugins register theirs.
+  useCommands({
+    'palette.open': { run: () => setPalette((p) => !p) },
+    'attention.next': { run: next },
+    'go.home': { run: () => { go('#/'); if (!phone) requestPanel('fleet'); } },
+    'agent.start': hub && changes ? { run: () => { toWindow(); openStart(); } } : false,
     // The tools open as panes of the window, beside the agent in focus (not on a phone, which has no panes).
-    ...(phone ? [] : [
-      ...TOOL_PANELS.map((panel) => ({ id: `tool-${panel}`, label: t(`palette-open-${panel}`), run: () => { toWindow(); requestTool({ panel }); }, icon: TOOL_ICON[panel] })),
-      ...(hub && changes ? [{ id: 'new-terminal', label: t('palette-new-terminal'), run: () => { toWindow(); openStart(undefined, true); }, icon: 'terminal' as const }] : []),
-    ]),
-    { id: 'machines', label: t('palette-go-machines'), run: () => go('#/machines'), group: 'go', icon: 'machine' },
-    ...paletteExtras({ machines: live ? machines(live) : hub ? [] : demoMachines, projects: projectsOf(agents), hub: !!hub, phone, passwordSet: info.passwordSet, canPair: !!pairing.ui?.onOpen, go,
-      showProject: (id) => { go('#/'); requestProject(id); }, showPairing, lock: hub ? lockNow : undefined }),
-    ...(hub ? [{ id: 'audit', label: t('audit-link'), run: () => go('#/audit'), group: 'go' as const, icon: 'history' as const }] : []),
+    ...Object.fromEntries(TOOL_PANELS.map((panel) => [`tool.${panel}`, phone ? false : { run: () => { toWindow(); requestTool({ panel }); } }])),
+    'terminal.new': !phone && hub && changes ? { run: () => { toWindow(); openStart(undefined, true); } } : false,
+    'go.machines': { run: () => go('#/machines') },
+    'machines.allow': extra('pair'),
+    'window.lock': extra('lock'),
+    'go.settings': extra('settings'),
+    'go.keyboard': { run: () => go('#/device/keyboard') },
+    'go.audit': hub ? { run: () => go('#/audit') } : false,
     // The language, here too: on a phone the title bar has no room for its picker.
-    ...(['system', 'en', 'tr'] as const).map((l) => ({ id: `language-${l}`, label: t('palette-language', { name: t(`language-${l}`) }), run: () => { chooseLanguage(l); }, group: 'appearance' as const, icon: 'globe' as const })),
-    { id: 'theme-editor', label: t('palette-theme-editor'), run: editTheme, group: 'appearance', icon: 'pencil' },
-    { id: 'plugins', label: t('palette-plugins'), run: () => setPluginsOpen(true), group: 'appearance', icon: 'puzzle' },
-    ...(SAFE ? [] : [{ id: 'safe-mode', label: t('palette-safe-mode'), run: () => location.assign(safeAddress(location.href)), group: 'appearance' as const, icon: 'puzzle' as const }]),
-    ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
-    ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
-    // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
-    ...(hub && api && changes ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); }, group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })) : []),
-    // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
-    ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task), group: 'tasks' as const, icon: 'board' as const })) : []),
-  ], [api, agents, go, toWindow, hub, changes, next, open, openStart, language, editTheme, palette, phone, live, info.passwordSet, pairing.ui, lockNow, showPairing, giveApi, boardList, giveSupport]);
-
-  useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      const typing = e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setPalette((p) => !p); }
-      else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === 'n') next();
+    ...Object.fromEntries((['system', 'en', 'tr'] as const).map((l) => [`language.${l}`, { run: () => { chooseLanguage(l); } }])),
+    'theme.editor': { run: editTheme },
+    // Plugins loaded from a local file, and safe mode (ADR-0114): the safe-mode key itself is heard before anything else (plugins/safe.ts),
+    // so its command is here for the palette and its keys are fixed.
+    'plugins.open': { run: () => setPluginsOpen(true) },
+    'window.safe-mode': SAFE ? false : { run: () => location.assign(safeAddress(location.href)) },
+  });
+  const keymap = useKeymap();
+  const commandsVersion = useCommandsVersion();
+  const items: PaletteItem[] = useMemo(() => {
+    // Every command on screen that can act now, with its key; in the order the palette listed them before rung 4, then the rest in the
+    // registry's order.
+    const placed = new Set<string>();
+    const cmd = (id: string): PaletteItem[] => {
+      placed.add(id);
+      const def = commandById(id);
+      const h = handlerOf(id);
+      if (!def || def.notInPalette || !h || h.available === false) return [];
+      return [{ id, label: h.label ?? commandLabel(def), run: () => { runCommand(id); }, group: def.group, icon: def.icon, keys: shownKey(keymap, id), ariaKeys: ariaKey(keymap, id) }];
     };
-    window.addEventListener('keydown', on);
-    return () => window.removeEventListener('keydown', on);
-  }, [next]);
+    const objects = extras.filter((x) => !['pair', 'lock', 'settings'].includes(x.id));
+    return [
+      ...cmd('attention.next'), ...cmd('go.home'), ...cmd('agent.start'), ...TOOL_PANELS.flatMap((p) => cmd(`tool.${p}`)), ...cmd('terminal.new'), ...cmd('go.machines'),
+      ...objects, ...cmd('machines.allow'), ...cmd('window.lock'), ...cmd('go.settings'), ...cmd('go.audit'),
+      ...(['system', 'en', 'tr'] as const).flatMap((l) => cmd(`language.${l}`)), ...cmd('theme.editor'), ...cmd('plugins.open'), ...cmd('window.safe-mode'),
+      ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
+      ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
+      // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
+      ...(hub && api && changes ? agents.filter((a) => !a.closed && a.machineId).map((a) => ({ id: `close-${a.id}`, label: t('palette-close-agent', { name: a.name }), run: () => { open(a.id); closeAsk.ask(a.id, 'pane'); }, group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })) : []),
+      // A Backlog task is a searchable object: choosing it opens "Give to an agent" for it (the dialog asks before anything is sent).
+      ...(giveApi ? givableTasks(boardList, giveApi.agents, giveApi.online, undefined, (id) => !!giveApi.start && canStartFor(giveApi.start.projects, giveApi.start.machines, id)).map((task) => ({ id: `give-${task.key}`, label: t('palette-give-task', { title: plain(task.title, 80) || t('board-task-untitled') }), run: () => giveAsk.ask(task), group: 'tasks' as const, icon: 'board' as const })) : []),
+      ...COMMANDS.filter((c) => !placed.has(c.id)).flatMap((c) => cmd(c.id)),
+    ];
+  }, [api, agents, hub, changes, open, language, palette, live, info.passwordSet, pairing.ui, giveApi, boardList, giveSupport, keymap, commandsVersion, phone]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The one key listener of the window (docs/ux/keybindings.md): the keys in force, looked up on every key press.
+  useEffect(() => listenForKeys({ map: () => keyStore.state().map, mac: IS_MAC }), []);
 
   // ADR-0061: a machine that reported whom it trusts, and not this browser; one that has not reported is not called untrusted.
   const untrustedOn = hub && device && live?.trusted ? (node: string) => { const ids = live.trusted?.get(node); return !!ids && !ids.includes(device.id); } : undefined;

@@ -18,6 +18,8 @@ export interface PaletteItem {
   agent?: { accent: string; kind: string };
   /** The shortcut that does the same outside the palette, as the keyboard spells it. Only shortcuts that exist. */
   keys?: string;
+  /** The same for `aria-keyshortcuts` (`Control+B`), when it is spelled differently from `keys`. */
+  ariaKeys?: string;
 }
 
 // The headings in the order an empty query lists them.
@@ -94,7 +96,7 @@ export function CommandPalette({ items, onClose }: { items: readonly PaletteItem
                 {g.items.map((r) => {
                   const i = index++;
                   return (
-                    <div key={r.id} id={optionId(r.id)} role="option" aria-selected={i === shown} aria-keyshortcuts={r.keys} className="palette__row"
+                    <div key={r.id} id={optionId(r.id)} role="option" aria-selected={i === shown} aria-keyshortcuts={r.ariaKeys ?? r.keys} className="palette__row"
                       onMouseEnter={() => setActive(i)} onClick={() => choose(r)}>
                       {r.agent ? <AgentAvatar accent={r.agent.accent} kind={r.agent.kind} /> : <span aria-hidden className="palette__icon"><Icon name={r.icon ?? 'step'} /></span>}
                       <span className="palette__label">{r.label}</span>
