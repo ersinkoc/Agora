@@ -2002,6 +2002,8 @@ impl Node {
             let keep: Vec<&str> = taken_up.iter().map(|(id, _)| id.as_str()).collect();
             ledger.forget_kept_except(&keep);
         }
+        // ADR-0039: every agent the holder kept has joined the mesh again and got its renewed leases back; the rest are not taken up.
+        mesh.forget_unadopted_lease_renewals();
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
@@ -2942,6 +2944,8 @@ impl Drop for Node {
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
+        // ADR-0039: the lease renewals as they are now, before agents leave the mesh below (the holder keeps them running).
+        self.mesh.freeze_lease_renewals();
         let began = Instant::now();
         let supervisor = Arc::clone(&self.supervisor);
         let mut sup = lock_by(&supervisor, began + LOCK_WAIT);

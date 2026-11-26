@@ -4264,6 +4264,14 @@ fn a_shared_lease_is_renewed_by_its_node_and_given_back_when_the_hub_sees_its_ag
         let (v, _) = hub.state.hub.view();
         v.agents.get("alpha/a1").is_some_and(|x| !x.running)
     });
+    // What the hub answers that agent's lease call now, as it answers the node's renewal (the same call, as the same agent).
+    let (gone, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/other.rs"], "ttl_s": ttl_s}),
+    );
+    assert!(err, "{gone}");
+    assert_eq!(gone["error"]["code"], "agent.not_found", "{gone}");
     wait("the node to stop renewing after agent.not_found", || {
         a.mesh.renewing(&a1) == 0
     });

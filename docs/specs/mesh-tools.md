@@ -168,7 +168,7 @@ hub's view; one that ended gives its tasks and leases back, and a lease also end
 **Lease renewal (ADR-0039).** On a shared project the holder's node renews each lease the board granted its agent while the agent
 runs, so the lease lasts until the agent releases it or ends; its `ttl_s` bounds only how long it outlives a node that went away.
 The node sends the renewal as the agent's own `lease_acquire` on the same paths with the same `ttl_s` (no new message), when half
-the TTL has passed since the call that last granted it was sent (by the node's monotonic clock, so never later than the hub's end).
+the TTL has passed since the call that last granted it was sent (by the node's monotonic clock, which also counts time the machine slept, so never later than the hub's end).
 Only a TTL of 30 s or more is renewed, so a lease is renewed at most once every 15 s; a shorter one ends as asked. An agent has at
 most 256 paths and 64 grants renewed over all its leases; a lease beyond that is granted as usual and ends at its TTL. Each renewal
 is one stored board change and one `LeaseGranted` per path. A renewal the hub cannot answer (the node is offline, the call timed
@@ -184,7 +184,8 @@ lease calls and the node's renewals of its leases reach the board one at a time:
 renewal on its way, no other renewal of that agent starts. A path the agent takes again under a newer grant leaves the older one, as
 on the board. The table is kept beside the ledger (`<data>/sessions/lease-renewals.json`, owner-only, replaced whole by a rename,
 written by its own thread whenever it changed): an agent the next run of the node takes up again from the holder gets its leases
-back and they keep being renewed (each row's grant time is stored on the wall clock and read back as an age; a row dated after the
+back and they keep being renewed (the table is written as it stands when the node stops, before its agents leave the mesh; rows of
+agents that were not taken up are dropped once the take-up is over, so an agent resumed later starts without them) (each row's grant time is stored on the wall clock and read back as an age; a row dated after the
 current time, or whose end passed, is dropped; a file that is not a renewals file is set aside, renamed). A lease the node's own
 broker granted is not renewed (ADR-0039 leaves local-only projects untouched), but when the project becomes shared and the node
 hands it over in `BoardJoin`, the node renews it on the board at once (to learn the board's id) and from then on, and the agent's

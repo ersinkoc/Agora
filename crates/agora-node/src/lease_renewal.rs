@@ -459,6 +459,15 @@ impl Renewals {
         self.pending.extend(rows);
     }
 
+    /// The agents the node took up again have all joined: rows still waiting belong to agents that ended with the last run (one
+    /// resumed later is a new run, whose leases the hub gave back), so they are dropped.
+    pub fn drop_pending(&mut self) {
+        if !self.pending.is_empty() {
+            self.pending.clear();
+            self.dirty = true;
+        }
+    }
+
     /// Nothing is renewed any more (the node's mesh no longer reaches the hub: `mesh.remote = false`).
     pub fn clear(&mut self) {
         self.grants.clear();
@@ -1110,6 +1119,16 @@ mod tests {
         assert_eq!(next.release_target(&a(), "l-1").as_deref(), Some("l-2"));
         assert!(next.due(7_000_000 + 14_999).is_empty());
         assert_eq!(next.due(7_000_000 + 15_000).len(), 1);
+        // Rows of agents that were not taken up are dropped once the take-up is over.
+        let mut later = Renewals::with_policy(short());
+        later.restore(decode(&bytes, 7_000_000, 5_005_000).unwrap());
+        later.drop_pending();
+        assert!(later.take_dirty());
+        later.adopt(&a(), "p");
+        assert!(
+            later.is_empty(),
+            "an agent resumed after the take-up gets nothing back"
+        );
         // Rows nobody takes up end with their lease.
         let mut idle = Renewals::with_policy(short());
         idle.restore(decode(&bytes, 7_000_000, 5_005_000).unwrap());

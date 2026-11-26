@@ -51,11 +51,18 @@ fn now_ms() -> u64 {
 /// back from its wall-clock age) is still a number on it. 2^40 ms is about 35 years.
 const MONO_OFFSET_MS: u64 = 1 << 40;
 
-/// The node's monotonic clock in milliseconds, for the lease renewals (ADR-0039): it never jumps as the wall clock can.
+/// The node's monotonic clock in milliseconds, for the lease renewals (ADR-0039): it never goes back as the wall clock can. It also
+/// moves on while the machine sleeps (`Instant` stops then on Linux and macOS): it takes the larger of the time `Instant` measured
+/// and the wall-clock time since the start, so a laptop that slept past a lease's TTL finds the lease ended, as the hub did, and
+/// does not take it back. A wall clock set forward makes leases end early on the node (they are then not renewed), never late.
 fn mono_ms() -> u64 {
-    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let base = *BASE.get_or_init(Instant::now);
-    MONO_OFFSET_MS.saturating_add(u64::try_from(base.elapsed().as_millis()).unwrap_or(u64::MAX))
+    use std::sync::atomic::AtomicU64;
+    static BASE: std::sync::OnceLock<(Instant, u64)> = std::sync::OnceLock::new();
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let (base, wall) = *BASE.get_or_init(|| (Instant::now(), now_ms()));
+    let measured = u64::try_from(base.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let now = MONO_OFFSET_MS.saturating_add(measured.max(now_ms().saturating_sub(wall)));
+    LAST.fetch_max(now, Ordering::AcqRel).max(now)
 }
 
 /// Beside the ledger (`<data>/sessions/lease-renewals.json`): the shared-board leases the node renews, kept across a node restart
@@ -328,9 +335,15 @@ impl LeaseRenewals {
         self.wake.notify_all();
     }
 
-    /// Writes the table to its file if what is kept changed (never under the table's lock: the rows are copied out first).
+    /// Writes the table to its file if what is kept changed. The file's slot is held through the whole write (the table's lock only
+    /// while the rows are copied out), so two writes never interleave and nothing is written after [`Self::stop_keeping`].
     fn persist(&self) {
-        let Some(file) = self.file.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+        let slot = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_into(slot.as_deref());
+    }
+
+    fn persist_into(&self, file: Option<&Path>) {
+        let Some(file) = file else {
             return;
         };
         let rows = {
@@ -341,11 +354,18 @@ impl LeaseRenewals {
             t.rows()
         };
         let bytes = lease_renewal::encode(&rows, mono_ms(), now_ms());
-        if let Err(e) = agora_platform::write_private(&file, &bytes) {
+        if let Err(e) = agora_platform::write_private(file, &bytes) {
             // Operational log, not UI text: the renewals go on; a restart in between loses them (those leases end at their TTL).
             eprintln!("mesh: lease renewals not kept: {e}");
             self.lock().mark_dirty();
         }
+    }
+
+    /// Writes the table as it is now, and nothing after.
+    fn stop_keeping(&self) {
+        let mut slot = self.file.lock().unwrap_or_else(|e| e.into_inner());
+        self.persist_into(slot.as_deref());
+        *slot = None;
     }
 }
 
@@ -1240,6 +1260,19 @@ impl MeshServer {
             );
         }
         Ok(())
+    }
+
+    /// ADR-0039: the agents the holder kept have all been taken up again: rows the last run kept for any other agent are dropped
+    /// (an agent resumed later is a new run, whose leases the hub gave back when it saw the old one end).
+    pub fn forget_unadopted_lease_renewals(&self) {
+        self.renewals.lock().drop_pending();
+        self.renewals.changed();
+    }
+
+    /// ADR-0039: the node stops: the renewal table is written as it is now and not again, so agents leaving the mesh as the node
+    /// stops do not take their rows with them (the holder keeps those agents running, and the next run takes them up).
+    pub fn freeze_lease_renewals(&self) {
+        self.renewals.stop_keeping();
     }
 
     /// ADR-0039: how the node renews (a test shortens it; the node uses [`lease_renewal::Policy::default`]).
