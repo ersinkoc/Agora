@@ -859,7 +859,8 @@
   .keys-live { @apply font-medium text-accent; font-size: var(--text-caption); }
   .keys-clash { @apply m-0 flex basis-full items-start gap-1.5 text-danger; font-size: var(--text-caption); }
   .keys-unknown { @apply flex flex-wrap gap-x-2 gap-y-1; }
-  .keys-fixed { @apply m-0 grid items-center gap-x-4 gap-y-1.5; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); }
+  .keys-fixed { @apply m-0 grid items-center gap-x-4 gap-y-1.5; grid-template-columns: minmax(0, 14rem) minmax(0, 1fr); }
+  @container (max-width: 32rem) { .keys-fixed { @apply gap-y-1; grid-template-columns: minmax(0, 1fr); } .keys-fixed dd + dt { @apply mt-1.5; } }
   .keys-fixed dt { @apply text-muted; }
   .keys-fixed dd { @apply m-0; }
   .keys-import { grid-template-columns: minmax(0, 1fr); width: min(32rem, calc(100vw - 2rem)); }

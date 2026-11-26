@@ -173,7 +173,7 @@ change cannot bring a stored theme back either, and a choice made in safe mode h
 with **Leave safe mode**.
 
 The key is heard by the window first, in the capture phase, before any handler of the page's own; no plugin, theme or keybinding can
-change it. **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
+change it (it is a fixed key, `keybindings.md`, and in safe mode the keys are the defaults). **Open in safe mode** is also in every plugin pane's menu (⋯) and in the command palette, for the mouse and for the desktop
 app, which shows no address.
 
 **The focus is the person's.** A plugin's frame is `inert` until the person clicks into it (or presses Enter on it), and inert again as

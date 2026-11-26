@@ -15,6 +15,8 @@ import { IS_MAC, type Stroke, bindingLabel, bindingText, parseBinding, strokeLab
 import { commandLabel } from './view';
 
 const FIXED_REASONS: readonly FixedReason[] = ['safe-mode', 'navigation', 'terminal', 'editing'];
+// The fixed keys this system has: ⌘ ones on a Mac, Ctrl ones elsewhere (each is fixed everywhere; this only keeps the list short).
+const shownHere = (keys: string, mac: boolean) => !keys.split('+').includes(mac ? 'ctrl' : 'meta');
 
 /** A problem of a keybindings file in words. */
 export function issueText(i: KeyIssue): string {
@@ -117,7 +119,7 @@ export function KeyboardSettings({ store = keyStore, mac = IS_MAC }: { store?: K
           {FIXED_REASONS.map((r) => (
             <div key={r} className="contents">
               <dt>{t(`keys-fixed-${r}`)}</dt>
-              <dd><Keys labels={FIXED_KEYS.filter((f) => f.reason === r && (r !== 'safe-mode' || (f.keys.includes('meta') === mac))).map((f) => bindingLabel(parseBinding(f.keys) ?? [], mac))} /></dd>
+              <dd><Keys labels={FIXED_KEYS.filter((f) => f.reason === r && shownHere(f.keys, mac)).map((f) => bindingLabel(parseBinding(f.keys) ?? [], mac))} /></dd>
             </div>
           ))}
         </dl>
