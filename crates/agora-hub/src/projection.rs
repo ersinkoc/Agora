@@ -641,6 +641,14 @@ impl View {
         std::borrow::Cow::Owned(v)
     }
 
+    /// #1150: whether `producer`'s approval `approval_id` was decided (one of its last [`RESOLVED_APPROVALS_KEPT`] decisions): a
+    /// request for it stated now is late, and brings no card, notice or audit row.
+    pub fn approval_decided(&self, producer: &str, approval_id: &str) -> bool {
+        self.resolved_approvals
+            .get(producer)
+            .is_some_and(|ids| ids.iter().any(|id| id == approval_id))
+    }
+
     /// [`View::apply`] for an event at log position `pos`, which also keeps a `MessagePosted` for snapshots (ADR-0103). The hub's
     /// publish and its rebuild from the log both come here, so a rebuilt view has the same tail as the live one.
     pub fn apply_at(&mut self, pos: u64, ev: &Event) {
@@ -1123,11 +1131,7 @@ impl View {
             Body::TerminalClosed(e) => {
                 self.terminals.remove(&q(&e.terminal_id));
             }
-            Body::ApprovalRequested(e)
-                if self
-                    .resolved_approvals
-                    .get(producer)
-                    .is_some_and(|ids| ids.contains(&e.approval_id)) => {}
+            Body::ApprovalRequested(e) if self.approval_decided(producer, &e.approval_id) => {}
             Body::ApprovalRequested(e) => {
                 self.approvals.insert(
                     q(&e.approval_id),
@@ -1145,10 +1149,7 @@ impl View {
             }
             Body::ApprovalResolved(e) => {
                 self.approvals.remove(&q(&e.approval_id));
-                let known = self
-                    .resolved_approvals
-                    .get(producer)
-                    .is_some_and(|ids| ids.contains(&e.approval_id));
+                let known = self.approval_decided(producer, &e.approval_id);
                 // A decision the node says again (an announcement restates recent ones) is kept once, where it first came.
                 if !known {
                     let ids = Arc::make_mut(&mut self.resolved_approvals)

@@ -154,7 +154,10 @@ fn spawn_audit(
         Some((who, action.to_string(), node.clone(), outcome, event.at_ms))
     };
     match event.body.as_ref()? {
-        Body::ApprovalRequested(a) if a.action == "agent.start" => {
+        // #1150: a request stated after its decision (a late re-announcement) asks nothing again.
+        Body::ApprovalRequested(a)
+            if a.action == "agent.start" && !view.approval_decided(&node, &a.approval_id) =>
+        {
             row(q(&a.agent_id), "agent.start.asked", a.approval_id.clone())
         }
         Body::ApprovalResolved(r) => {
@@ -770,6 +773,11 @@ impl Hub {
         self.boards.membership(&g.view, now_ms)
     }
 
+    /// #1150: whether `producer`'s approval `approval_id` was already decided (see [`View::approval_decided`]).
+    pub fn approval_decided(&self, producer: &str, approval_id: &str) -> bool {
+        self.lock().view.approval_decided(producer, approval_id)
+    }
+
     /// #1150: the board notices kept for `node` while it was not connected (see [`OWED_NOTICES_KEY`]), for the connection that
     /// just opened to send; each is given once. If the store refuses to remove them they are still given (a notice given twice is
     /// better than one never given), and may be given again at the next connection.
@@ -1267,6 +1275,9 @@ mod tests {
             (row.0.as_str(), row.3.as_str()),
             ("n1/a", "approved:phone:grant=3:nested=false")
         );
+        // #1150 (review of #1234, F2): the request stated again after its decision (a late re-announcement) is no second "asked".
+        view.apply(&decided);
+        assert!(spawn_audit(&view, &asked).is_none());
         let refused = at(Body::AgentStartRefused(AgentStartRefused {
             agent_id: "a".into(),
             kind: "codex".into(),
