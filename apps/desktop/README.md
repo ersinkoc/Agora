@@ -4,7 +4,7 @@ A thin Tauri shell around the hub's page (ADR-0048). It asks for a hub address a
 certificate's fingerprint for the user to compare with `agora hub fingerprint`, makes one TLS handshake with the hub trusting only
 that certificate (a hub that does not answer or is not signed by it is reported on the connect screen and not remembered), and then
 opens the hub's own page. The connection goes
-through a loopback tunnel (`crates/agora-desktop-tunnel`) that trusts only that CA. The hub's page gets no access to the shell.
+through a loopback tunnel (`crates/agora-desktop-tunnel`) that trusts only that CA. The hub's page gets no access to the shell beyond asking for a notification (below).
 
 This crate is its own Cargo workspace so that Tauri and its webview crates never enter the node, the hub or the main build.
 
@@ -39,15 +39,32 @@ Allow" applies to that build only. Allow it: seen with the 0.3.4 image on macOS 
 whether the window can still sign with its stored device key (approvals, grants, folder listing) is not tested. A Developer ID signature
 (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
-Notifications (ADR-0048 decision 5): when the number of approvals waiting (the page's title, `(N) Agora`) grows while the window
-is hidden, minimized or not focused, the shell shows one system notification with the count only, in the system's language.
-Clicking it does not bring the window forward yet (neither notifier reports the click back; ADR-0048 decision 5 stays open for
-that part). It
-uses the system's own notifier with no library (`agora_platform::desktop_notify`): Windows a toast (shown as Windows PowerShell;
-nothing when notifications are turned off for the user), Linux `notify-send` (nothing without it). **macOS: not yet.** The script
-notifier posts as Script Editor (shown only if Script Editor may notify, and a click opens Script Editor), so the shell posts
-nothing there; the app's own notification is a follow-up. A silent Mac is expected for now; the hub's phone notifications
-(ntfy, ADR-0051) cover a person away from the window.
+Notifications (ADR-0048 decision 5 and Amendment A, **Proposed**), through Tauri's notification plugin (`tauri-plugin-notification`,
+used from Rust only), so they come from the app itself on every system (from Terminal in a `cargo run` on a Mac, which the plugin uses
+for a development run):
+- **Approvals waiting:** when the number in the page's title (`(N) Agora`) grows while the window is hidden, minimized or not focused,
+  one notification gives the count only. This is always on, as before, and now on macOS too.
+- **An agent finished or needs you:** off until the person turns on **App notifications** in the page's Settings (shown only inside the
+  app). The page asks the shell through its one command, `notify_agents` (`capabilities/hub-page.json`). It sends only the kind, the
+  agent's id and its name. The shell writes the words itself from fixed phrases (`locales/<lang>/desktop.ftl`) and shows the name
+  only when it is plain (at most 24 letters, digits, spaces and `. _ @ · -`). It keeps the id to open that agent when the notification
+  is clicked. It never shows a notification the page asked for in safe mode.
+- **One every 2 s at most**, for both kinds: what comes in a burst becomes one notification. It names the one agent, or counts
+  several, the most urgent first: needs you, then approvals, then finished.
+- **A click** brings the window forward and, for a notification about one agent, opens that agent (`#/agent/<id>`):
+  - Linux: through the notification server's default action. GNOME on Wayland may refuse to raise a window that was not just used,
+    and then shows "Agora is ready" instead.
+  - Windows: only while the toast is on screen, not from the Action Center. An app run from `target/` posts as Windows PowerShell,
+    and an installed one with its own identity.
+  - macOS: the system brings the app forward itself, and the plugin reports the click.
+
+  The click behaviour on macOS and Windows has not been tried on a real machine yet.
+- **Permission** is the system's. The plugin itself asks nothing on a desktop. macOS is expected to ask the person when the app first
+  posts, but this has not been tried with this build. On Windows and Linux the user's notification settings decide, and nothing is
+  shown when they are off.
+- **Windows, approvals waiting:** this used to post through Windows PowerShell. An app run from `target/` still does. An app run
+  from anywhere else now posts under its own identity, which Windows knows only once the installer has registered it. So the app
+  unpacked from the installer without running it (as in the 2026-11-21 review) may show nothing. Not tried yet.
 
 Not done yet: signed installers and per-platform signing (needs
 the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).

@@ -18,10 +18,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The pinned-CA loopback tunnel (ADR-0048 decision 3).
 agora-desktop-tunnel = { path = "../../../crates/agora-desktop-tunnel" }
-# ADR-0048 decision 5: an OS notification for a waiting approval while the window is hidden, shown by the system's own notifier
-# (`agora_platform::desktop_notify`: no notification library), with its words from `locales/` (`agora-i18n`, no dependencies).
-agora-platform = { path = "../../../crates/agora-platform" }
+# ADR-0048 decision 5: the OS notification's words come from `locales/` (`agora-i18n`, no dependencies).
 agora-i18n = { path = "../../../crates/agora-i18n" }
+# ADR-0048 decision 5 and Amendment A: the app's own notification on every system (macOS posts as the app, not as Script Editor), and the
+# click reported back so it brings the window forward. Tauri's official plugin for its version; used from Rust only, the page is granted
+# none of its commands.
+tauri-plugin-notification = "=2.8.1"
+
+[dev-dependencies]
+# Tauri's mock runtime, to test the grants as Tauri applies them (no new crate: a feature of the same `tauri`).
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 lto = "thin"

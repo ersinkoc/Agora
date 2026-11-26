@@ -5,6 +5,13 @@ ignore = [
     # `proc-macro-error` is unmaintained; it is a build-time proc-macro pulled in by gtk-rs (Tauri's Linux webview binding), runs on the
     # developer's machine at compile time only and ships no code. Revisit when gtk-rs drops it.
     "RUSTSEC-2024-0370",
+    # `zvariant`, `zbus_names` and `zvariant_derive` 5.x are "unmaintained" only because zbus 6 took them in as its own modules; no
+    # vulnerability is reported. They come with zbus 5, which Tauri's notification plugin (2.8.1) uses for its Linux D-Bus connection
+    # (and `notify-rust` 4.18, kept there so one zbus is built). Revisit when the plugin moves to zbus 6; then `cargo update` here
+    # removes them.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]

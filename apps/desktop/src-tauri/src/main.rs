@@ -1,16 +1,21 @@
 //! The desktop shell (ADR-0048): a window that remembers one hub, carries its connections through a loopback tunnel that trusts only
-//! the CA the user confirmed, and shows the hub's own page. The shell has three commands, all used by its own local screen only; the
-//! hub's page, loaded from `http://127.0.0.1:<port>/`, is a remote origin and has no access to them (see `capabilities/default.json`).
+//! the CA the user confirmed, and shows the hub's own page. The shell's commands are for its own local screen (`capabilities/default.json`);
+//! the hub's page, loaded from `http://127.0.0.1:<port>/`, is a remote origin and may call one only, `notify_agents`, which asks for a
+//! notification the shell words itself (`capabilities/hub-page.json`, ADR-0048 Amendment A, `notify.rs`).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod notify;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use agora_desktop_tunnel::{check, fingerprint, open, Tunnel, TunnelError};
 use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem, Submenu, HELP_SUBMENU_ID};
-use tauri::{Manager, State, Url};
+use tauri::{Manager, Runtime, State, Url};
+use tauri_plugin_notification::NotificationExt;
 
 /// What the shell remembers: the hub, the CA the user confirmed, and the loopback port, which stays the same so the page's storage
 /// (its sign-in and device key live per origin, and the port is part of the origin) survives a restart.
@@ -42,6 +47,13 @@ struct SafeItem {
 
 /// The menu item's id.
 const SAFE_ITEM: &str = "open-safe-mode";
+
+/// The app's notifications: what waits for the next one (`notify::Gate`), and the agent each shown one opens when clicked.
+#[derive(Default)]
+struct Notices {
+    gate: Mutex<notify::Gate>,
+    clicks: Mutex<notify::Clicks>,
+}
 
 /// `--safe` among the arguments the app was started with (the program's own name, first, is skipped). Anything else, such as the
 /// `-psn_…` argument an old macOS adds, is ignored.
@@ -154,30 +166,180 @@ fn waiting(title: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Shows one system notification that `count` approvals are waiting, through the system's own notifier on a thread of its own (the
-/// window's events never wait for it). A click does not bring this window forward yet (no notifier here reports it back; ADR-0048
-/// decision 5 is complete only when it does), so the notice only says that approvals wait, and the window's home screen lists them;
-/// it carries no approval content.
-fn notify_waiting(app: &tauri::AppHandle, count: u32) {
+/// The window is out of the person's sight: hidden, minimized or not focused.
+fn away<R: Runtime>(window: &tauri::WebviewWindow<R>) -> bool {
+    !window.is_visible().unwrap_or(true)
+        || window.is_minimized().unwrap_or(false)
+        || !window.is_focused().unwrap_or(true)
+}
+
+/// The address is the hub's page through the current tunnel: `http://127.0.0.1:<the tunnel's port>/…`.
+fn on_hub_page<R: Runtime>(app: &tauri::AppHandle<R>, url: &Url) -> bool {
+    let port = app
+        .state::<Tunnels>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|t| t.as_ref().map(|t| t.local.port()));
+    url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && port.is_some()
+        && url.port() == port
+}
+
+/// Safe mode for this run (`--safe`, the menu) or for the page (`?safe` in its address, as the page reads it): no notification the
+/// page asked for (ADR-0114 decision 4).
+fn safe_now<R: Runtime>(app: &tauri::AppHandle<R>, url: Option<&Url>) -> bool {
+    app.state::<SafeStart>().0.load(Ordering::Relaxed)
+        || url.is_some_and(|u| u.query_pairs().any(|(k, _)| k == "safe"))
+}
+
+/// An event for the next notification; when none is due yet, a thread waits until it is (`notify::Gate`: a short wait for what comes
+/// with it, then at most one in `notify::GAP`) and shows it. The window's events never wait for it.
+fn offer<R: Runtime>(app: &tauri::AppHandle<R>, ev: notify::Event) {
+    let now = Instant::now();
+    let due = match app.state::<Notices>().gate.lock() {
+        Ok(mut g) => g.offer(ev, now),
+        Err(_) => return,
+    };
+    if let Some(due) = due {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            show_due(&app);
+        });
+    }
+}
+
+/// What waited, as one notification, if the window is still out of sight: the page's requests only outside safe mode, and only while
+/// the page is still the hub's (the title's count of approvals is the shell's own, as before).
+fn show_due<R: Runtime>(app: &tauri::AppHandle<R>) {
+    let Ok(mut evs) = app
+        .state::<Notices>()
+        .gate
+        .lock()
+        .map(|mut g| g.take(Instant::now()))
+    else {
+        return;
+    };
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if !away(&window) {
+        return;
+    }
+    let url = window.url().ok();
+    if safe_now(app, url.as_ref()) || !url.as_ref().is_some_and(|u| on_hub_page(app, u)) {
+        evs.retain(|e| matches!(e, notify::Event::Approvals(_)));
+    }
+    let Some(notice) = notify::summary(&evs) else {
+        return;
+    };
     let tag = app
         .state::<Locale>()
         .0
         .lock()
         .map(|l| l.clone())
         .unwrap_or_default();
-    let words = agora_i18n::catalog::Catalog::for_locale(&tag);
-    let (Some(title), Some(body)) = (
-        words.render("notify-title", &[]),
-        words.render(
-            "notify-desktop-approvals",
-            &[("count", agora_i18n::catalog::Arg::Num(i64::from(count)))],
-        ),
-    ) else {
+    let Some((title, body)) = notice_words(&tag, &notice.text) else {
         return;
     };
-    std::thread::spawn(move || {
-        let _ = agora_platform::desktop_notify(&title, &body);
+    let Ok(id) = app
+        .state::<Notices>()
+        .clicks
+        .lock()
+        .map(|mut c| c.add(notice.agent))
+    else {
+        return;
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .id(id)
+        .title(title)
+        .body(body)
+        .show();
+}
+
+/// A notification's title and words in a language: the product's name, and a fixed phrase with at most a checked name in it
+/// (`notify::plain_name`); never anything else the page sent.
+fn notice_words(tag: &str, text: &notify::Text) -> Option<(String, String)> {
+    use agora_i18n::catalog::Arg;
+    use notify::{Kind, Text};
+    let c = words(tag);
+    let id = |kind: &Kind, named: bool| match (kind, named) {
+        (Kind::Finished, true) => "desktop-notify-finished-named",
+        (Kind::NeedsYou, true) => "desktop-notify-needs-you-named",
+        (Kind::Finished, false) => "desktop-notify-finished",
+        (Kind::NeedsYou, false) => "desktop-notify-needs-you",
+    };
+    let body = match text {
+        Text::Named { kind, name } => c.render(id(kind, true), &[("name", Arg::Str(name.clone()))]),
+        Text::Agents { kind, count } => c.render(
+            id(kind, false),
+            &[("count", Arg::Num(i64::try_from(*count).unwrap_or(i64::MAX)))],
+        ),
+        Text::Approvals(n) => c.render(
+            "notify-desktop-approvals",
+            &[("count", Arg::Num(i64::from(*n)))],
+        ),
+    }?;
+    Some((c.render("notify-title", &[])?, body))
+}
+
+/// A click on one of the app's notifications: the window comes forward, and when the notification was about one agent, the page opens
+/// that agent's view (its own address, `#/agent/<id>`, set only on the hub's page).
+fn clicked<R: Runtime>(app: &tauri::AppHandle<R>, id: Option<i32>) {
+    let agent = id.and_then(|id| {
+        app.state::<Notices>()
+            .clicks
+            .lock()
+            .ok()
+            .and_then(|c| c.agent(id))
     });
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
+    let on_page = window.url().is_ok_and(|u| on_hub_page(app, &u));
+    if let (Some(agent), true) = (agent, on_page) {
+        if let Ok(route) = serde_json::to_string(&notify::agent_route(&agent)) {
+            let _ = window.eval(format!("window.location.hash = {route};"));
+        }
+    }
+}
+
+/// One event as the hub's page sends it (`apps/web/src/net/desktopNotify.ts`); checked by `notify::page_event`.
+#[derive(Deserialize)]
+struct PageEvent {
+    kind: String,
+    agent: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// The one command the hub's page may call (`capabilities/hub-page.json`): the page asks for a notification that agents finished or
+/// need you. Taken only from the main window's page while it is the current tunnel's, outside safe mode; each event is checked
+/// (`notify::page_event`), at most `notify::BATCH_MAX` are read, and the rest is the shell's own (`offer`). Answers nothing either way.
+#[tauri::command]
+fn notify_agents<R: Runtime>(
+    app: tauri::AppHandle<R>,
+    webview: tauri::Webview<R>,
+    events: Vec<PageEvent>,
+) {
+    let Ok(url) = webview.url() else {
+        return;
+    };
+    if webview.label() != "main" || !on_hub_page(&app, &url) || safe_now(&app, Some(&url)) {
+        return;
+    }
+    for e in events.iter().take(notify::BATCH_MAX) {
+        if let Some(ev) = notify::page_event(&e.kind, &e.agent, e.name.as_deref()) {
+            offer(&app, ev);
+        }
+    }
 }
 
 /// The shell's own screen reports the system language once (`navigator.language`).
@@ -272,6 +434,9 @@ fn forget(app: tauri::AppHandle, tunnels: State<'_, Tunnels>) -> Result<(), Stri
 fn main() {
     tauri::Builder::default()
         .manage(Tunnels::default())
+        .manage(Notices::default())
+        // The app's notifications, from Rust only: the page is granted none of the plugin's commands (`capabilities/`).
+        .plugin(tauri_plugin_notification::init())
         .manage(Locale(Mutex::new(agora_i18n::catalog::locale_from_env())))
         // `--safe` at start opens the hub's page in safe mode, before any plugin can run (`agora-desktop --safe`; on a Mac
         // `open -a Agora --args --safe`).
@@ -286,6 +451,13 @@ fn main() {
         // sight (hidden, minimized or not focused), one system notification says so (ADR-0048 decision 5).
         .setup(|app| {
             add_safe_menu(app)?;
+            // Set before any notification is shown, so every click is reported back (the plugin reports only then).
+            let handle = app.handle().clone();
+            app.notification().on_action(move |performed| {
+                if performed.action_id() == "tap" {
+                    clicked(&handle, performed.notification().map(|n| n.id()));
+                }
+            })?;
             let config = app
                 .config()
                 .app
@@ -300,11 +472,8 @@ fn main() {
                         let _ = window.set_title(&title);
                         let now = waiting(&title);
                         let before = last.swap(now, Ordering::Relaxed);
-                        let away = !window.is_visible().unwrap_or(true)
-                            || window.is_minimized().unwrap_or(false)
-                            || !window.is_focused().unwrap_or(true);
-                        if now > before && away {
-                            notify_waiting(window.app_handle(), now);
+                        if now > before && away(&window) {
+                            offer(window.app_handle(), notify::Event::Approvals(now));
                         }
                     }
                 })
@@ -316,7 +485,8 @@ fn main() {
             saved,
             connect,
             forget,
-            use_locale
+            use_locale,
+            notify_agents
         ])
         .run(tauri::generate_context!())
         .expect("the desktop shell could not start");
@@ -406,6 +576,244 @@ mod tests {
             super::with_safe(os(&["agora-desktop", "--safe"])),
             os(&["agora-desktop", "--safe"])
         );
+    }
+
+    #[test]
+    fn a_notification_says_a_fixed_phrase_with_at_most_the_checked_name() {
+        use super::notify::{Kind, Text};
+        let say = |tag: &str, text: Text| {
+            super::notice_words(tag, &text).expect("words for every notice")
+        };
+        let named = |kind, name: &str| Text::Named {
+            kind,
+            name: name.into(),
+        };
+        assert_eq!(
+            say("en-US", named(Kind::Finished, "codex · teal")),
+            ("Agora".to_string(), "codex · teal finished.".to_string())
+        );
+        assert_eq!(say("en", named(Kind::NeedsYou, "a")).1, "a needs you.");
+        assert_eq!(
+            say(
+                "en",
+                Text::Agents {
+                    kind: Kind::Finished,
+                    count: 1
+                }
+            )
+            .1,
+            "An agent finished."
+        );
+        assert_eq!(
+            say(
+                "en",
+                Text::Agents {
+                    kind: Kind::NeedsYou,
+                    count: 3
+                }
+            )
+            .1,
+            "3 agents need you."
+        );
+        assert_eq!(
+            say("en", Text::Approvals(2)).1,
+            "2 approvals are waiting for you."
+        );
+        assert_eq!(
+            say("tr-TR", named(Kind::NeedsYou, "a")).1,
+            "a sizi bekliyor."
+        );
+        assert_eq!(
+            say(
+                "tr",
+                Text::Agents {
+                    kind: Kind::Finished,
+                    count: 2
+                }
+            )
+            .1,
+            "2 ajan işini bitirdi."
+        );
+        // Every phrase in both languages, never the message id, and an unsupported language gets English.
+        for text in [
+            named(Kind::Finished, "x"),
+            named(Kind::NeedsYou, "x"),
+            Text::Agents {
+                kind: Kind::Finished,
+                count: 1,
+            },
+            Text::Agents {
+                kind: Kind::NeedsYou,
+                count: 1,
+            },
+            Text::Agents {
+                kind: Kind::Finished,
+                count: 5,
+            },
+            Text::Agents {
+                kind: Kind::NeedsYou,
+                count: 5,
+            },
+        ] {
+            let (en, tr) = (say("en", text.clone()).1, say("tr", text.clone()).1);
+            assert!(!en.starts_with("desktop-") && !tr.starts_with("desktop-"));
+            assert_ne!(en, tr, "{text:?} is not translated");
+            assert_eq!(say("de", text.clone()).1, en);
+        }
+    }
+
+    /// The page's one grant, read from the capability file the build embeds: one command, the main window, the loopback tunnel's
+    /// address only (the command checks the tunnel's own port too, `on_hub_page`), never local.
+    #[test]
+    fn the_hub_page_may_call_one_command_from_the_loopback_tunnel_only() {
+        use std::str::FromStr;
+        let cap: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/hub-page.json")).unwrap();
+        assert_eq!(
+            cap["permissions"],
+            serde_json::json!(["allow-notify-agents"])
+        );
+        assert_eq!(cap["windows"], serde_json::json!(["main"]));
+        assert_eq!(cap["local"], serde_json::json!(false));
+        let urls = cap["remote"]["urls"].as_array().unwrap();
+        assert_eq!(urls.len(), 1);
+        let pattern =
+            tauri::utils::acl::RemoteUrlPattern::from_str(urls[0].as_str().unwrap()).unwrap();
+        for ok in [
+            "http://127.0.0.1:4100/",
+            "http://127.0.0.1:4100",
+            "http://127.0.0.1:61234/?safe#/agent/n%2F1",
+            "http://127.0.0.1:4100/plugin-frame.html",
+        ] {
+            assert!(pattern.test(&url(ok)), "{ok} is the tunnel's address");
+        }
+        for no in [
+            "https://127.0.0.1:4100/",
+            "http://localhost:4100/",
+            "http://127.0.0.2:4100/",
+            "http://evil.example/",
+            "http://127.0.0.1.evil.example:4100/",
+            "tauri://localhost/",
+            "http://tauri.localhost/",
+        ] {
+            assert!(!pattern.test(&url(no)), "{no} must not reach the command");
+        }
+        // The shell's own screen keeps its commands and grants the page none of them.
+        let own: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert!(own.get("remote").is_none());
+        assert!(!own["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "allow-notify-agents"));
+    }
+
+    /// The grants as Tauri applies them, from the capability files this build embeds: a page at the tunnel's address reaches
+    /// `notify_agents` and none of the shell's other commands; the shell's own screen reaches its commands; no other origin reaches any.
+    #[test]
+    fn only_the_notification_command_is_open_to_the_hub_page() {
+        use std::sync::atomic::AtomicBool;
+        use tauri::ipc::{CallbackFn, InvokeBody};
+        use tauri::webview::InvokeRequest;
+        let app = tauri::test::mock_builder()
+            .manage(super::Tunnels::default())
+            .manage(super::Notices::default())
+            .manage(super::SafeStart(AtomicBool::new(false)))
+            .invoke_handler(tauri::generate_handler![
+                super::ca_fingerprint,
+                super::notify_agents
+            ])
+            .build(tauri::generate_context!(test = true))
+            .unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let other = tauri::WebviewWindowBuilder::new(&app, "other", Default::default())
+            .build()
+            .unwrap();
+        let call = |w: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+                    cmd: &str,
+                    from: &str,
+                    body: serde_json::Value| {
+            tauri::test::get_ipc_response(
+                w,
+                InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: CallbackFn(0),
+                    error: CallbackFn(1),
+                    url: url(from),
+                    body: InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.into(),
+                },
+            )
+        };
+        let events =
+            serde_json::json!({ "events": [{ "kind": "finished", "agent": "n/1", "name": "a" }] });
+        let ca = serde_json::json!({ "caPem": "not a certificate" });
+        let refused = |r: Result<tauri::ipc::InvokeResponseBody, serde_json::Value>| {
+            r.err()
+                .is_some_and(|e| e.to_string().contains("not allowed"))
+        };
+        // The hub's page: the notification command, nothing else.
+        assert!(call(
+            &main,
+            "notify_agents",
+            "http://127.0.0.1:4100/",
+            events.clone()
+        )
+        .is_ok());
+        assert!(call(
+            &main,
+            "notify_agents",
+            "http://127.0.0.1:4100/?safe#/agent/x",
+            events.clone()
+        )
+        .is_ok());
+        for cmd in [
+            "ca_fingerprint",
+            "saved",
+            "connect",
+            "forget",
+            "use_locale",
+            "plugin:notification|notify",
+        ] {
+            assert!(
+                refused(call(&main, cmd, "http://127.0.0.1:4100/", ca.clone())),
+                "{cmd} is open to the page"
+            );
+        }
+        // Any other page, or the right page in another window: nothing.
+        for from in [
+            "http://localhost:4100/",
+            "https://127.0.0.1:4100/",
+            "http://evil.example/",
+            "null",
+        ] {
+            if let Ok(u) = from.parse::<super::Url>() {
+                assert!(
+                    refused(call(&main, "notify_agents", u.as_str(), events.clone())),
+                    "{from} reached the command"
+                );
+            }
+        }
+        assert!(refused(call(
+            &other,
+            "notify_agents",
+            "http://127.0.0.1:4100/",
+            events.clone()
+        )));
+        // The shell's own screen keeps its commands (the answer is the command's own error, not a refusal) and cannot ask for a
+        // notification as the page does.
+        let own = call(&main, "ca_fingerprint", "tauri://localhost/", ca.clone());
+        assert_eq!(own.err(), Some(serde_json::json!("ca")));
+        assert!(refused(call(
+            &main,
+            "notify_agents",
+            "tauri://localhost/",
+            events
+        )));
     }
 
     #[test]
