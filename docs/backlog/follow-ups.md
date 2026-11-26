@@ -75,6 +75,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Flaky tests (fix with a proof)
 
+- `skip_approval::a_queued_prompt_never_goes_out_in_the_tick_that_stops_the_agent` (tests/skip_approval.rs:1243, "round 1: the queued
+  prompt reached the agent"): 2 in 3 full `agora-node` runs on blackview on 2026-11-27, at 490efc84 plus an unrelated change. A prompt
+  reaching an agent its policy stops may be a real race in the P2-16 gate, not only timing: prove which before widening anything.
 - `mesh_bridge::while_disconnected_a_batch_gets_a_batch_of_errors_and_notifications_get_nothing` ("an array", 1 in 350 at 12 threads).
 - `mesh_bridge::the_bridge_ends_when_the_clients_output_is_gone` ("the bridge lingers", 1 in 350).
 - `hubcli::store_tests::overlapping_saves_never_mix_two_enrollments` (hubcli.rs:2292, 1 in 40 suite runs).

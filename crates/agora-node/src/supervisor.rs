@@ -958,6 +958,8 @@ pub struct KindInfo {
 
 struct KindEntry {
     manifest: Manifest,
+    /// ADR-0094: [`Manifest::program_names`], worked out once.
+    names: Vec<String>,
     detector: Detector,
     /// ADR-0057: the manifest's `[[ready]]` rules (an empty input box).
     ready: Detector,
@@ -2191,6 +2193,7 @@ impl Supervisor {
         self.kinds.insert(
             manifest.kind.clone(),
             KindEntry {
+                names: manifest.program_names(),
                 manifest,
                 detector,
                 ready,
@@ -4297,9 +4300,7 @@ impl Supervisor {
                     .iter()
                     .find(|(kind, k)| {
                         kind.as_str() != crate::manifests::SHELL_KIND
-                            && k.manifest
-                                .process
-                                .names
+                            && k.names
                                 .iter()
                                 .any(|n| agora_platform::same_program_name(name, n))
                     })

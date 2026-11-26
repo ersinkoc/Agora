@@ -158,6 +158,11 @@ the program in front is the shell's newest direct child, followed down through s
 the name is the image's file name without `.exe` (ADR-0094 Amendment A). An agent installed as an npm `.cmd`/`.ps1` shim runs as `node`
 and is not recognised, and a program started in the background stays marked while the prompt is in front.
 
+A manifest that lists no `[process] names` is matched by the program of its ACP launch (`[structured] acp argv[0]`) when that is a plain
+file name and not a shell, interpreter or package runner (the converter's list of forbidden programs): a kind converted from the ACP
+registry (`registry-goose` runs `goose`) is recognised without a change to its generated manifest, while one launched with `npx` or `uvx`
+runs as the runtime and is not.
+
 Common validation: `kind` is at most 64 ASCII characters and `min_engine` starts at 1. `display_name` is non-empty visible text on
 one line (no terminal controls or hidden formatting). A terminal manifest has a non-empty `process.launch`; only a manifest driven
 by `[adapter]` or `[structured] acp` may omit it. Every command

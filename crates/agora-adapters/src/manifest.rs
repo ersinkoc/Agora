@@ -635,6 +635,26 @@ impl Resume {
 }
 
 impl Manifest {
+    /// ADR-0094: the program names a plain terminal's foreground program is matched against for this kind: its `[process] names`, or,
+    /// when it lists none, the program of its ACP launch (`[structured] acp argv[0]`) when that is a plain file name and not a shell,
+    /// interpreter or package runner (a kind converted from the ACP registry runs its own binary there, `goose`, `kimi`; one launched
+    /// with `npx` or `uvx` runs as the runtime and has no name of its own). The registry's generated manifests then need no change.
+    pub fn program_names(&self) -> Vec<String> {
+        if !self.process.names.is_empty() {
+            return self.process.names.clone();
+        }
+        self.structured
+            .as_ref()
+            .and_then(|s| s.acp.as_ref())
+            .and_then(|a| a.argv.first())
+            .filter(|p| {
+                foreground_names(std::slice::from_ref(*p))
+                    && !crate::registry_convert::forbidden_executable(p)
+            })
+            .map(|p| vec![p.clone()])
+            .unwrap_or_default()
+    }
+
     /// ADR-0059: the declared option with this id.
     pub fn launch_option(&self, id: &str) -> Option<&LaunchOption> {
         self.launch.option.iter().find(|o| o.id == id)
@@ -1115,6 +1135,35 @@ mod launch_tests {
                 supported: 6
             })
         ));
+    }
+
+    /// ADR-0094: a kind is matched by its `[process] names`; one that lists none (a kind converted from the ACP registry) by its ACP
+    /// program when that is a plain file name of its own, never a shell, an interpreter, a package runner or a path.
+    #[test]
+    fn a_kinds_program_names_come_from_its_names_else_its_own_acp_program() {
+        let acp = |argv: &str, names: &str| {
+            Manifest::parse(&format!(
+                "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{names}\n[structured]\nacp = {{ argv = [{argv}] }}\n"
+            ))
+            .unwrap()
+            .program_names()
+        };
+        assert_eq!(acp(r#""goose", "acp""#, ""), ["goose"]);
+        assert_eq!(acp(r#""kiro-cli", "acp""#, ""), ["kiro-cli"]);
+        assert_eq!(
+            acp(r#""goose", "acp""#, "[process]\nnames = [\"goose-cli\"]"),
+            ["goose-cli"]
+        );
+        for none in [
+            r#""npx", "--yes", "x@1""#,
+            r#""uvx", "x==1""#,
+            r#""node", "x.js""#,
+            r#""bash", "-c", "x""#,
+            r#""./bin/agent""#,
+            r#""C:\\x\\agent.exe""#,
+        ] {
+            assert!(acp(none, "").is_empty(), "{none}");
+        }
     }
 
     #[test]
