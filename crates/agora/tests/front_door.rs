@@ -1183,8 +1183,9 @@ fn pid_in(home: &Path, file: &str) -> u32 {
 
 /// Herdr gap G11: an OS shutdown or reboot. A login session's end (or launchd's, or systemd's for a node started outside its unit)
 /// signals every process of the session at once: the node's supervisor (which passes it on to the node), the agents and the terminal
-/// holder. An agent's end could then reach the node before it acted on its own stop, and was recorded as the agent having ended: after
-/// the reboot it was not offered to Resume. Now an end the node sees once a stop request has come is not an end in its ledger: both
+/// holder. An agent's end could then reach the node before it acted on its own stop (it polls for the request), and was recorded as the
+/// agent having ended: after the reboot it was not offered to Resume. The rule itself is pinned by the ledger's unit test (this order
+/// rarely hit the window before); this is the whole path. An end the node sees once a stop request has come is not an end: both
 /// agents (a terminal one and a structured one) are interrupted at the next start, Resume brings each back in its own session, and what
 /// the node wrote before (the conversation, the ledger) is all there.
 #[cfg(unix)]

@@ -249,7 +249,6 @@ impl DiskEventLog {
             f.sync_data()?;
         }
         fs::rename(&tmp, self.dir.join("ack"))?;
-        agora_platform::sync_parent_dir(&tmp);
         self.compact()
     }
 

@@ -2956,10 +2956,13 @@ impl Drop for Node {
             return;
         }
         let began = Instant::now();
-        // Herdr G11: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: what the node holds is
-        // written first (the conversation, the usage, the ledger, the event log), and again below with what the drain adds.
+        // Herdr G11: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: the usage, the ledger and
+        // the event log are written first, and again below with what the drain adds. The conversation keeps its one last batch after
+        // the drain (its held-back words are taken whole only then), as before.
         if self.keep_agents {
-            self.write_held();
+            self.events.flush_all_usage();
+            let _ = self.ledger.flush_all();
+            let _ = self.events.sync();
         }
         let supervisor = Arc::clone(&self.supervisor);
         let mut sup = lock_by(&supervisor, began + LOCK_WAIT);
