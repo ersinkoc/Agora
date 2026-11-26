@@ -237,16 +237,19 @@ fn a_prompt_that_waits_says_so() {
 
 #[test]
 fn stop_and_thinking_are_read_and_other_lines_are_not() {
-    assert_eq!(ask("/stop", &[], None), Ask::Stop { drop_queue: false });
     assert_eq!(
-        ask("  /stop all ", &[], None),
+        ask("/stop", &[], None, true),
+        Ask::Stop { drop_queue: false }
+    );
+    assert_eq!(
+        ask("  /stop all ", &[], None, true),
         Ask::Stop { drop_queue: true }
     );
-    assert_eq!(ask("/thinking", &[], None), Ask::Thinking);
-    assert_eq!(ask("/stop now please", &[], None), Ask::Other);
-    assert_eq!(ask("/mode plan", &[], None), Ask::Other);
-    assert_eq!(ask("stop", &[], None), Ask::Other);
-    assert_eq!(ask("", &[], None), Ask::Other);
+    assert_eq!(ask("/thinking", &[], None, true), Ask::Thinking);
+    assert_eq!(ask("/stop now please", &[], None, true), Ask::Other);
+    assert_eq!(ask("/mode plan", &[], None, true), Ask::Other);
+    assert_eq!(ask("stop", &[], None, true), Ask::Other);
+    assert_eq!(ask("", &[], None, true), Ask::Other);
 }
 
 #[test]
@@ -261,7 +264,7 @@ fn effort_is_the_thought_level_option() {
         ),
     ];
     assert_eq!(
-        ask("/effort high", &options, None),
+        ask("/effort high", &options, None, true),
         Ask::Config(ConfigAsk::Set {
             config_id: "effort".into(),
             value: "high".into(),
@@ -270,14 +273,14 @@ fn effort_is_the_thought_level_option() {
         })
     );
     assert_eq!(
-        ask("/effort low", &options, None),
+        ask("/effort low", &options, None, true),
         Ask::Config(ConfigAsk::Current {
             option: "effort name".into(),
             choice: "low".into()
         })
     );
     assert_eq!(
-        ask("/effort", &options, None),
+        ask("/effort", &options, None, true),
         Ask::Config(ConfigAsk::UnknownValue {
             option: "effort name".into(),
             value: String::new(),
@@ -285,7 +288,7 @@ fn effort_is_the_thought_level_option() {
         })
     );
     assert_eq!(
-        ask("/effort high", &options[..1], None),
+        ask("/effort high", &options[..1], None, true),
         Ask::Config(ConfigAsk::NoEffort)
     );
     assert_eq!(
@@ -306,39 +309,36 @@ fn set_names_an_option_by_id_or_name_and_a_boolean_by_on_or_off() {
     };
     let options = vec![flag.clone()];
     assert!(matches!(
-        ask("/set web on", &options, None),
+        ask("/set web on", &options, None, true),
         Ask::Config(ConfigAsk::Set { ref value, .. }) if value == "true"
     ));
     assert!(matches!(
-        ask("/set web maybe", &options, None),
+        ask("/set web maybe", &options, None, true),
         Ask::Config(ConfigAsk::UnknownValue { ref offered, .. }) if offered == &vec!["on".to_string(), "off".to_string()]
     ));
     assert_eq!(
-        ask("/set nope on", &options, None),
+        ask("/set nope on", &options, None, true),
         Ask::Config(ConfigAsk::UnknownOption {
             id: "nope".into(),
             offered: vec!["web".into()]
         })
     );
-    assert_eq!(
-        ask("/set web on", &[], None),
-        Ask::Config(ConfigAsk::NoOptions)
-    );
+    assert_eq!(ask("/set web on", &[], None, true), Ask::Other);
     // A boolean that makes the agent act without asking is confirmed by typing the same line again.
     flag.skips_permissions = true;
     let options = vec![flag];
     let line = "/set web on";
-    let first = ask(line, &options, None);
+    let first = ask(line, &options, None, true);
     assert!(matches!(first, Ask::Config(ConfigAsk::Confirm { .. })));
     assert!(matches!(
-        ask(line, &options, Some(line)),
+        ask(line, &options, Some(line), true),
         Ask::Config(ConfigAsk::Set { .. })
     ));
     // Off never asks.
     let mut on = options;
     on[0].current = "true".into();
     assert!(matches!(
-        ask("/set web off", &on, None),
+        ask("/set web off", &on, None, true),
         Ask::Config(ConfigAsk::Set { .. })
     ));
 }
@@ -352,15 +352,15 @@ fn a_choice_that_skips_permissions_is_confirmed_first() {
         &[("default", false), ("yolo", true)],
     )];
     assert!(matches!(
-        ask("/set mode yolo", &options, None),
+        ask("/set mode yolo", &options, None, true),
         Ask::Config(ConfigAsk::Confirm { .. })
     ));
     assert!(matches!(
-        ask("/set mode yolo", &options, Some("/set mode plan")),
+        ask("/set mode yolo", &options, Some("/set mode plan"), true),
         Ask::Config(ConfigAsk::Confirm { .. })
     ));
     assert!(matches!(
-        ask("/set mode yolo", &options, Some("/set mode yolo")),
+        ask("/set mode yolo", &options, Some("/set mode yolo"), true),
         Ask::Config(ConfigAsk::Set { .. })
     ));
 }
@@ -432,4 +432,101 @@ fn a_rich_view_draws_the_rich_hint_and_statuses() {
     assert!(lines.iter().any(|l| l.contains("tui-chat-hint-rich")));
     let plain_view = crate::render::render_chat(&[], "a", "", (100, 10), false, &t, false);
     assert!(plain_view.iter().any(|l| l == "tui-chat-hint"));
+}
+
+/// Review of #1242, F1: an agent waiting for a permission answer is blocked, and one whose state is not known may still be in its turn
+/// (the web: in a turn unless idle or finished); its call is not shown stopped. An idle, finished or ended agent's turn is over.
+#[test]
+fn a_call_waiting_for_a_permission_is_not_shown_stopped() {
+    let call = ChatEntry {
+        entry_id: 1,
+        role: ChatRole::Agent as i32,
+        kind: ChatKind::ToolCall as i32,
+        text: r#"{"tool":"Run","arguments":{"command":"rm -rf build"}}"#.into(),
+        call_id: "c1".into(),
+        status: ToolStatus::Pending as i32,
+        ..Default::default()
+    };
+    let agent = |state: AgentState, running: bool| AgentSnapshot {
+        running,
+        state: state as i32,
+        ..Default::default()
+    };
+    for (a, over) in [
+        (agent(AgentState::Blocked, true), false),
+        (agent(AgentState::Unspecified, true), false),
+        (agent(AgentState::Working, true), false),
+        (agent(AgentState::Idle, true), true),
+        (agent(AgentState::Done, true), true),
+        (agent(AgentState::Working, false), true),
+    ] {
+        assert_eq!(turn_over(&a), over, "{a:?}");
+        let view = View {
+            rich: true,
+            turn_over: turn_over(&a),
+            ..View::default()
+        };
+        let said = body(&call, view, &t).unwrap();
+        assert_eq!(said.contains("tui-tool-status-stopped"), over, "{said}");
+    }
+}
+
+/// Review of #1242, F3: with no settings reported, `/effort` and `/set` may be the agent's own commands: they go as a request. An older
+/// node (not rich) gets `/stop` as a request too, since it cannot end a turn.
+#[test]
+fn without_settings_or_the_rich_form_the_line_goes_to_the_agent() {
+    assert_eq!(ask("/effort high", &[], None, true), Ask::Other);
+    assert_eq!(ask("/set foo bar", &[], None, true), Ask::Other);
+    assert_eq!(ask("/set", &[], None, true), Ask::Other);
+    assert_eq!(ask("/stop", &[], None, false), Ask::Other);
+    assert_eq!(ask("/stop all", &[], None, false), Ask::Other);
+    assert_eq!(ask("/thinking", &[], None, false), Ask::Thinking);
+}
+
+/// Review of #1242, F4: the agent's names for an option and its choices reach one-line notes without a line break, cut to a length.
+#[test]
+fn agent_names_in_one_line_notes_keep_no_line_break() {
+    let options = vec![SessionConfigOption {
+        id: "effort".into(),
+        name: "Effort\nFAKE: approved".into(),
+        category: SessionConfigCategory::ThoughtLevel as i32,
+        current: "low".into(),
+        choices: vec![
+            SessionOption {
+                id: "low".into(),
+                name: "Low\nx".into(),
+                ..Default::default()
+            },
+            SessionOption {
+                id: "x".repeat(200),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }];
+    for line in ["/effort low", "/effort nope", "/set nope 1"] {
+        let Ask::Config(c) = ask(line, &options, None, true) else {
+            panic!("{line}")
+        };
+        let note = config_note(&c, &t);
+        assert!(!note.contains('\n'), "{note:?}");
+        assert!(note.chars().count() < 400, "{note:?}");
+    }
+    let mut many = options[0].clone();
+    many.choices = (0..40)
+        .map(|i| SessionOption {
+            id: format!("c{i}"),
+            ..Default::default()
+        })
+        .collect();
+    let Ask::Config(ConfigAsk::UnknownValue { offered, .. }) =
+        ask("/effort z", &[many], None, true)
+    else {
+        panic!()
+    };
+    assert_eq!(offered.len(), LISTED_MAX + 1);
+    assert_eq!(
+        effort_part(&options, &t).unwrap(),
+        "tui-chat-effort[effort=Low x]"
+    );
 }

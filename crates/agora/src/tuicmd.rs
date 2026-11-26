@@ -963,8 +963,9 @@ fn chat(
     let mut dirty = true;
     // ADR-0058: the line that asked to confirm a mode that does not ask; typing it again switches.
     let mut confirming: Option<String> = None;
-    // ADR-0090: the agent's thinking is shown (`/thinking`).
+    // ADR-0090: the agent's thinking is shown (`/thinking`), and whether its turn was over when last drawn.
     let mut thoughts = false;
+    let mut over_drawn: Option<bool> = None;
     'watch: loop {
         match session.chat_next(stream, Duration::from_millis(100)) {
             // ADR-0090: a later version of an entry replaces the one shown (a tool call, a plan, a permission change in place).
@@ -980,6 +981,15 @@ fn chat(
         }
         if terminal_gone() {
             break;
+        }
+        // ADR-0090: a settings report, or the agent's turn starting or ending, is drawn too (this view reads no snapshot of its own:
+        // the agent's state comes from the changes since the one it was opened with).
+        if session.take_configs_changed() {
+            dirty = true;
+        }
+        let turn_over = plain_turn_over(snapshot.as_ref(), session.agent_state(agent));
+        if over_drawn != Some(turn_over) {
+            dirty = true;
         }
         while let Ok(k) = rx.try_recv() {
             match chat_key(watching, k) {
@@ -1000,7 +1010,8 @@ fn chat(
                         .get(agent)
                         .cloned()
                         .unwrap_or_default();
-                    let turn = agora_tui::chat::ask(&line, &options, prior.as_deref());
+                    let rich = agora_tui::chat::is_rich(&entries, &options);
+                    let turn = agora_tui::chat::ask(&line, &options, prior.as_deref(), rich);
                     match turn {
                         agora_tui::chat::Ask::Other => {}
                         agora_tui::chat::Ask::Thinking => {
@@ -1115,11 +1126,11 @@ fn chat(
                 .get(agent)
                 .cloned()
                 .unwrap_or_default();
+            over_drawn = Some(turn_over);
             let view = agora_tui::chat::View {
                 thoughts,
-                rich: true,
-                // This view does not follow the agent's state: a call is shown as the node last said it.
-                turn_over: false,
+                rich: agora_tui::chat::is_rich(&entries, &options),
+                turn_over,
             };
             let lines = plain_chat_lines(
                 say,
@@ -1139,6 +1150,18 @@ fn chat(
     }
     session.terminal_close(stream);
     Ok(lost)
+}
+
+/// Whether the agent's turn is over for the plain list's full-screen chat: its state as the last change said it, else as it was when
+/// the conversation was opened ([`agora_tui::chat::turn_over`]: blocked or not known is still in the turn).
+fn plain_turn_over(opened: Option<&agora_protocol::v1::AgentSnapshot>, state: Option<i32>) -> bool {
+    opened.is_some_and(|a| {
+        let mut a = a.clone();
+        if let Some(s) = state {
+            a.state = s;
+        }
+        agora_tui::chat::turn_over(&a)
+    })
 }
 
 /// The plain list's full-screen chat as drawn at `size`: what the agent runs with, its conversation, the note and the line being typed.
@@ -1298,6 +1321,39 @@ fn read_key(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<u8> {
         return Some(k);
     }
     escape_key(rx)
+}
+
+/// [`read_key`] for a typed line: an arrow (or any other `ESC [` sequence) is skipped, never read as the letter or key it stands for
+/// in a list.
+fn read_text_key(rx: &mpsc::Receiver<u8>, wait: Duration) -> Option<u8> {
+    let end = Instant::now() + wait;
+    loop {
+        let k = rx
+            .recv_timeout(end.saturating_duration_since(Instant::now()))
+            .ok()?;
+        if k != 0x1b {
+            return Some(k);
+        }
+        if let Some(k) = escape_text_key(rx) {
+            return Some(k);
+        }
+    }
+}
+
+/// The rest of a key that began with ESC, for a typed line: Esc alone (or with one more byte) is Esc; an `ESC [` sequence is no key.
+fn escape_text_key(rx: &mpsc::Receiver<u8>) -> Option<u8> {
+    let next = || rx.recv_timeout(Duration::from_millis(15)).ok();
+    if next() != Some(b'[') {
+        let _ = next();
+        return Some(0x1b);
+    }
+    for _ in 0..32 {
+        match next() {
+            Some(0x40..=0x7e) | None => return None,
+            Some(_) => {}
+        }
+    }
+    None
 }
 
 /// Like [`read_key`], but says when the keys are gone for good (the terminal closed): `Err`.
@@ -1840,33 +1896,16 @@ fn start_in_folder(
     // ADR-0066: the kind's settings (model, effort, ...), one question each; nothing chosen sends none, as before. A machine that
     // offers none (or an older one) asks nothing.
     let specs = session.kind_settings(&node, kind).unwrap_or_default();
-    let settings = match agora_tui::launch::Settings::new(specs) {
-        None => Vec::new(),
-        Some(mut q) => {
-            let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
-            loop {
-                let Some(k) = ask.key(&q.lines(&text), Duration::from_secs(60)) else {
-                    return String::new();
-                };
-                match q.key(k) {
-                    agora_tui::launch::Step::Ask => {}
-                    agora_tui::launch::Step::Done(chosen) => break chosen,
-                    agora_tui::launch::Step::Cancelled => return String::new(),
-                }
-            }
-        }
+    let Some(settings) = ask_settings(say, ask, specs) else {
+        return String::new();
     };
-    // The signature covers the settings in the order they are sent.
-    let Some(auth) = device.authorize_launch_with_settings(
+    let Some(launch) = signed_launch(
+        &device,
         &node,
-        &info.path,
-        kind,
-        &info.project_id,
-        false,
+        (&info.path, &info.project_id, kind),
         accept,
-        &launch_options,
-        &confirmed_launch_options,
-        &settings,
+        (launch_options, confirmed_launch_options),
+        settings,
         now_ms(),
     ) else {
         return say.text(
@@ -1874,27 +1913,76 @@ fn start_in_folder(
             &[("code", Arg::Str("client.sign".into()))],
         );
     };
-    match session.launch_in(
-        &node,
-        agora_protocol::v1::AgentLaunch {
-            path: info.path.clone(),
-            project_id: info.project_id.clone(),
-            kind: kind.clone(),
-            separate_worktree: false,
-            authorization: Some(auth),
-            accept_identity_change: accept,
-            launch_options,
-            confirmed_launch_options,
-            settings: settings
-                .into_iter()
-                .map(|(id, value)| agora_protocol::v1::LaunchSetting { id, value })
-                .collect(),
-        },
-    ) {
+    match session.launch_in(&node, launch) {
         Ok(agent) => say.text(key!("tui-started"), &[("agent", Arg::Str(agent))]),
         Err(code) if code == "approval.signature_invalid" => not_trusted(&device, &node),
         Err(code) => say.text(key!("tui-start-failed"), &[("code", Arg::Str(code))]),
     }
+}
+
+/// ADR-0066: asks the start's settings ([`agora_tui::launch::Settings`]), one key at a time; a typed setting reads its keys as text
+/// (an arrow types nothing). The chosen pairs in the manifest's order, or `None`: cancelled, or no answer in time.
+fn ask_settings(
+    say: &Say,
+    ask: &mut dyn Asker,
+    specs: Vec<agora_protocol::v1::LaunchSettingSpec>,
+) -> Option<Vec<(String, String)>> {
+    let Some(mut q) = agora_tui::launch::Settings::new(specs) else {
+        return Some(Vec::new());
+    };
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    loop {
+        let lines = q.lines(&text);
+        let k = if q.typing() {
+            ask.text_key(&lines, Duration::from_secs(60))
+        } else {
+            ask.key(&lines, Duration::from_secs(60))
+        }?;
+        match q.key(k) {
+            agora_tui::launch::Step::Ask => {}
+            agora_tui::launch::Step::Done(chosen) => return Some(chosen),
+            agora_tui::launch::Step::Cancelled => return None,
+        }
+    }
+}
+
+/// The launch a start in a folder sends: signed by `device` over exactly its options and settings, in the order sent
+/// (`directory-action-v4` when it has settings). `None` when it could not be signed.
+fn signed_launch(
+    device: &Device,
+    node: &str,
+    (path, project, kind): (&str, &str, &str),
+    accept: bool,
+    (launch_options, confirmed_launch_options): (Vec<String>, Vec<String>),
+    settings: Vec<(String, String)>,
+    now: u64,
+) -> Option<agora_protocol::v1::AgentLaunch> {
+    let auth = device.authorize_launch_with_settings(
+        node,
+        path,
+        kind,
+        project,
+        false,
+        accept,
+        &launch_options,
+        &confirmed_launch_options,
+        &settings,
+        now,
+    )?;
+    Some(agora_protocol::v1::AgentLaunch {
+        path: path.to_string(),
+        project_id: project.to_string(),
+        kind: kind.to_string(),
+        separate_worktree: false,
+        authorization: Some(auth),
+        accept_identity_change: accept,
+        launch_options,
+        confirmed_launch_options,
+        settings: settings
+            .into_iter()
+            .map(|(id, value)| agora_protocol::v1::LaunchSetting { id, value })
+            .collect(),
+    })
 }
 
 /// Keeps the panel's terminal on the selected agent: stops watching the old one and opens the new one when it has a terminal.
@@ -3730,16 +3818,11 @@ fn console(
             }
         }
         // ADR-0090: the settings the open chat agent reported (the effort on its line, what `/effort` and `/set` take).
-        if let Some(pane) = chat.as_mut() {
-            let now = session
-                .configs()
-                .options
-                .get(&pane.agent)
-                .map_or(&[][..], Vec::as_slice);
-            if now != pane.options.as_slice() {
-                pane.options = now.to_vec();
-                redraw = true;
+        if session.take_configs_changed() {
+            if let Some(pane) = chat.as_mut() {
+                take_report(pane, session.configs());
             }
+            redraw = true;
         }
         // The open agent's terminal takes the pane's size (as `agora terminal attach` takes the window's), once per agent and size.
         let pane = c.app.areas(area).terminal;
@@ -4032,11 +4115,12 @@ fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<S
         || local.to_string(),
         |a| agora_tui::split::agent_name(&a.agent_id, &a.kind),
     );
-    // ADR-0090: the agent's live state says whether its turn is over (a call still running then is shown stopped).
-    let working = c.snapshot.as_ref().is_some_and(|s| {
+    // ADR-0090: the agent's live state says whether its turn is over (a call still running then is shown stopped); blocked on a
+    // request, or in a state not known, it is not (the web window reads it the same way).
+    let turn_over = c.snapshot.as_ref().is_some_and(|s| {
         s.agents
             .iter()
-            .any(|a| a.agent_id == p.agent && agora_tui::chat::working(a))
+            .any(|a| a.agent_id == p.agent && agora_tui::chat::turn_over(a))
     });
     let mut lines = render_chat_view(
         &p.entries,
@@ -4048,8 +4132,8 @@ fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<S
         watching,
         agora_tui::chat::View {
             thoughts: p.thoughts,
-            rich: true,
-            turn_over: !working,
+            rich: agora_tui::chat::is_rich(&p.entries, &p.options),
+            turn_over,
         },
     );
     // What goes above the line being typed; a viewer's chat has none (ADR-0106).
@@ -4368,12 +4452,14 @@ fn chat_input(
         match b {
             b'\r' | b'\n' if paste => pane.typed.push(b' '),
             // A request of this agent waits: the draft stays until it is answered (Alt+Y / Alt+N), so no message goes out with a
-            // permission pending.
+            // permission pending. Stop turn and showing the thinking still work then (ADR-0090: a turn that waits for an answer is the
+            // one a person most wants to stop; the node withdraws its requests).
             b'\r' | b'\n'
                 if c.snapshot
                     .as_ref()
                     .and_then(|s| waiting_for(s, &pane.agent))
-                    .is_some() =>
+                    .is_some()
+                    && !passes_a_request(pane) =>
             {
                 pane.note = say.text(key!("tui-chat-answer-first"), &[]);
             }
@@ -4386,6 +4472,30 @@ fn chat_input(
             _ => {}
         }
     }
+}
+
+/// ADR-0090: the agent's settings as its last report says them, put in `pane`. Called only when a report came
+/// (`Session::take_configs_changed`), so a switch made here (`chat::switched`) shows until the agent's own report replaces it.
+fn take_report(pane: &mut ChatPane, configs: &agora_tui::client::Configs) {
+    pane.options = configs
+        .options
+        .get(&pane.agent)
+        .cloned()
+        .unwrap_or_default();
+}
+
+/// Whether the line typed in `pane` is Stop turn or showing the thinking, which go through while the agent's request waits.
+fn passes_a_request(pane: &ChatPane) -> bool {
+    let line = String::from_utf8_lossy(&pane.typed);
+    matches!(
+        agora_tui::chat::ask(
+            &line,
+            &pane.options,
+            pane.confirming.as_deref(),
+            agora_tui::chat::is_rich(&pane.entries, &pane.options),
+        ),
+        agora_tui::chat::Ask::Stop { .. } | agora_tui::chat::Ask::Thinking
+    )
 }
 
 /// Grants a cancel or a setting asks for: one command each, for this agent (#810).
@@ -4478,7 +4588,8 @@ fn chat_send(
     let scope = format!("agent:{local}");
     let prior = pane.confirming.take();
     // ADR-0090: `/stop`, `/thinking`, `/effort` and `/set` first; any other line as before.
-    match agora_tui::chat::ask(&line, &pane.options, prior.as_deref()) {
+    let rich = agora_tui::chat::is_rich(&pane.entries, &pane.options);
+    match agora_tui::chat::ask(&line, &pane.options, prior.as_deref(), rich) {
         agora_tui::chat::Ask::Other => {}
         agora_tui::chat::Ask::Thinking => {
             pane.thoughts = !pane.thoughts;
@@ -4576,6 +4687,11 @@ trait Asker {
     fn key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
         self.show(lines);
         read_key(self.rx(), wait)
+    }
+    /// [`Asker::key`] for a question with a line typed into: the arrows are no key there (never k, j, Backspace or Enter).
+    fn text_key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        read_text_key(self.rx(), wait)
     }
     /// Sets aside every key typed so far.
     fn discard(&mut self) {
@@ -4730,6 +4846,15 @@ impl Asker for Over<'_> {
         self.show(lines);
         self.discard();
         self.read(lines, wait, one_answer)
+    }
+
+    fn text_key(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
+        self.show(lines);
+        self.read(lines, wait, |events, area, lines| {
+            events
+                .iter()
+                .find_map(|e| agora_tui::app::text_dialog_key(e, area, lines))
+        })
     }
 
     fn answer_more(&mut self, lines: &[String], wait: Duration) -> Option<u8> {
@@ -9007,6 +9132,206 @@ mod viewer_console_tests {
         assert_eq!(pane.confirming.as_deref(), Some("/effort free"));
         assert!(pane.note.contains("without asking"), "{}", pane.note);
         assert_eq!(rows(&h), Vec::<(String, String)>::new());
+    }
+
+    /// ADR-0066: the start's settings question, driven key by key through to the launch it sends: the chosen pairs in the manifest's
+    /// order, signed over `directory-action-v4` exactly as sent (the node's own message builder checks it); an arrow types nothing into
+    /// a typed setting, and Esc sends no start.
+    #[test]
+    fn the_start_asks_the_settings_and_signs_what_it_sends() {
+        use agora_protocol::v1::LaunchSettingSpec;
+        use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
+        struct Keys {
+            rx: mpsc::Receiver<u8>,
+        }
+        impl Asker for Keys {
+            fn rx(&self) -> &mpsc::Receiver<u8> {
+                &self.rx
+            }
+            fn show(&mut self, _: &[String]) {}
+            fn frame(&mut self, _: &[u8]) {}
+        }
+        let keys = |bytes: &[u8]| {
+            let (tx, rx) = mpsc::channel();
+            for b in bytes {
+                tx.send(*b).unwrap();
+            }
+            Keys { rx }
+        };
+        let say = Say(agora_i18n::Catalog::english());
+        let specs = || {
+            vec![
+                LaunchSettingSpec {
+                    id: "effort".into(),
+                    label: "launch-setting-effort".into(),
+                    values: vec!["low".into(), "high".into()],
+                    default_value: String::new(),
+                },
+                LaunchSettingSpec {
+                    id: "model".into(),
+                    values: Vec::new(),
+                    ..Default::default()
+                },
+            ]
+        };
+        // `3` picks "high"; then "o4", an Up arrow (ESC [ A, which is `k` in a list) and Enter.
+        let mut ask = keys(b"3o4\x1b[A\r");
+        let chosen = ask_settings(&say, &mut ask, specs()).unwrap();
+        let want = vec![
+            ("effort".to_string(), "high".to_string()),
+            ("model".to_string(), "o4".to_string()),
+        ];
+        assert_eq!(chosen, want);
+        assert_eq!(ask_settings(&say, &mut keys(b"\x1b"), specs()), None);
+        assert_eq!(
+            ask_settings(&say, &mut keys(b""), Vec::new()),
+            Some(Vec::new())
+        );
+        let (device, _) = Device::generate().unwrap();
+        let launch = signed_launch(
+            &device,
+            "laptop",
+            ("/home/me/app", "proj-1", "codex"),
+            false,
+            (vec!["fast".into()], Vec::new()),
+            chosen,
+            1_000,
+        )
+        .unwrap();
+        let sent: Vec<(String, String)> = launch
+            .settings
+            .iter()
+            .map(|s| (s.id.clone(), s.value.clone()))
+            .collect();
+        assert_eq!(sent, want);
+        let auth = launch.authorization.unwrap();
+        let message = agora_node::directory::launch_signed_message_v4(
+            "laptop",
+            "/home/me/app",
+            "codex",
+            "proj-1",
+            false,
+            false,
+            &launch.launch_options,
+            &launch.confirmed_launch_options,
+            &sent,
+            &auth.nonce,
+            auth.expires_at_ms,
+        );
+        let key: Vec<u8> = (0..device.public_key_hex().len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&device.public_key_hex()[i..i + 2], 16).unwrap())
+            .collect();
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &key)
+            .verify(&message, &auth.signature)
+            .expect("the node's v4 message verifies");
+    }
+
+    /// Review of #1242, F2: Stop turn and showing the thinking go through while the agent's request waits (a turn that waits for an
+    /// answer is the one most wanted stopped); any other line still waits for the answer.
+    #[test]
+    fn stop_is_sent_while_a_request_waits() {
+        use agora_protocol::v1::{ChatEntry, ChatKind, ChatRole, PermissionOutcome};
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console();
+        let mut pane = chat_pane(&c);
+        assert!(c
+            .snapshot
+            .as_ref()
+            .and_then(|s| waiting_for(s, &pane.agent))
+            .is_some());
+        // A node that speaks the rich form shows the waiting request in the conversation.
+        pane.entries = vec![ChatEntry {
+            entry_id: 1,
+            role: ChatRole::Agent as i32,
+            kind: ChatKind::Permission as i32,
+            permission_outcome: PermissionOutcome::Pending as i32,
+            ..Default::default()
+        }];
+        let h = hub(PersonRoleOnHub::Member);
+        let mut session = Session::connect(&h.hub, "token").unwrap();
+        let (_tx, rx) = mpsc::channel::<u8>();
+        let answer_first = say.text(key!("tui-chat-answer-first"), &[]);
+        let typed = |line: &str, c: &mut Console, pane: &mut ChatPane, session: &mut Session| {
+            for b in line.bytes().chain(*b"\r") {
+                chat_input(&say, session, &rx, c, pane, &[b]);
+            }
+        };
+        typed("hello", &mut c, &mut pane, &mut session);
+        assert_eq!(pane.note, answer_first);
+        pane.typed.clear();
+        typed("/thinking", &mut c, &mut pane, &mut session);
+        assert!(pane.thoughts);
+        typed("/stop", &mut c, &mut pane, &mut session);
+        assert_ne!(pane.note, answer_first, "/stop was held back");
+        // The hub has no such machine here: the stop was sent and refused, and the note says so.
+        assert!(
+            pane.note.starts_with("Could not stop the turn"),
+            "{}",
+            pane.note
+        );
+    }
+
+    /// Review of #1242, F5: a setting switched here shows until the agent's own report replaces it; the console's loop takes the
+    /// options again only when a report came (`take_configs_changed`), so a pass of the loop does not undo the switch.
+    #[test]
+    fn a_switch_made_here_is_not_undone_by_the_next_pass() {
+        use agora_protocol::v1::{SessionConfigCategory, SessionConfigOption, SessionOption};
+        let c = console();
+        let mut pane = chat_pane(&c);
+        let effort = |current: &str| SessionConfigOption {
+            id: "effort".into(),
+            category: SessionConfigCategory::ThoughtLevel as i32,
+            current: current.into(),
+            choices: ["low", "high"]
+                .iter()
+                .map(|id| SessionOption {
+                    id: (*id).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut configs = agora_tui::client::Configs::default();
+        configs
+            .options
+            .insert(pane.agent.clone(), vec![effort("low")]);
+        take_report(&mut pane, &configs);
+        agora_tui::chat::switched(&mut pane.options, "effort", "high");
+        // The console's loop takes a report only when one came: the switch stands until then.
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let loop_at = src.find("take_report(pane, session.configs());").unwrap();
+        assert!(src[..loop_at].ends_with(
+            "if session.take_configs_changed() {\n            if let Some(pane) = chat.as_mut() {\n                "
+        ));
+        assert_eq!(pane.options, vec![effort("high")]);
+        // The agent's own report replaces it.
+        configs
+            .options
+            .insert(pane.agent.clone(), vec![effort("low")]);
+        take_report(&mut pane, &configs);
+        assert_eq!(pane.options, vec![effort("low")]);
+    }
+
+    /// Review of #1242: the plain full-screen chat knows a turn is over from the agent's latest state (blocked or not known is not).
+    #[test]
+    fn the_plain_chat_follows_the_turn() {
+        use agora_protocol::v1::{AgentSnapshot, AgentState};
+        let opened = AgentSnapshot {
+            running: true,
+            state: AgentState::Working as i32,
+            ..Default::default()
+        };
+        assert!(!plain_turn_over(Some(&opened), None));
+        assert!(plain_turn_over(
+            Some(&opened),
+            Some(AgentState::Idle as i32)
+        ));
+        assert!(!plain_turn_over(
+            Some(&opened),
+            Some(AgentState::Blocked as i32)
+        ));
+        assert!(!plain_turn_over(None, Some(AgentState::Idle as i32)));
     }
 
     /// ADR-0068 decision 6: the console takes the keybindings file from the Agora folder; a file with a problem leaves the defaults and

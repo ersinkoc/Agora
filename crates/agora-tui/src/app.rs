@@ -2708,6 +2708,15 @@ pub fn dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
     }
 }
 
+/// [`dialog_key`] for a box with a line typed into (the start's typed setting): the arrows are no key there, so they never stand for
+/// the letters (k, j) or the Backspace and Enter they are in a list.
+pub fn text_dialog_key(event: &Event, area: Rect, lines: &[String]) -> Option<u8> {
+    match event {
+        Event::Key(Key::Up | Key::Down | Key::Left | Key::Right) => None,
+        e => dialog_key(e, area, lines),
+    }
+}
+
 fn dialog(area: Rect, buf: &mut ratatui::buffer::Buffer, lines: &[String]) {
     let (r, wrapped) = dialog_layout(area, lines);
     Clear.render(r, buf);
@@ -3897,6 +3906,24 @@ mod tests {
         assert_eq!(wrap("", 4), [""]);
         let (low, _) = dialog_layout(Rect::new(0, 0, 30, 5), &long);
         assert_eq!(low.height, 3);
+    }
+
+    /// Review of #1242: in a box with a typed line the arrows type nothing; letters, Enter, Backspace and Esc are as in any box.
+    #[test]
+    fn arrows_type_nothing_into_a_typed_line() {
+        let lines = vec!["Model".to_string()];
+        for k in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            assert_eq!(text_dialog_key(&Event::Key(k.clone()), AREA, &lines), None);
+            assert!(dialog_key(&Event::Key(k), AREA, &lines).is_some());
+        }
+        for (k, b) in [
+            (Key::Char('k'), b'k'),
+            (Key::Enter, b'\r'),
+            (Key::Backspace, 0x7f),
+            (Key::Esc, 0x1b),
+        ] {
+            assert_eq!(text_dialog_key(&Event::Key(k), AREA, &lines), Some(b));
+        }
     }
 
     #[test]

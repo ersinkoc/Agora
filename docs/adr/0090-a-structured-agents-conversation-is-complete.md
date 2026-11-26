@@ -224,7 +224,10 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   `/set ID VALUE` for any option the agent reported (a value that skips permissions is typed twice, then the machine raises Amendment A's
   approval, `agent.approval_needed`); `Session::cancel_turn` and `Session::set_config` send them; `chat::session_line` adds the effort to
   the line above the conversation. Both send through the same per-agent grant as a prompt when a machine asks for one, and a viewer's
-  window sends neither. No message or schema change. Not built in the TUI: the `/` menu of the agent's own commands, a tool
+  window sends neither. As the web window: `/stop` is read only from a node that speaks the rich form (an older one gets the line as a
+  request), and it and `/thinking` go through while the agent's request waits; an agent that reports no settings gets `/effort` and
+  `/set` as a request (they may be its own commands); a call is shown stopped only once the agent is idle, finished or gone (blocked on
+  a request, or in a state not known, it is still in its turn); the agent's names for its settings are one line in a note. No message or schema change. Not built in the TUI: the `/` menu of the agent's own commands, a tool
   call's output, and the web's time ordering of a waiting prompt (#908).
 
 

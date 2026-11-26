@@ -44,11 +44,19 @@ pub fn usable_specs(specs: Vec<LaunchSettingSpec>) -> Vec<LaunchSettingSpec> {
     out
 }
 
-/// A value a start may send: 1 to [`MAX_VALUE`] characters, none of them a space or a control character (one argument, never through
-/// a shell; the node checks it against its manifest again, `agent.setting_invalid`).
+/// A character a value may hold: the node's rule (`agora-adapters` `manifest::valid_setting_value`).
+fn value_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '/' | '@' | '+' | '-')
+}
+
+/// A value a start may send, exactly as the node takes one (`agora-adapters` `manifest::valid_setting_value`): a plain token of letters,
+/// digits, `.`, `_`, `:`, `/`, `@`, `+` and `-`, 1 to [`MAX_VALUE`] long, starting with a letter or digit (it can never become a flag).
+/// Anything else would only be refused there (`agent.setting_invalid`).
 pub fn valid_value(v: &str) -> bool {
-    let n = v.chars().count();
-    (1..=MAX_VALUE).contains(&n) && !v.chars().any(|c| c.is_control() || c.is_whitespace())
+    !v.is_empty()
+        && v.len() <= MAX_VALUE
+        && v.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && v.chars().all(value_char)
 }
 
 /// What the start's settings question does after a key.
@@ -97,6 +105,11 @@ impl Settings {
         self.spec().values.len().div_ceil(PAGE).max(1)
     }
 
+    /// Whether the setting asked now is typed (it has no values): its keys are text, so arrows must not stand for letters there.
+    pub fn typing(&self) -> bool {
+        self.spec().values.is_empty()
+    }
+
     /// The pairs chosen so far, in the manifest's order.
     pub fn chosen(&self) -> Vec<(String, String)> {
         self.specs
@@ -114,7 +127,8 @@ impl Settings {
         let free = self.spec().values.is_empty();
         match k {
             b'\r' | b'\n' => {
-                let value = free.then(|| self.typed.trim().to_string());
+                // Exactly what is shown is what is sent (and signed): only characters a value may hold are ever typed.
+                let value = free.then(|| self.typed.clone());
                 match value {
                     Some(v) if !v.is_empty() && !valid_value(&v) => Step::Ask,
                     Some(v) if !v.is_empty() => self.answer(Some(v)),
@@ -130,7 +144,7 @@ impl Settings {
                 Step::Ask
             }
             b if free => {
-                if (0x21..=0x7e).contains(&b) && self.typed.chars().count() < MAX_VALUE {
+                if value_char(char::from(b)) && self.typed.len() < MAX_VALUE {
                     self.typed.push(char::from(b));
                 }
                 Step::Ask
@@ -233,6 +247,9 @@ impl Settings {
                 t(key!("tui-chat-input"), &[]),
                 plain(&self.typed)
             ));
+            if !self.typed.is_empty() && !valid_value(&self.typed) {
+                out.push(t(key!("tui-start-settings-invalid"), &[]));
+            }
         } else {
             out.push(t(
                 key!("tui-start-settings-pick"),
@@ -356,7 +373,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(s.key(b'3'), Step::Ask);
-        // `q` and digits are typed into a field, not keys of the list.
+        // `q` and digits are typed into a field, not keys of the list; a space is not a character a value may hold.
         assert_eq!(keys(&mut s, b"o3 q"), Step::Ask);
         assert!(s.lines(&t).iter().any(|l| l.ends_with(" o3q")));
         assert_eq!(keys(&mut s, &[0x7f, 0x7f, 0x7f]), Step::Ask);
@@ -404,8 +421,24 @@ mod tests {
             (0..40).map(|i| spec(&format!("s{i}"), &[], "")).collect();
         many.insert(1, spec("s0", &[], ""));
         assert_eq!(usable_specs(many).len(), MAX_SETTINGS);
-        let s = usable_specs(vec![spec("m", &["a", "a", "", "with space", "b\n"], "")]);
-        assert_eq!(s[0].values, vec!["a".to_string()]);
+        let s = usable_specs(vec![spec(
+            "m",
+            &[
+                "a",
+                "a",
+                "",
+                "with space",
+                "b\n",
+                "-flag",
+                "x=y",
+                "gpt-5.1:fast",
+            ],
+            "",
+        )]);
+        assert_eq!(
+            s[0].values,
+            vec!["a".to_string(), "gpt-5.1:fast".to_string()]
+        );
         assert!(!valid_value(&"x".repeat(MAX_VALUE + 1)));
         assert!(valid_value(&"x".repeat(MAX_VALUE)));
     }
@@ -432,5 +465,37 @@ mod tests {
                 .to_string()
         ));
         assert!(second.contains(&"tui-start-settings-back".to_string()));
+    }
+
+    /// Review of #1242: a typed value is held to the node's rule, so what is shown is what is signed and sent; one the node would
+    /// refuse is not sent, and the question says why.
+    #[test]
+    fn a_typed_value_follows_the_nodes_rule() {
+        for (v, ok) in [
+            ("o4-mini", true),
+            ("anthropic/claude:3@x+y_z.1", true),
+            ("-rf", false),
+            (".hidden", false),
+            ("a b", false),
+            ("a=b", false),
+            ("é", false),
+            ("", false),
+        ] {
+            assert_eq!(valid_value(v), ok, "{v}");
+        }
+        let mut s = Settings::new(vec![spec("model", &[], "")]).unwrap();
+        assert!(s.typing());
+        assert_eq!(keys(&mut s, b"-x=\"y"), Step::Ask);
+        assert!(s
+            .lines(&t)
+            .iter()
+            .any(|l| l.contains("tui-start-settings-invalid")));
+        // Enter keeps the question while the value cannot be sent.
+        assert_eq!(s.key(b'\r'), Step::Ask);
+        assert_eq!(keys(&mut s, &[0x7f, 0x7f, 0x7f]), Step::Ask);
+        assert_eq!(
+            keys(&mut s, b"o4\r"),
+            Step::Done(vec![("model".into(), "o4".into())])
+        );
     }
 }

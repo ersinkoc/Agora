@@ -83,6 +83,43 @@ pub fn working(a: &AgentSnapshot) -> bool {
     a.running && a.state == AgentState::Working as i32
 }
 
+/// Whether the agent's turn is over, as the web window reads it (`PromptBox.tsx`: in a turn unless idle or finished): an agent that
+/// waits for a permission answer (blocked) or whose state is not known is still in its turn, so its call is not shown stopped (#908:
+/// "not while `unknown`").
+pub fn turn_over(a: &AgentSnapshot) -> bool {
+    !a.running || a.state == AgentState::Idle as i32 || a.state == AgentState::Done as i32
+}
+
+/// The most characters of an agent's name for an option or a choice in a one-line note, and the most names listed.
+pub const NAME_MAX: usize = 60;
+pub const LISTED_MAX: usize = 20;
+
+/// An agent-supplied name as one line of a note: made plain, its line breaks and runs of space one space, at most [`NAME_MAX`]
+/// characters (cut with `…`), as `render::always_label_line` does.
+pub fn one_line(text: &str) -> String {
+    let one = plain(text).split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > NAME_MAX {
+        let mut cut: String = one.chars().take(NAME_MAX - 1).collect();
+        cut.push('…');
+        cut
+    } else {
+        one
+    }
+}
+
+/// Names for a note's list: each one line, at most [`LISTED_MAX`] of them, then `…`.
+fn listed<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, n) in names.enumerate() {
+        if i == LISTED_MAX {
+            out.push("…".to_string());
+            break;
+        }
+        out.push(one_line(n));
+    }
+    out
+}
+
 /// The person's prompts that wait behind the turn (ADR-0090 decision 5).
 pub fn waiting(entries: &[ChatEntry]) -> usize {
     entries
@@ -212,7 +249,8 @@ fn tool_status(e: &ChatEntry, turn_over: bool, t: Text<'_>) -> Option<String> {
 pub enum Ask {
     /// None of these: the caller reads the line as before.
     Other,
-    /// `/stop`: end the turn and keep the prompts that wait; `/stop all`: drop them too.
+    /// `/stop`: end the turn and keep the prompts that wait; `/stop all`: drop them too. Read only from a node that speaks the rich
+    /// form ([`is_rich`]); an older one gets the line as a request.
     Stop { drop_queue: bool },
     /// `/thinking`: show or hide the agent's thinking.
     Thinking,
@@ -243,15 +281,19 @@ pub enum ConfigAsk {
         value: String,
         offered: Vec<String>,
     },
-    /// The agent offers no setting while it runs.
-    NoOptions,
     /// `/effort` for an agent that offers no effort while it runs: it is a start setting there (ADR-0066).
     NoEffort,
 }
 
 /// Reads a typed line. `options` are the agent's settings as it last reported them; `confirming` is the line that asked to confirm
-/// last time, if any: typing it again sends it.
-pub fn ask(line: &str, options: &[SessionConfigOption], confirming: Option<&str>) -> Ask {
+/// last time, if any: typing it again sends it. `rich`: the node speaks the rich form ([`is_rich`]), so `/stop` is read here. An agent
+/// that reports no settings gets `/effort` and `/set` as a request (they may be its own commands, ADR-0090 decision 4).
+pub fn ask(
+    line: &str,
+    options: &[SessionConfigOption],
+    confirming: Option<&str>,
+    rich: bool,
+) -> Ask {
     let line = line.trim();
     let mut words = line.split_whitespace();
     let Some(first) = words.next() else {
@@ -259,9 +301,10 @@ pub fn ask(line: &str, options: &[SessionConfigOption], confirming: Option<&str>
     };
     let rest: Vec<&str> = words.collect();
     match (first, rest.as_slice()) {
-        ("/stop", []) => Ask::Stop { drop_queue: false },
-        ("/stop", ["all"]) => Ask::Stop { drop_queue: true },
+        ("/stop", []) if rich => Ask::Stop { drop_queue: false },
+        ("/stop", ["all"]) if rich => Ask::Stop { drop_queue: true },
         ("/thinking", []) => Ask::Thinking,
+        ("/effort" | "/set", _) if options.is_empty() => Ask::Other,
         ("/effort", value) => {
             let effort = options
                 .iter()
@@ -271,9 +314,7 @@ pub fn ask(line: &str, options: &[SessionConfigOption], confirming: Option<&str>
                 Some(o) => choose(o, &value.join(" "), line, confirming),
             })
         }
-        ("/set", [id, value @ ..]) => Ask::Config(if options.is_empty() {
-            ConfigAsk::NoOptions
-        } else {
+        ("/set", [id, value @ ..]) => Ask::Config(
             match options
                 .iter()
                 .find(|o| o.id == *id)
@@ -281,18 +322,14 @@ pub fn ask(line: &str, options: &[SessionConfigOption], confirming: Option<&str>
             {
                 Some(o) => choose(o, &value.join(" "), line, confirming),
                 None => ConfigAsk::UnknownOption {
-                    id: plain(id),
-                    offered: options.iter().map(|o| plain(&o.id)).collect(),
+                    id: one_line(id),
+                    offered: listed(options.iter().map(|o| o.id.as_str())),
                 },
-            }
-        }),
-        ("/set", []) => Ask::Config(if options.is_empty() {
-            ConfigAsk::NoOptions
-        } else {
-            ConfigAsk::UnknownOption {
-                id: String::new(),
-                offered: options.iter().map(|o| plain(&o.id)).collect(),
-            }
+            },
+        ),
+        ("/set", []) => Ask::Config(ConfigAsk::UnknownOption {
+            id: String::new(),
+            offered: listed(options.iter().map(|o| o.id.as_str())),
         }),
         _ => Ask::Other,
     }
@@ -300,7 +337,7 @@ pub fn ask(line: &str, options: &[SessionConfigOption], confirming: Option<&str>
 
 /// The agent's word for an option (its name, else its id).
 fn option_name(o: &SessionConfigOption) -> String {
-    plain(if o.name.is_empty() { &o.id } else { &o.name })
+    one_line(if o.name.is_empty() { &o.id } else { &o.name })
 }
 
 /// The value `typed` names for `o`: a choice by id or name, or for a boolean on / off (true / false).
@@ -333,7 +370,7 @@ fn choose(o: &SessionConfigOption, typed: &str, line: &str, confirming: Option<&
             .map(|c| {
                 (
                     c.id.clone(),
-                    plain(if c.name.is_empty() { &c.id } else { &c.name }),
+                    one_line(if c.name.is_empty() { &c.id } else { &c.name }),
                     c.skips_permissions,
                 )
             })
@@ -341,11 +378,11 @@ fn choose(o: &SessionConfigOption, typed: &str, line: &str, confirming: Option<&
     let Some((value, choice, skips)) = picked else {
         return ConfigAsk::UnknownValue {
             option,
-            value: plain(typed),
+            value: one_line(typed),
             offered: if boolean {
                 vec!["on".into(), "off".into()]
             } else {
-                o.choices.iter().map(|c| plain(&c.id)).collect()
+                listed(o.choices.iter().map(|c| c.id.as_str()))
             },
         };
     };
@@ -397,7 +434,6 @@ pub fn config_note(a: &ConfigAsk, t: Text<'_>) -> String {
                 ("values", Arg::Str(offered.join(", "))),
             ],
         ),
-        ConfigAsk::NoOptions => t(key!("tui-config-none"), &[]),
         ConfigAsk::NoEffort => t(key!("tui-config-no-effort"), &[]),
     }
 }
@@ -455,7 +491,7 @@ pub fn effort_part(options: &[SessionConfigOption], t: Text<'_>) -> Option<Strin
         });
     Some(t(
         key!("tui-chat-effort"),
-        &[("effort", Arg::Str(plain(shown)))],
+        &[("effort", Arg::Str(one_line(shown)))],
     ))
 }
 

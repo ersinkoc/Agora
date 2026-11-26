@@ -595,7 +595,6 @@ tui-config-confirm = { $option } { $value } olunca ajan size sormadan çalışı
 tui-config-current = { $option } zaten { $value }.
 tui-config-unknown = Ajanın “{ $id }” adlı bir ayarı yok. Ayarları: { $ids }
 tui-config-values = { $option } şunları alır: { $values }
-tui-config-none = Bu ajan çalışırken değiştirilebilecek bir ayar sunmuyor.
 tui-config-no-effort = Bu ajan çalışırken çabasını sunmuyor; çaba ajan başlarken seçilir.
 tui-config-approval-needed = Makine geçmeden önce imzalı onayınızı bekliyor: istek görününce yanıtlayın.
 
@@ -607,6 +606,7 @@ tui-start-settings-default = varsayılan ({ $value })
 tui-start-settings-default-tool = aracın varsayılanı
 tui-start-settings-default-word = varsayılan
 tui-start-settings-more = n  daha fazla ({ $page } / { $pages })
+tui-start-settings-invalid = Bir değer harf ya da rakamla başlar ve yalnızca harf, rakam ve . _ : / @ + - içerir
 tui-start-settings-back = Backspace bir önceki ayara döner.
 
 ## ADR-0068 karar 6: tuş dosyası (docs/ux/keybindings.md).

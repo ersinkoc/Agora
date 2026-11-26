@@ -632,7 +632,6 @@ tui-config-confirm = With { $option } set to { $value } the agent acts without a
 tui-config-current = { $option } is { $value } already.
 tui-config-unknown = The agent has no setting “{ $id }”. Its settings: { $ids }
 tui-config-values = { $option } takes: { $values }
-tui-config-none = This agent offers no settings to change while it runs.
 tui-config-no-effort = This agent does not offer its effort while it runs; it is chosen when the agent starts.
 tui-config-approval-needed = The machine waits for your signed approval before switching: answer the request when it shows.
 
@@ -644,6 +643,7 @@ tui-start-settings-default = the default ({ $value })
 tui-start-settings-default-tool = the tool's default
 tui-start-settings-default-word = default
 tui-start-settings-more = n  more ({ $page } of { $pages })
+tui-start-settings-invalid = A value starts with a letter or a digit and holds only letters, digits and . _ : / @ + -
 tui-start-settings-back = Backspace goes back to the setting before.
 
 ## ADR-0068 decision 6: the keybindings file (docs/ux/keybindings.md).
