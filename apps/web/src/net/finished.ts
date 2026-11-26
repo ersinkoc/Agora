@@ -1,11 +1,14 @@
 // What changed for the person between two looks at the fleet (pure), and the "finished" mark that lasts until they see the agent
 // (docs/ux/main-window.md, "Finished, not seen yet").
 //
-// An agent *finishes* when it goes from working to idle or finished (a turn ended, or its program did); one that ended with an error is
-// Failed, not finished. Something *needs you* when an agent, or a machine asking to join, comes onto the Needs you list: an agent blocked
-// in its terminal or with a request waiting is one thing, however many requests it opens, until it leaves the list. An agent the window
-// sees for the first time (the first snapshot, a sign-in again, a new connection) is taken as it is: no sound, no mark.
-import { type AgentTileModel, type UiState, endedWithError } from '../model';
+// An agent *finishes* when it goes from working to idle or finished: a turn ended, or its program exited by itself with status 0. One that
+// ended with an error is Failed, and one stopped on request or interrupted with its machine (also drawn as finished once closed, net/view.ts)
+// did not finish anything: neither has a sound or a mark. An agent *needs you* when it comes onto the Needs you list: blocked in its
+// terminal or with a request waiting, it is one thing however many requests it opens, until it leaves the list. A machine asking to join
+// is on that list too but has no sound: it is not an agent, and its card can arrive after the window's first look, which would sound for a
+// request that was already there. An agent the window sees for the first time (the first snapshot, a sign-in again) is taken as it is: no
+// sound, no mark.
+import type { AgentTileModel, UiState } from '../model';
 import type { AttentionItem } from './fleet';
 import type { SoundEvent } from './sounds';
 
@@ -13,6 +16,9 @@ export interface Seen { states: ReadonlyMap<string, UiState>; asking: ReadonlySe
 
 // Who an item on the Needs you list is about: its agent (a request names it even before the list has the agent), or the machine asking.
 export const askerOf = (it: AttentionItem): string => (it.kind === 'approval' ? it.approval.agentId : it.kind === 'agent' ? it.agent.id : it.key);
+
+// A closed agent finished only when its program exited by itself with status 0 (model.ts has what the exit codes mean).
+const endedCleanly = (a: AgentTileModel): boolean => !a.closed || (a.exitCode === 0 && !a.interrupted);
 
 export interface Changes {
   // Sounds that may play, at most one per agent and change.
@@ -30,8 +36,7 @@ export function changes(prev: Seen | undefined, agents: readonly AgentTileModel[
   const states = new Map<string, UiState>();
   for (const a of agents) states.set(a.id, a.state);
   const asking = new Set<string>();
-  const pairs = new Set<string>();
-  for (const it of attention) { const who = askerOf(it); asking.add(who); if (it.kind === 'pair') pairs.add(who); }
+  for (const it of attention) if (it.kind !== 'pair') asking.add(askerOf(it));
   const next: Seen = { states, asking };
   if (!prev) return { events: [], finished: [], resumed: [], gone: [], next };
   const events: SoundEvent[] = [];
@@ -41,7 +46,7 @@ export function changes(prev: Seen | undefined, agents: readonly AgentTileModel[
     const was = prev.states.get(a.id);
     if (was === undefined || was === a.state) continue;
     if (a.state === 'working' || a.state === 'needs-you') resumed.push(a.id);
-    else if (was === 'working' && (a.state === 'idle' || a.state === 'finished') && !endedWithError(a)) {
+    else if (was === 'working' && (a.state === 'idle' || a.state === 'finished') && endedCleanly(a)) {
       finished.push(a.id);
       events.push({ kind: 'finished', agent: a.id });
     }
@@ -49,7 +54,7 @@ export function changes(prev: Seen | undefined, agents: readonly AgentTileModel[
   const gone = [...prev.states.keys()].filter((id) => !states.has(id));
   for (const who of asking) {
     if (prev.asking.has(who)) continue;
-    events.push(pairs.has(who) ? { kind: 'needs-you' } : { kind: 'needs-you', agent: who });
+    events.push({ kind: 'needs-you', agent: who });
   }
   return { events, finished, resumed, gone, next };
 }

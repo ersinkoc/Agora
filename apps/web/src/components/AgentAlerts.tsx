@@ -61,7 +61,8 @@ export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = read
       timer.current = setTimeout(() => { timer.current = undefined; run(flush(gateRef.current, Date.now(), stillAudible)); }, r.waitMs);
     }
   };
-  useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current); }, []);
+  // Gone (signed out: the sign-in page is drawn instead): no sound waits, and what was marked belongs to that session.
+  useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current); finishedMarks.set([]); }, []);
 
   // The audio may start only on an act of the person's: their first click or key in this visit starts it, when sounds are on.
   useEffect(() => {

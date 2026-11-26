@@ -85,7 +85,7 @@ describe('whether a sound may play', () => {
     expect(audible(asks('a'), { ...on, needsYou: false }, [], away, false)).toBe(false);
     expect(audible(asks('a'), on, ['a'], away, false)).toBe(false);
     expect(audible(asks('b'), on, ['a'], away, false)).toBe(true);
-    // A machine asking to join has no agent, so no agent's mute silences it.
+    // An event for no agent is not silenced by an agent's mute.
     expect(audible(asks(), on, ['a'], away, false)).toBe(true);
   });
 

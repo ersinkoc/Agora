@@ -77,7 +77,7 @@ export const soundPrefs = {
   reset() { prefs = undefined; muted = undefined; emit(); },
 };
 
-// One event: a sound that may play. `agent` is the hub-wide key of the agent it is for; a machine asking to join has none.
+// One event: a sound that may play. `agent` is the hub-wide key of the agent it is for (an event for no agent is never muted by one).
 export interface SoundEvent { kind: SoundKind; agent?: string }
 // Where the person is: the window shown and focused, and the agent in its focused pane (if any).
 export interface SoundPresence { visible: boolean; focused: boolean; viewing?: string }

@@ -178,8 +178,8 @@ sign: everything it says is on screen too.
 
 - **Sounds** (This device → **Sounds**, `#/device/sounds`; kept in this browser only, **off until the person turns them on**, so a window
   never surprises anyone). Two short sounds made in the browser (WebAudio notes, no audio file): **finished** (two soft rising notes) when
-  an agent goes from working to idle or finished, and **needs you** (two short notes at one pitch) when an agent, or a machine asking to
-  join, comes onto the Needs you list. Each can be turned off and tried (**Play**); the volume is Quiet, Medium or Loud. **Mute this
+  an agent goes from working to idle or finished, and **needs you** (two short notes at one pitch) when an agent comes onto the Needs you
+  list (a machine asking to join has no sound: its card has the window's other signs). Each can be turned off and tried (**Play**); the volume is Quiet, Medium or Loud. **Mute this
   agent's sounds** is in the agent's menu (the ⋯ of its pane, its row in the agent list and its phone screen) while sounds are on, and is
   remembered in this browser. The rules (`net/sounds.ts`):
   - never in safe mode (ADR-0114), and never for the agent in the focused pane while the window is in front;
@@ -187,8 +187,9 @@ sign: everything it says is on screen too.
   - a burst is one sound: at most one a second, the most urgent of the burst (needs you before finished), decided from the clock, not a
     timer, so a background tab cannot add one; each agent sounds at most once per change of its state, and an agent with a request open is
     one thing that needs you however many requests it opens, until it leaves the list;
-  - the first look at the fleet (opening the window, signing in again) is taken as it is: no sound for what was already there. An agent
-    that ended with an error is Failed, not finished, and has no sound.
+  - the first look at the fleet (opening the window, signing in again) is taken as it is: no sound for what was already there. A closed
+    agent finished only when its program exited by itself with status 0: one that ended with an error (Failed), was stopped (Close agent)
+    or was interrupted with its machine has no sound and no mark.
   A browser plays sound only after the person has interacted with the page: the first click or key in a visit (or the Sounds switch)
   starts the audio, and a sound that could not start at once is dropped rather than played late.
 - **Finished, not seen yet.** An agent that finishes while the person is not looking at it keeps a mark on its tile (a green **New** pill

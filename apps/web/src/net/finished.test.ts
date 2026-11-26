@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentTileModel, UiState } from '../model';
+import { EXIT_UNKNOWN, type AgentTileModel, type UiState } from '../model';
 import { attentionList } from './fleet';
 import { changes, finishedMarks, nextUnseen, type Seen } from './finished';
 import type { ApprovalModel } from './view';
@@ -37,6 +37,20 @@ describe('what changed for the person', () => {
     expect(c.finished).toEqual([]);
   });
 
+  it('calls a closed agent finished only when its program exited by itself with 0, not when stopped or interrupted', () => {
+    const ids = ['clean', 'stopped', 'signal', 'unknown', 'interrupted'];
+    const s = look(undefined, ids.map((id) => agent(id, 'working'))).next;
+    const c = look(s, [
+      agent('clean', 'finished', { closed: true, exitCode: 0 }),
+      agent('stopped', 'finished', { closed: true, exitCode: EXIT_UNKNOWN }), // Close agent, or a stop through the node
+      agent('signal', 'finished', { closed: true, exitCode: -15 }), // the node's own SIGTERM
+      agent('unknown', 'finished', { closed: true }),
+      agent('interrupted', 'finished', { closed: true, exitCode: 0, interrupted: { resumable: true } }),
+    ]);
+    expect(c.finished).toEqual(['clean']);
+    expect(c.events).toEqual([{ kind: 'finished', agent: 'clean' }]);
+  });
+
   it('says which agents left the list', () => {
     const s = look(undefined, [agent('a', 'idle'), agent('b', 'idle')]).next;
     expect(look(s, [agent('b', 'idle')]).gone).toEqual(['a']);
@@ -65,10 +79,10 @@ describe('what changed for the person', () => {
     expect(c.events).toEqual([{ kind: 'needs-you', agent: 'a' }]);
   });
 
-  it('hears a request from an agent the list does not have yet, and a machine asking to join (with no agent)', () => {
+  it('hears a request from an agent the list does not have yet, but not a machine asking to join', () => {
     const s = look(undefined, []).next;
     const c = look(s, [], [approval('r1', 'm/ghost')], [{ id: 'p1', expiresMs: 0 }]);
-    expect(c.events).toEqual([{ kind: 'needs-you', agent: 'm/ghost' }, { kind: 'needs-you' }]);
+    expect(c.events).toEqual([{ kind: 'needs-you', agent: 'm/ghost' }]);
   });
 });
 
