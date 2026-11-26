@@ -474,14 +474,28 @@ fn compute_checkout(path: &Path) -> Result<CheckoutInfo, GitError> {
         .map_err(|_| GitError::NotARepository(path.to_path_buf()))?;
     // Rebuilt from its parts so it uses this system's separator: git for Windows answers `C:/...`.
     let root: PathBuf = Path::new(root.trim()).components().collect();
+    // The two identity queries run at the resolved root, so the `.git` checks in `git_command` see the checkout's own `.git`
+    // (a linked `.git` is refused even when asked from a subfolder). They run side by side: one serial git spawn less, which
+    // shows on Windows. A thread that cannot be started is no error: that query then runs in order instead.
+    let query_remote = || git_refs(&root, &["remote", "get-url", "origin"]).ok();
+    let (roots, remote) = std::thread::scope(|s| {
+        let remote = std::thread::Builder::new()
+            .spawn_scoped(s, query_remote)
+            .ok();
+        let roots = git_refs(&root, &["rev-list", "--max-parents=0", "HEAD"]);
+        let remote = match remote {
+            Some(handle) => handle.join().unwrap_or_else(|_| query_remote()),
+            None => query_remote(),
+        };
+        (roots, remote)
+    });
     // A repository can have several root commits; the lexicographically smallest is a stable choice.
-    let roots = git_refs(&root, &["rev-list", "--max-parents=0", "HEAD"])?;
+    let roots = roots?;
     let root_commit = roots
         .lines()
         .min()
         .ok_or_else(|| GitError::NotARepository(root.clone()))?
         .to_string();
-    let remote = git_refs(&root, &["remote", "get-url", "origin"]).ok();
     let project = ProjectId::new(remote.as_deref().map(str::trim), &root_commit)
         .or_else(|_| ProjectId::new(None, &root_commit))
         .map_err(|_| GitError::NotARepository(root.clone()))?;
@@ -1563,6 +1577,22 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         assert_eq!(info.root.as_os_str(), r.dir.as_os_str());
         assert_eq!(info.project.remote(), Some("github.com/owner/repo"));
         assert_eq!(info.project.root_commit().len(), 40);
+    }
+
+    /// A folder whose `.git` links to another repository's `.git` is refused, also when asked from a subfolder: git itself
+    /// finds the link from there, so the identity queries must run at the resolved root, where the link is seen.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_dot_git_is_refused_from_a_subfolder_too() {
+        let other = Repo::new(Some("git@github.com:Other/Repo.git"));
+        let linked = other.wt("linked");
+        fs::create_dir_all(linked.join("sub")).expect("mkdir");
+        agora_platform::symlink(&other.dir.join(".git"), &linked.join(".git")).expect("symlink");
+        let from_sub = discover_checkout(&linked.join("sub"));
+        let from_root = discover_checkout(&linked);
+        let _ = fs::remove_dir_all(&linked);
+        assert!(from_sub.is_err(), "linked/sub discovered: {from_sub:?}");
+        assert!(from_root.is_err(), "linked discovered: {from_root:?}");
     }
 
     #[test]
