@@ -230,3 +230,309 @@ be framed. The frame page is one more file the hub serves with headers of its ow
 
 **Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's headers per path (read from
 `web.rs`), the frame page opened on its own included; the real hub binary serves the same headers and the sample plugin draws in it.
+
+## Amendment B (Proposed, 2026-11-26): plugins can act: open their panels, show an agent, prepare a prompt, add commands the person can give keys
+
+Status: Proposed. Waits for the maintainer; nothing below is built. ADR-0114 itself stays Accepted, and its decisions stand as written
+until this amendment is accepted.
+
+Origin: roadmap M5.4 (steps P1 and P2) and the gap review of 2026-11-26 (`docs/reviews/2026-11-26-architecture-gap-review.md`, section
+4, "The capability gap"). Decision 3 lists actions as "not in rung 1", each needing an amendment, and the open question "Which UI actions
+should come first?" proposed opening a pane and focusing an agent.
+
+### Context
+
+- **Rung 1 only reads.** A plugin can show something but cannot do anything. Extension systems elsewhere run actions, add commands to
+  the palette and bind keys. Without some of that, few people will write plugins.
+- **What does not move.** Decision 3's "never" list stays whole: no signing, no answering a request, no typing into a terminal, no
+  starting, stopping or prompting an agent on its own, no settings, themes or other plugins. Decision 4 stays too: the window draws, a
+  plugin draws only inside its pane, and safe mode has a key no one can rebind.
+- **What exists to build on:**
+  - the frame is `inert` until the person clicks into it, and inert again once they click or move the focus elsewhere (`plugins.md`,
+    "The focus is the person's");
+  - one message filter with exact fields, a rate and a stop (`plugins/protocol.ts`);
+  - grants per capability, with a held version when one asks for more (`plugins/grants.ts`);
+  - commands as data, a keybindings file, `FIXED_KEYS`, `NEVER_COMMAND`, and unknown commands kept and inert (#1224,
+    `apps/web/src/keys/`, `keybindings.md`).
+- **The hard part is telling the person's gesture from the plugin's.** The window's loader runs in the plugin's own realm, so anything
+  the frame says about a click can be forged. The window must decide from what it observes itself.
+- **A prepared prompt is close to "prompting an agent".** An agent that acts without asking runs code on its machine (Context, above). So
+  the person must read the text, and only the person sends it.
+
+### Decision
+
+**B1. Four new capabilities, granted like the rung-1 ones.**
+
+| Capability | What it lets the plugin do | The install screen says (`plugin-cap-*`) |
+| --- | --- | --- |
+| `pane.open` | open one of its own panels in a pane beside its own | "Open its own panels beside this one" |
+| `agent.focus` | bring an agent the person can see to the front | "Show you an agent" |
+| `prompt.prepare` | write a prompt into a chat agent's message box, for the person to read and send | "Write a message for you to read and send. It never sends one." |
+| `commands.add` | list its commands in the command palette, where the person can give them keys | "Add its commands to the command palette" |
+
+- **Declared** in the manifest's `capabilities`, as today. `commands.add` also needs the manifest's `commands` list (B6); one without
+  the other refuses the package.
+- **Granted** in the same screen and the same record (`seen`, `granted`), none by default. The screen lists what a plugin can see,
+  then what it can do, under **What it can do**; under `commands.add` it lists the commands by name. The plugin's own words are shown
+  as text, never as the window's. **What it can see** in the Plugins list becomes **What it can see and do**.
+- **A version that asks for one of these** is held until the person looks again (the existing rule). A version that only changes its
+  command list keeps its grant: a command does nothing until the person picks it or gives it a key.
+- **Still not added:** copy through the host, terminal reading, network, overlays and notifications (P3), events (P5).
+
+**B2. The messages.** Still version 1: new types are added, no existing type changes.
+
+| From | Type | Fields | |
+| --- | --- | --- | --- |
+| frame | `open` | `id`, `panel`, `agent` | `panel`: one of its own panel ids; `agent`: an agent id or `null` |
+| frame | `focus` | `id`, `agent` | |
+| frame | `prepare` | `id`, `agent`, `text` | |
+| window | `result` | `id`, `ok`, `data` or `error` | as today; `data` is `null` for an action |
+| window | `command` | `command` | the plugin's own command id (B6) |
+
+- **Refusals** (stable codes, in `error`, never words):
+  - `not-granted`: the capability was not allowed (as today);
+  - `no-gesture`: not during the person's turn with this frame (B3);
+  - `busy`: the approvals area, a dialog or a Review has the window (B4), or the message box already holds text (B5);
+  - `unavailable`: no such panel, an agent the person cannot see or that cannot take a prompt here (an unknown id and a hidden one
+    answer the same, so the plugin learns nothing new);
+  - `no-room`: the layout is full (32 panes or 6 levels);
+  - `bad-text`: text the window will not put in a message box (B5);
+  - `too-fast`: over the action rate.
+- **Bounds:**
+  - `panel` at most 40 characters, `agent` at most 128, `text` at most 4,096 characters.
+  - Over a bound is `size`, which stops the frame (as an oversized capability name does today). The loader checks first and rejects
+    with `too-long`, so a plugin that uses `agora.prepare` is never stopped for it.
+  - The filter's field bound grows from four to five (`open` and `prepare` have five with `agora` and `type`).
+  - On top of 20 messages a second: at most one action a second per frame (a burst of two). Over it answers `too-fast`.
+- **Safe mode, held, stopped:**
+  - In safe mode no plugin runs, so no frame asks and no command is listed; nothing needs a code.
+  - A held plugin has no panels, so no frame and no commands.
+  - A stopped frame's messages are never read.
+- **The loader adds** `agora.open(panel, agentId?)`, `agora.focus(agentId)` and `agora.prepare(agentId, text)`. Each returns a Promise
+  that is rejected with an `Error` whose message is the code. `agora.onCommand(fn)` sets the one handler for `command`.
+- **Older windows and hubs:**
+  - An older window never loads a plugin that asks for these: an unknown capability or manifest field refuses the package, and
+    `min_agora` says why in words. The loader is the window's own, so it never sends a type its window does not know.
+  - The hub's list of capability names and manifest fields (step 3, #1226, `plugin_package.rs`) grows with the window's.
+  - Capabilities and commands are strings inside the package and the grant record. No schema message changes.
+
+**B3. Only during the person's turn.** An `open`, `focus` or `prepare` is taken only during the person's turn with that frame. A turn is
+one of two things, both judged from what the window observes, never from the frame's word:
+
+- **In use:**
+  - the frame is in use (the person clicked into it or pressed Enter on it, and nothing else since: the window's own `active` state,
+    set from its own events);
+  - it has the window's focus (`document.activeElement` is the frame);
+  - its pane is on screen;
+  - and the window has transient user activation (`navigator.userActivation.isActive`).
+
+  A click or a key inside a frame gives the window activation too (HTML's activation notification reaches every ancestor document,
+  whatever its origin). While the frame is in use, a click anywhere else in the window makes it inert. So the activation can only come
+  from the person's input in that frame, or from the click that put it in use.
+- **A command:** the person ran one of the plugin's commands (palette or key), and the window sent `command` to this frame. For 2 s
+  after that, the frame may take one action.
+
+The rest:
+
+- **Never** from a timer, a watch's `update`, `load`, or another frame.
+- **One gesture, one action.** Every action the window takes moves the focus to a pane of the window's own (B4), so the frame turns
+  inert and the next action needs a new click into it. A command's turn allows one action.
+- **No "clicked" flag.** No message carries one: the plugin could forge it.
+- **To be proven first** (build step 1), in Chromium and WebKit (Playwright's WPE in CI), WebKitGTK and WebView2:
+  - a click in an opaque frame gives the window activation;
+  - a message sent from a timer with no input finds none.
+
+  An engine without `navigator.userActivation`, or where the proof fails, answers `no-gesture` to every "in use" action: there only
+  commands can act. It fails closed.
+- **Residual:**
+  - Activation lasts a few seconds (about five in Chromium), so an action may come a moment after the click, not only in its handler.
+  - Any input into the frame counts as a gesture, the plugin's own scrolling included.
+
+  Both are bounded by one action per gesture, and by what an action can do (B4, B5).
+
+**B4. Where actions land, and the focus.**
+
+- **Not while the person decides.** While the approvals area, the "needs you" list, the attention dialog, a Review, or any dialog of
+  the window has the focus or is open, every action answers `busy` and nothing moves. An action never takes the focus from those.
+  When an action moves or resizes a pane that shows a request, its answer guard's dwell starts again (T44, `useAnswerGuard`).
+- **`pane.open`:**
+  - Only one of the plugin's own panels, never a built-in one.
+  - It opens in a new pane beside the plugin's pane, as **split right** does, within the layout's limits (`no-room` when full,
+    nothing changes).
+  - A `tool` panel is bound to `agent`, which must be one the person can see; a `global` panel takes `null`.
+  - A pane that already shows that panel with that binding is brought to the front instead.
+  - It never replaces or closes a pane.
+- **`agent.focus`:**
+  - The agent id must be one the plugin's own view holds (`agents.read` or `pane.context`), for an agent the person can see.
+  - A pane that follows the selection shows it. Otherwise its pane comes to the front, or it opens in a new pane beside the plugin's.
+  - Unlike selecting in the agent list, it never closes a pane (selecting the agent of the pane in focus does) and never opens a tab
+    over the plugin's own pane.
+- **The keyboard after an action:**
+  - The window focuses the pane it showed: the pane itself, never a terminal, a message box or any text field inside it.
+  - So keys the person was still typing into the plugin go nowhere that types. They click or press Enter to type there.
+- **Nothing over the window:** an action opens no overlay, dialog, toast or notification. The pane bar of a pane a plugin opened is the
+  window's, as always.
+
+**B5. A prepared prompt.**
+
+- **Only into a chat agent's message box:**
+  - A structured (ACP) agent the person can see and may talk to.
+  - A terminal agent answers `unavailable`, since typing into a terminal is "never". So do an ended agent and a viewer's window
+    (ADR-0106: no box to type in).
+  - Never into an answer to a request, a Review, a reason for a Deny, a terminal, the team chat, a task, a setting or another plugin.
+- **Shown where the person can read it.** The agent's pane comes forward as for `agent.focus` (B4), and the focus goes to that pane,
+  not into its box.
+- **The person's draft is never touched.** A box that already holds text, the person's or a plugin's, answers `busy`.
+- **Text the window refuses (`bad-text`):**
+  - Control characters other than a new line and a tab.
+  - Invisible and direction-changing characters (zero-width, bidi overrides and isolates), as for a plugin's name. The person sees
+    exactly what would be sent.
+  - A leading `/`: slash commands can switch a mode or end the agent (`/exit`), so a plugin cannot prepare one.
+- **Marked:**
+  - Above the box the window draws one line: the plugin's name as plain text, the **Plugin** marker (theme floor, ADR-0113), and
+    "wrote this. Read it before you send it.", with **Clear**.
+  - The line stays until the text is sent or the box is empty.
+- **Never sent by itself:**
+  - No message sends it. The focus is not moved into the box (B4).
+  - Send and Enter work only once the person has put the keyboard in the box themselves, and Send is off for the surface's short
+    dwell after the text arrives. So a click or a key already on its way does not send it.
+- **An agent that acts without asking** (its Acts-without-asking sign): the line says so in the risk colour. The first Send asks once
+  more, in the window's own words: "Send text a plugin wrote to an agent that acts without asking?"
+- **Untrusted data.**
+  - Once sent, it is the person's prompt like any other. What the agent then does still goes through the node's policy and approvals
+    (ADR-0020); a prompt widens nothing.
+  - Nothing about it is signed.
+  - The draft lives in this window only and is never stored on the hub.
+
+**B6. Commands and keys.**
+
+- **Declared in the manifest:** `commands`, 1 to 16 of `{ id, name, panel? }`.
+  - `id`: lower-case letters, digits and `-`, starting with a letter, at most 32. It may not be `request`, `approval`, `approve`,
+    `deny` or `allow` (`NEVER_COMMAND` applied to the plugin's own part; the full id starts with `plugin.`, which that pattern does not
+    see).
+  - `name`: one line of at most 60 characters, no control or invisible characters, shown as text, never as a Fluent key.
+  - `panel`: which of its panels receives the command (the first by default).
+- **The full id** is `plugin.<plugin id>.<command id>`, like a panel's. No built-in id starts with `plugin.` (a test keeps it so), and
+  an id is registered once. So a plugin command cannot shadow a built-in one.
+- **No default keys.** The manifest has no `keys` field (an unknown field refuses the package). The person gives keys in **Settings >
+  Keyboard**, or in the keybindings file, like any other command.
+- **Shown as the plugin's:**
+  - In the palette, under **Plugins**, as "⟨plugin name⟩: ⟨command name⟩" with the **Plugin** marker (and **development** where it
+    applies). So it never stands alone as the window's own words, an "Allow" included.
+  - In Settings > Keyboard, as rows under the plugin's name with the marker.
+- **Offered only while its panel is on screen.**
+  - The plugin's frame registers the handler while it is drawn, as parts of the window register theirs (`keys/registry.ts`).
+  - The command goes to the panel in the focused pane if it shows one, otherwise to the one the person used last. It never goes to a
+    frame that is not on screen.
+  - With no pane showing it, the command is not offered, and its key does nothing and goes on (as a built-in command that cannot act).
+- **Can a command wake an inert frame?** It reaches it, and that is all.
+  - `inert` blocks input and focus, not the frame's script, so the frame gets `command`.
+  - The window does not put the frame in use and does not focus it.
+  - The command's turn allows one action (B3). There is never a hidden frame: no command starts a plugin whose panel is not shown.
+- **Keys a plugin command may not take:**
+  - The fixed keys (`FIXED_KEYS`): safe mode; Tab, Shift+Tab, Esc, Enter, Space and the arrows (which also press a focused card's
+    buttons); a terminal's copy, find and paste; editing text.
+  - The keys `palette.open` and `attention.next` have in force (by default Ctrl+K, ⌘K, Ctrl+Shift+K, and N), so the palette and what
+    needs you can always be reached.
+  - Refused with its reason (`keys-error-plugin-key`) in the file reader and the recorder.
+  - The web window has no keys that answer a request (`keybindings.md`, "No command answers a request"). Alt+Y, Alt+N and Alt+A are
+    the terminal client's, which has no plugins.
+- **Where a key acts is unchanged:**
+  - A terminal, a text field, and a plugin frame in use keep their keys. A key pressed inside a frame goes to the frame, not to the
+    window's commands.
+  - A held key runs a plugin command once (`repeat` is ignored), and `command` goes to one frame at most four times a second.
+- **When the plugin goes:**
+  - A plugin not shown, held, without `commands.add`, removed for the hub, or in safe mode has no commands in the palette or Settings.
+  - Its bindings stay in the file as unknown commands that bind nothing (the existing rule). Settings lists them as "plugin not
+    loaded", with **Clear**.
+  - **Remove** in the Plugins list also takes its bindings out of the file.
+  - In safe mode the keys are the defaults and no plugin runs.
+
+**B7. Threat model.** A new row, numbered when built (T65 to T68 are taken by open pull requests; T69 if none of them moves):
+
+- **The attacks:**
+  - A plugin acts without the person: from a timer, a watch update, or a forged "clicked" flag.
+  - It moves the layout or the focus under a click or a key meant for a request card (T44), or sends the person's typing into a
+    terminal or a message box.
+  - It prepares a prompt that the person sends unread to an agent that acts without asking, hides words in it (invisible or bidi
+    characters, T46), or prepares a slash command.
+  - It overwrites the person's draft.
+  - Its command or key poses as the window's ("Allow"), takes the palette's or the safe-mode key, or shadows a built-in command.
+  - A command keeps a hidden plugin running.
+- **The answers:** B3 to B6.
+- **Residuals:**
+  - An action may come a few seconds after the person's input in the frame, and any input into the frame counts.
+  - A plugin can still write a misleading prompt that a person sends without reading it.
+  - A keybindings file shared by someone else can bind a plugin command to a key the person uses, shown as a conflict.
+
+T63 changes with it: "there are no write messages at all" becomes the three actions and their rules.
+
+**B8. What changes in the web window.**
+
+- **`plugins/`:**
+  - `capabilities.ts`: the four names and their words.
+  - `protocol.ts`: the new types, five fields, the action rate, the codes.
+  - `PluginFrame.tsx`: turns, actions, delivering `command`, registering commands while on screen.
+  - `package.ts`: the `commands` field and its checks.
+  - `PluginsDialog.tsx`: **What it can do**.
+- **The loader** (`public/plugin-frame.js`): `agora.open`, `focus`, `prepare` and `onCommand`.
+- **The layout** (`layout/engine.ts`, the workspace): open beside the plugin's pane; bring an agent forward without closing a pane;
+  focus a pane, not its contents.
+- **The chat's message box:** the plugin line, the dwell, the extra question for an agent that acts without asking.
+- **`keys/`:** commands added while a plugin is loaded, the reserved keys, `keys-error-plugin-key`, and the rows with the marker.
+- **Elsewhere:**
+  - the hub's lists (`plugin_package.rs`);
+  - `locales/en` and `locales/tr`;
+  - `plugins.md`, `keybindings.md` and `threat-model.md` in the pull requests that build each part.
+
+### Build order
+
+1. **The gesture proof:** the real-browser check (B3) in Chromium and WebKit, and in the desktop app's webviews. If it fails, stop and
+   amend B3 before anything else.
+2. **P1, open and show:** `pane.open` and `agent.focus`, the messages, turns, the focus rule, the grant screen.
+3. **P1, prepared prompts:** `prompt.prepare` and the message box's line, dwell and extra question.
+4. **P2, commands and keys:** the manifest field, palette and Settings rows, `command`, the reserved keys.
+5. **The hub's lists** (after #1226), the threat-model row, the docs, and screenshots in both themes.
+
+### Verification
+
+- **Real browser** (`scripts/e2e-plugin-sandbox.mjs`, Chromium and WebKit):
+  - An action sent from a timer, from a watch update, or right after the person clicked elsewhere answers `no-gesture`. One sent on a
+    click in the frame is taken; a second one right after it is not.
+  - After an action the frame is inert, and the focus is on the pane the window showed, not inside it.
+  - With the approvals area or a dialog in focus, every action answers `busy`, and nothing moves.
+  - A command run from the palette lets one action through, within 2 s; a command does not put the frame in use or focus it.
+- **Unit:**
+  - the filter (five fields, sizes, the action rate);
+  - grants (held for a new action capability, kept for a changed command list);
+  - the package (`commands` without `commands.add` and the reverse, ids, names, 17 commands);
+  - `bad-text` cases and a leading `/`, and the draft never overwritten;
+  - Send's dwell and the extra question;
+  - reserved keys refused, unknown plugin commands kept, Remove taking bindings out, no built-in id starting with `plugin.`.
+- **Visual:** the message box with a plugin's text, the palette with a plugin command, Settings > Keyboard with plugin rows; dark and
+  light.
+
+### Alternatives considered
+
+- **Trust a "clicked" flag from the frame.** The loader shares the plugin's realm, so the plugin can forge it. Rejected.
+- **A window-drawn confirmation for every action.** Safe, but a dialog per click is noise (ADR-0024). Kept only for sending a plugin's
+  text to an agent that acts without asking.
+- **Let a plugin send a prompt after a confirmation.** That is "prompting an agent", which decision 3 forbids in any rung. Rejected.
+- **Commands registered by the frame while it runs.** They could not be reviewed in the catalog or shown on the grant screen. Commands
+  are declared in the manifest instead.
+- **Default keys in the manifest.** Plugins would take keys from each other and from the person, with conflicts at install. Rejected:
+  the person gives the keys.
+- **Move the keyboard into what an action shows.** Keys still on their way would land in a terminal or a message box. Rejected.
+- **A command that starts its plugin when no panel shows it.** A plugin would run where nothing shows it, against decision 4. Rejected
+  for P2.
+
+### Open questions
+
+- **Should `pane.open` also open built-in tool panels** (Changes, Files) bound to an agent? Proposed: not in P1. The plugin's own panels
+  first.
+- **Should a command open its panel** when no pane shows it? Proposed: no in P2. Revisit with P5 (events).
+- **The extra question before sending a plugin's text to an agent that acts without asking:** keep it? Proposed: yes.
+- **The bounds:** 16 commands a plugin, 4,096 characters a prompt, one action a second. Proposed: as written.
+- **An engine with no user activation** (B3): only commands act there. Proposed: yes, failing closed.
+- **Copy through the host** (decision 3's list): when? Proposed: with P3 (the status-line segment and notifications), in its own
+  amendment.
