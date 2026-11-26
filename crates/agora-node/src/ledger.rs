@@ -615,6 +615,27 @@ pub fn proto_state(word: &str) -> v1::AgentState {
     }
 }
 
+/// The entries of the ledger in `data_dir` as last written, read without changing anything: `agora workspaces` (ADR-0064) reads it
+/// while the node may run. No ledger yet: none. A file that is not a ledger is an error (nothing can be said of who is where).
+pub fn read_entries(data_dir: &Path) -> io::Result<Vec<Entry>> {
+    let path = data_dir.join(LEDGER_DIR).join(LEDGER_FILE);
+    let bytes = match agora_platform::read_small_regular_file_no_follow(&path, MAX_FILE_BYTES) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let v = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .filter(|v| number(v, "version") == VERSION)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    Ok(v.get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Entry::from_json)
+        .collect())
+}
+
 impl Ledger {
     /// A ledger that never touches the disk.
     pub fn in_memory() -> Self {
@@ -708,6 +729,11 @@ impl Ledger {
     /// One agent's entry.
     pub fn get(&self, agent_id: &str) -> Option<Entry> {
         self.st().entries.get(agent_id).cloned()
+    }
+
+    /// Every entry (ADR-0064: who works in which folder, for the workspace clean-up).
+    pub fn entries(&self) -> Vec<Entry> {
+        self.st().entries.values().cloned().collect()
     }
 
     /// The agents found interrupted and still offered, oldest id first.

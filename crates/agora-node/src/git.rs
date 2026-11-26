@@ -190,6 +190,8 @@ struct Made {
     work: PathBuf,
     admin: PathBuf,
     common: PathBuf,
+    /// The worktree's own `.git` file as git wrote it (ADR-0064: a clean-up checks it is still that before it acts).
+    dotgit: Vec<u8>,
     commondir: Vec<u8>,
     gitdir: Vec<u8>,
     project: Option<ProjectId>,
@@ -219,7 +221,8 @@ fn record_made(work: &Path, project: Option<ProjectId>) {
     else {
         return;
     };
-    let (Ok(commondir), Ok(gitdir)) = (
+    let (Ok(dotgit), Ok(commondir), Ok(gitdir)) = (
+        read_link_file(&work.join(".git")),
         read_link_file(&admin.join("commondir")),
         read_link_file(&admin.join("gitdir")),
     ) else {
@@ -234,10 +237,77 @@ fn record_made(work: &Path, project: Option<ProjectId>) {
         work,
         admin,
         common,
+        dotgit,
         commondir,
         gitdir,
         project,
     });
+}
+
+/// What the node recorded of a worktree it made ([`MADE`]): its Git folders and the three link files as git wrote them. ADR-0064 keeps
+/// it on disk (`crate::workspaces`) so that a node that restarts (or `agora workspaces`) checks and removes the worktree against what git
+/// said when it was made, never against what its `.git` file says now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MadeLinks {
+    pub work: PathBuf,
+    pub admin: PathBuf,
+    pub common: PathBuf,
+    pub dotgit: Vec<u8>,
+    pub commondir: Vec<u8>,
+    pub gitdir: Vec<u8>,
+}
+
+impl MadeLinks {
+    /// Whether the worktree's `.git`, the admin folder's `commondir` and `gitdir` still hold exactly what was recorded, each read once
+    /// without following a link ([`read_link_file`]), and `commondir` still names the recorded shared folder ([`links_hold`]).
+    pub fn still_hold(&self) -> bool {
+        let same = |file: PathBuf, recorded: &[u8]| {
+            read_link_file(&file).is_ok_and(|now| now == recorded)
+        };
+        same(self.work.join(".git"), &self.dotgit)
+            && same(self.admin.join("commondir"), &self.commondir)
+            && same(self.admin.join("gitdir"), &self.gitdir)
+            && links_hold(&self.admin, &self.common)
+    }
+}
+
+/// The record of the worktree this node made at exactly `work` (not a folder inside one), as [`MadeLinks`].
+pub fn made_links(work: &Path) -> Option<MadeLinks> {
+    let work = agora_platform::canonicalize_plain(work).ok()?;
+    made()
+        .iter()
+        .find(|m| m.work == work)
+        .map(|m| MadeLinks {
+            work: m.work.clone(),
+            admin: m.admin.clone(),
+            common: m.common.clone(),
+            dotgit: m.dotgit.clone(),
+            commondir: m.commondir.clone(),
+            gitdir: m.gitdir.clone(),
+        })
+}
+
+/// ADR-0064: takes back the record of a worktree this node made before it restarted (from `crate::workspaces`), so its git there is
+/// pinned to the recorded folders as it was before the restart. Only while the links still hold what was recorded
+/// ([`MadeLinks::still_hold`]) and nothing is recorded for that folder yet; whether it was taken.
+pub fn adopt_made(links: &MadeLinks) -> bool {
+    if !links.still_hold() {
+        return false;
+    }
+    let mut list = made();
+    if list.iter().any(|m| m.work == links.work) {
+        return true;
+    }
+    list.push(Made {
+        work: links.work.clone(),
+        admin: links.admin.clone(),
+        common: links.common.clone(),
+        dotgit: links.dotgit.clone(),
+        commondir: links.commondir.clone(),
+        gitdir: links.gitdir.clone(),
+        project: None,
+    });
+    true
 }
 
 /// Test hook: forgets the record of the worktree at `work`, as a node that restarts has none ([`MADE`]).
@@ -579,6 +649,11 @@ pub(crate) fn create_start_worktree(
 }
 
 impl StartWorktree {
+    /// Where the worktree was made.
+    pub(crate) fn path(&self) -> &Path {
+        &self.worktree
+    }
+
     /// Remove this failed start's worktree first, then its branch only if still unused and at the initial commit.
     /// Changed, symbolic or checked-out branches are kept; a ref lock makes the commit comparison and deletion atomic.
     pub(crate) fn rollback(self) -> Result<(), GitError> {
@@ -661,7 +736,8 @@ fn unmerged_commits(dir: &Path, branch: &str) -> Result<u32, GitError> {
             "--remotes",
         ],
     )?;
-    Ok(n.trim().parse().unwrap_or(0))
+    // An answer that is not a number counts as some (keep the work), as for a detached HEAD.
+    Ok(n.trim().parse().unwrap_or(u32::MAX))
 }
 
 /// Commits of the worktree's HEAD that no branch or remote has. An answer that is not a number counts as some (keep the work).
@@ -697,6 +773,74 @@ fn has_submodules(worktree: &Path) -> Result<bool, GitError> {
         .any(|name| std::fs::symlink_metadata(worktree.join(name).join(".git")).is_ok()))
 }
 
+/// Why removing a worktree would lose work ([`keeps_work`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keeps {
+    /// Uncommitted changes, untracked files included.
+    Changes,
+    /// A checked-out submodule (git itself refuses to remove it without `--force`).
+    Submodules,
+    /// Commits on this branch (`HEAD` when detached) that no other branch or remote has.
+    Unmerged(String),
+}
+
+/// What removing `worktree` without force would lose (`None`: nothing), with the checks [`remove_worktree`] makes: pinned and
+/// link-checked like every read ([`with_links`]). Any answer git could not give is an error, never "nothing".
+pub fn keeps_work(checkout: &Path, worktree: &Path) -> Result<Option<Keeps>, GitError> {
+    with_links(worktree, || {
+        if is_dirty(worktree)? {
+            return Ok(Some(Keeps::Changes));
+        }
+        if has_submodules(worktree)? {
+            return Ok(Some(Keeps::Submodules));
+        }
+        match current_branch(worktree)? {
+            Some(branch) => {
+                if unmerged_commits(checkout, &branch)? > 0 {
+                    return Ok(Some(Keeps::Unmerged(branch)));
+                }
+            }
+            // A detached HEAD: commits made there are on no branch, and removing the worktree drops the only HEAD that has them.
+            None => {
+                if detached_commits(worktree)? > 0 {
+                    return Ok(Some(Keeps::Unmerged("HEAD".into())));
+                }
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// ADR-0064 decision 4: whether `name`, a folder at the top of `worktree`, is build output git ignores and holds nothing tracked in
+/// (`git ls-files` lists nothing below it, and `git check-ignore` says it is ignored). Pinned and link-checked like every read.
+pub fn ignored_untracked(worktree: &Path, name: &str) -> Result<bool, GitError> {
+    if name.is_empty() || name.starts_with('-') || name.contains(['/', '\\']) {
+        return Ok(false);
+    }
+    with_links(worktree, || {
+        if !git(worktree, &["ls-files", "-z", "--", name])?.is_empty() {
+            return Ok(false);
+        }
+        // Exit 0: ignored; 1: not ignored; anything else is git failing.
+        let mut command = hardened(worktree);
+        let out = command
+            .args(["check-ignore", "-q", "--", name])
+            .output()
+            .map_err(|e| GitError::Io(e.to_string()))?;
+        if let Some(moved) = moved_links(&command) {
+            return Err(moved);
+        }
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(GitError::Command {
+                args: "check-ignore".into(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            }),
+        }
+    })
+}
+
 /// Remove a worktree. Refuses to discard uncommitted changes, unmerged commits or a checked-out submodule unless `force` is set.
 /// The branch itself is never deleted.
 ///
@@ -713,25 +857,13 @@ pub fn remove_worktree(checkout: &Path, worktree: &Path, force: bool) -> Result<
         put_back(&m.admin.join("gitdir"), &m.gitdir);
     }
     if !force {
-        with_links(worktree, || {
-            if is_dirty(worktree)? || has_submodules(worktree)? {
-                return Err(GitError::Dirty(worktree.to_path_buf()));
+        match keeps_work(checkout, worktree)? {
+            None => {}
+            Some(Keeps::Changes | Keeps::Submodules) => {
+                return Err(GitError::Dirty(worktree.to_path_buf()))
             }
-            match current_branch(worktree)? {
-                Some(branch) => {
-                    if unmerged_commits(checkout, &branch)? > 0 {
-                        return Err(GitError::Unmerged(branch));
-                    }
-                }
-                // A detached HEAD: commits made there are on no branch, and removing the worktree drops the only HEAD that has them.
-                None => {
-                    if detached_commits(worktree)? > 0 {
-                        return Err(GitError::Unmerged("HEAD".into()));
-                    }
-                }
-            }
-            Ok(())
-        })?;
+            Some(Keeps::Unmerged(branch)) => return Err(GitError::Unmerged(branch)),
+        }
     }
     let path = worktree.to_string_lossy();
     git(

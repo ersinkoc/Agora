@@ -1788,6 +1788,23 @@ pub(crate) fn bind_loopback_exclusive(port: u16) -> io::Result<std::net::TcpList
     Ok(unsafe { std::net::TcpListener::from_raw_socket(s as u64) })
 }
 
+/// See [`crate::free_space`].
+pub(crate) fn free_space(path: &Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let w: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free: u64 = 0;
+    // SAFETY: a NUL-terminated wide path and an out value that outlive the call; the two other outputs are optional (null).
+    if unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free, null_mut(), null_mut()) } != 0 {
+        return Ok(free);
+    }
+    Err(os_error(unsafe { GetLastError() }))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {

@@ -1503,6 +1503,9 @@ pub struct Policy {
     /// ADR-0089 decision 2: how much of each structured agent's chat history the node keeps on its disk (`chat.history_max_bytes`,
     /// at most the default 32 MiB, 0 for none) and for how long after it was last written (`chat.history_days`, at most the default 30).
     pub history: crate::transcript::Limits,
+    /// ADR-0064: the workspace clean-up (`workspaces.clean = auto | off`, `workspaces.grace_hours`, `workspaces.max_gb`,
+    /// `workspaces.min_free_gb`).
+    pub workspaces: crate::workspaces::Settings,
 }
 
 /// ADR-0060: `resume = ask | auto`. `ask` (the default, and any other value) offers Resume in the window and does nothing by itself;
@@ -1565,6 +1568,7 @@ impl Default for Policy {
             problems: Vec::new(),
             registry: crate::manifests::RegistryPolicy::default(),
             history: crate::transcript::Limits::default(),
+            workspaces: crate::workspaces::Settings::default(),
         }
     }
 }
@@ -1659,6 +1663,12 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "mesh.fleet" => p.mesh_fleet = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
+                // ADR-0064: a value it does not understand keeps the default (and `workspaces.clean` off) and is a line not understood.
+                key if key.starts_with("workspaces.") => {
+                    if p.workspaces.take(key, v) != Some(true) {
+                        p.problems.push(line.chars().take(80).collect());
+                    }
+                }
                 // ADR-0089: a value that is not a number keeps the default and is a line the node did not understand.
                 "chat.history_max_bytes" => match crate::transcript::Limits::parse_max_bytes(v) {
                     Some(b) => p.history.max_bytes = b,
@@ -1831,6 +1841,8 @@ pub struct Node {
     /// ADR-0062 item 4: brings back, a round at a time, the agents still waiting after the first round.
     resume_wait: Option<JoinHandle<()>>,
     git_watch: Option<JoinHandle<()>>,
+    /// ADR-0064: the workspace clean-up.
+    workspace_clean: Option<JoinHandle<()>>,
     pub supervisor: Arc<Mutex<Supervisor>>,
     pub events: Arc<EventSink>,
     /// Per-agent mesh endpoints (messages, tasks, leases between the agents on this node).
@@ -2006,6 +2018,13 @@ impl Node {
         // #1150: registry kinds that start through a package runner (`npx`, `uvx`) start it in an empty folder of their own here, not
         // in the project, whose package-manager configuration it would otherwise read.
         sup.set_runner_root(cfg.data_dir.join("runner"));
+        // ADR-0064: the worktrees this node makes are recorded, capped and cleaned up after their agents.
+        let workspaces = Arc::new(crate::workspaces::Workspaces::open(
+            &cfg.data_dir,
+            &cfg.worktree_root,
+        )?);
+        workspaces.set_settings(read_policy(&cfg.data_dir.join(POLICY_FILE)).workspaces);
+        sup.set_workspaces(Arc::clone(&workspaces));
         // ADR-0084: the secrets this node holds, and which kind may receive which (the node's own policy; the hub cannot set it).
         sup.set_credentials(crate::credentials::Credentials::new(
             crate::credentials::SecretStore::in_data(&cfg.data_dir),
@@ -2745,6 +2764,19 @@ impl Node {
                     }
                 })?
         };
+        let workspace_clean = {
+            let (sup, ev, stop, ledger, workspaces) = (
+                Arc::clone(&supervisor),
+                Arc::clone(&events),
+                Arc::clone(&stop),
+                Arc::clone(&ledger),
+                Arc::clone(&workspaces),
+            );
+            let root = cfg.worktree_root.clone();
+            std::thread::Builder::new()
+                .name("agora-workspaces".into())
+                .spawn(move || clean_workspaces(&sup, &ev, &ledger, &workspaces, &root, &stop))?
+        };
         let git_watch = {
             let (sup, ev, stop, mesh) = (
                 Arc::clone(&supervisor),
@@ -2882,6 +2914,7 @@ impl Node {
             ticker: Some(ticker),
             resume_wait,
             git_watch: Some(git_watch),
+            workspace_clean: Some(workspace_clean),
             supervisor,
             events,
             mesh,
@@ -3203,6 +3236,7 @@ impl Node {
             self.ticker.take(),
             self.resume_wait.take(),
             self.git_watch.take(),
+            self.workspace_clean.take(),
             self.devices_watch.take(),
             self.preview_watch.take(),
         ]
@@ -3236,6 +3270,65 @@ fn lock_by<T>(m: &Mutex<T>, until: Instant) -> Option<std::sync::MutexGuard<'_, 
 }
 
 /// `m` locked, waiting for it as long as `stop` is not set (`None` once it is and the lock is still held).
+/// ADR-0064: the first pass a minute after the node started, then every hour, or at once when a start was refused for the cap.
+const WORKSPACE_FIRST: Duration = Duration::from_secs(60);
+const WORKSPACE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// ADR-0064: the node's own workspace clean-up (`crate::workspaces`). Who is where comes from the supervisor (agents that run or wait
+/// to be restarted) and the session ledger (agents interrupted and still offered count as in use; ended ones with when they ended),
+/// asked again for each workspace once it is claimed. Each removal is said to the hub as `WorktreeRemoved`.
+fn clean_workspaces(
+    sup: &Mutex<Supervisor>,
+    ev: &EventSink,
+    ledger: &crate::ledger::Ledger,
+    workspaces: &crate::workspaces::Workspaces,
+    root: &Path,
+    stop: &AtomicBool,
+) {
+    let users = || {
+        // Not waited for once the node stops: then every workspace counts as in use (nothing is removed).
+        let Some(s) = lock_unless(sup, stop) else {
+            return crate::workspaces::Users::unknown();
+        };
+        let busy = s.busy_folders();
+        drop(s);
+        let mut u = crate::workspaces::Users::from_ledger(&ledger.entries());
+        for f in busy {
+            u.busy(&f);
+        }
+        u
+    };
+    let mut next = Instant::now() + WORKSPACE_FIRST;
+    while !stop.load(Ordering::Acquire) {
+        if Instant::now() < next && !workspaces.take_wake() {
+            std::thread::sleep(TICK);
+            continue;
+        }
+        let how = crate::workspaces::Clean {
+            by_node: true,
+            older_than_ms: None,
+            dry_run: false,
+        };
+        for o in workspaces.clean(&users, now_ms(), how, stop) {
+            if o.action != crate::workspaces::Action::Removed {
+                continue;
+            }
+            // Said for the place the node made it at (`WorktreeCreated`), and for its canonical spelling when that differs.
+            let mut ids = vec![o.path.to_string_lossy().into_owned()];
+            if let Some(name) = o.path.file_name() {
+                let made = root.join(name).to_string_lossy().into_owned();
+                if made != ids[0] {
+                    ids.push(made);
+                }
+            }
+            for worktree_id in ids {
+                ev.record(Body::WorktreeRemoved(v1::WorktreeRemoved { worktree_id }));
+            }
+        }
+        next = Instant::now() + WORKSPACE_EVERY;
+    }
+}
+
 fn lock_unless<'a, T>(m: &'a Mutex<T>, stop: &AtomicBool) -> Option<std::sync::MutexGuard<'a, T>> {
     loop {
         match m.try_lock() {

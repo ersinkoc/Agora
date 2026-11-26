@@ -1410,6 +1410,8 @@ pub struct Supervisor {
     /// Agents taken up from the holder whose launch options came from the ledger without their arguments (`set_kept_launch`): their
     /// next process (a restart after a crash) runs without them, so it is not shown with them.
     kept_launch: BTreeSet<AgentId>,
+    /// ADR-0064: the record of the worktrees this node makes, and the clean-up's claims; `None` records nothing (tests).
+    workspaces: Option<Arc<crate::workspaces::Workspaces>>,
 }
 
 impl Supervisor {
@@ -1434,6 +1436,65 @@ impl Supervisor {
             runner_root: None,
             holder: None,
             kept_launch: BTreeSet::new(),
+            workspaces: None,
+        }
+    }
+
+    /// ADR-0064: records every worktree this node makes there, refuses a new one over the cap or the free-disk minimum, and refuses a
+    /// start or resume in a workspace a clean-up is removing.
+    pub fn set_workspaces(&mut self, w: Arc<crate::workspaces::Workspaces>) {
+        self.workspaces = Some(w);
+    }
+
+    /// ADR-0064: the folders of the agents that run or wait to be restarted, which a clean-up must leave alone.
+    pub fn busy_folders(&self) -> Vec<PathBuf> {
+        self.agents
+            .values()
+            .filter(|e| e.terminal.is_some() || e.restart_at.is_some())
+            .map(|e| e.worktree.clone())
+            .chain(
+                self.adapters
+                    .values()
+                    .filter(|a| a.running || a.restart_at.is_some())
+                    .map(|a| a.worktree.clone()),
+            )
+            .collect()
+    }
+
+    /// `Err` when a clean-up is removing the workspace `folder` is in (ADR-0064): nothing may start there.
+    fn refuse_removing(&self, folder: &Path) -> Result<(), SupervisorError> {
+        if self.workspaces.as_ref().is_some_and(|w| w.removing(folder)) {
+            return Err(SupervisorError::FolderMoved);
+        }
+        Ok(())
+    }
+
+    /// Makes a start's own worktree (ADR-0003) and records it as the node's (ADR-0064): refused first when the node's worktrees hold
+    /// their cap or the disk is nearly full.
+    fn make_worktree(
+        &self,
+        checkout: &Path,
+        worktree: &Path,
+        branch: &str,
+        base: Option<&str>,
+    ) -> Result<git::StartWorktree, SupervisorError> {
+        if let Some(w) = &self.workspaces {
+            w.room()
+                .map_err(|(resource, limit)| SupervisorError::ResourceLimit { resource, limit })?;
+        }
+        let created = git::create_start_worktree(checkout, worktree, branch, base)?;
+        if let Some(w) = &self.workspaces {
+            w.record_made(worktree, checkout, branch, crate::grants::now_ms());
+        }
+        Ok(created)
+    }
+
+    /// Gives back a start's worktree after the start failed, and its record.
+    fn give_back(&self, created: git::StartWorktree) {
+        let path = created.path().to_path_buf();
+        let _ = created.rollback();
+        if let Some(w) = &self.workspaces {
+            w.forget(&path);
         }
     }
 
@@ -2164,7 +2225,7 @@ impl Supervisor {
         if let Some(h) = &self.abort_hook {
             h(id);
         }
-        let _ = worktree.rollback();
+        self.give_back(worktree);
     }
 
     /// Make an agent kind available. Replaces a previous manifest of the same kind.
@@ -2325,7 +2386,7 @@ impl Supervisor {
         let worktree = req.worktree_root.join(&req.name);
         let branch = format!("agent/{}", req.name);
         let created =
-            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+            self.make_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
 
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
@@ -2447,7 +2508,7 @@ impl Supervisor {
         if !folder.in_place() {
             return Err(SupervisorError::FolderMoved);
         }
-        let created = git::create_start_worktree(git_root, &target, &branch, None)?;
+        let created = self.make_worktree(git_root, &target, &branch, None)?;
         let mut direct = req.clone();
         // F1012: the new worktree is made from the checkout by its path; one that moved meanwhile may have been another project's.
         let result = (if folder.in_place() {
@@ -2463,7 +2524,7 @@ impl Supervisor {
         match result {
             Ok(id) => Ok(id),
             Err(e) => {
-                let _ = created.rollback();
+                self.give_back(created);
                 Err(e)
             }
         }
@@ -2490,6 +2551,7 @@ impl Supervisor {
         folder: Option<&agora_platform::HeldFolder>,
     ) -> Result<AgentId, SupervisorError> {
         self.check_limits()?;
+        self.refuse_removing(&req.checkout)?;
         let choice = self.launch_choice(&req.kind, options)?;
         self.refuse_unconfinable(&req.kind)?;
         let kind = self
@@ -2792,7 +2854,7 @@ impl Supervisor {
             return Err(SupervisorError::UnknownKind(req.kind.clone()));
         }
         let created =
-            git::create_start_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
+            self.make_worktree(&checkout.root, &worktree, &branch, req.base.as_deref())?;
         let id = AgentId::new(format!("agent-{}", self.next_id));
         self.next_id += 1;
         let mesh = self.adapter_mesh(&id, &req.kind, &checkout.project.to_string(), &worktree);
@@ -4715,6 +4777,15 @@ impl Supervisor {
         now: Instant,
         checked: Option<agora_platform::HeldFolder>,
     ) -> Result<Vec<SupervisorEvent>, SupervisorError> {
+        // ADR-0064: never into a workspace a clean-up is removing.
+        if let Some(folder) = self
+            .adapters
+            .get(id)
+            .map(|a| a.worktree.clone())
+            .or_else(|| self.agents.get(id).map(|e| e.worktree.clone()))
+        {
+            self.refuse_removing(&folder)?;
+        }
         if let Some(entry) = self.adapters.get(id) {
             if entry.running || entry.restart_at.is_some() {
                 return Err(SupervisorError::StillRunning(id.clone()));

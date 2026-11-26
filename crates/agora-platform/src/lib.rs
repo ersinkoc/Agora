@@ -258,6 +258,25 @@ pub fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> io::Re
     }
 }
 
+/// The bytes free for this user on the file system that holds `path` (ADR-0064: the node refuses to make a worktree when too little is
+/// left). Unix `statvfs` (`f_bavail`, the blocks an unprivileged user may still use, times `f_frsize`), Windows `GetDiskFreeSpaceExW`
+/// (the caller's quota included). `path` must exist.
+pub fn free_space(path: &std::path::Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        unix::free_space(path)
+    }
+    #[cfg(windows)]
+    {
+        windows::free_space(path)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
 /// Puts a freshly downloaded program in place of the one at `target` (which may be running): the new file is made executable and
 /// renamed over it. Windows cannot replace a running program, so the old one is moved aside to `<target>.old` first; when that name is
 /// still taken by a program an earlier update moved aside and that still runs (a node not restarted since), to `<target>.old-<pid>`.

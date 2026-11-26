@@ -52,6 +52,8 @@ cli-usage =
       agora node untrust CİHAZ_ID [--data DİZİN]
       agora node secret set AD | list | remove AD [--data DİZİN]
       agora history purge [--data DİZİN]
+      agora workspaces [--data DİZİN] [--worktrees DİZİN] [--socket YOL]
+      agora workspaces clean [--older-than 7d] [--dry-run] [--data DİZİN] [--worktrees DİZİN] [--socket YOL]
       agora tui [--hub ADRES:PORT --ca DOSYA --code KOD] [--hub-dir DİZİN]
       agora update [--check] [--version X] [--release-url URL] [--release-key DOSYA] [--unsigned]
       agora adapter install AD [--registry URL] [--root-key DOSYA] [--yes] | update [AD] | list | remove AD
@@ -931,3 +933,21 @@ cli-explain-bad-file = Ekran dosyası { $path } okunamadı: { $reason }
 cli-explain-file-too-large = Ekran dosyası { $path } { $max } bayttan büyük; yakalanmış bir ekran değil.
 cli-explain-manifest-problem = Manifest dosyası { $path } atlandı, node da atlar: { $reason }
 cli-explain-bad-size = --size terminal boyutunu SÜTUNxSATIR olarak alır, örneğin 120x40 (her biri 2 ile 1000 arasında).
+# ADR-0064: `agora workspaces` ve `agora workspaces clean`.
+cli-workspaces-empty = Bu düğümün oluşturduğu ve hâlâ diskte duran bir çalışma alanı yok.
+cli-workspaces-summary = { $count } çalışma alanı, toplam { $size }; { $cleanable } tanesi şununla silinebilir: agora workspaces clean
+cli-workspaces-ledger-unreadable = Düğümün ajan kaydı okunamadı, bu yüzden hangi çalışma alanlarının kullanımda olduğu bilinemiyor. Hiçbir şey değiştirilmedi.
+cli-workspaces-node-unasked = Düğüm çalışıyor ama hangi ajanları çalıştırdığı sorulamadı. Hiçbir şey silinmedi.
+cli-workspaces-removed = { $path } çalışma alanı silindi
+cli-workspaces-would-remove = { $path } çalışma alanı silinecekti
+cli-workspaces-forgotten = { $path } çalışma alanı zaten yoktu; artık listelenmiyor.
+cli-workspaces-kept = { $path } çalışma alanı tutuldu: { $reason ->
+        [changes] commit edilmemiş değişiklikleri var
+        [submodules] içinde açılmış bir alt modül var
+        [unmerged] dalında başka hiçbir dalda olmayan ve gönderilmemiş commit'ler var
+        [links-moved] Git bağlantıları değiştirilmiş, deposuna güvenilemez
+        [moved] artık düğümün onu oluşturduğu yerde değil
+       *[other] Git onu denetleyemedi
+    }
+cli-workspaces-clean-summary = { $removed } silindi, { $kept } bırakıldı (her birinin nedeni yukarıda).
+cli-workspaces-clean-dry-summary = { $removed } silinecekti, { $kept } bırakılacaktı. Hiçbir şey değiştirilmedi.

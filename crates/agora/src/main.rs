@@ -192,6 +192,7 @@ mod themecmd;
 mod trustcli;
 mod tuicmd;
 mod update;
+mod workspacescmd;
 
 /// Everything `agora` prints for people goes out here (#1150). A reader that went away (`agora … | head -1`, `2>&1 | head`, a
 /// closed terminal) is never a panic, as `println!` and `eprintln!` would make it, and never takes a running hub or node down: the
@@ -379,6 +380,9 @@ pub(crate) struct Opts {
     out: Option<PathBuf>,
     write_hashes: bool,
     watch: bool,
+    /// ADR-0064: `agora workspaces clean [--older-than AGE] [--dry-run]`.
+    older_than: Option<String>,
+    dry_run: bool,
     positional: Vec<String>,
 }
 
@@ -460,6 +464,8 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--out" => o.out = Some(it.next()?.into()),
             "--write-hashes" => o.write_hashes = true,
             "--watch" => o.watch = true,
+            "--older-than" => o.older_than = Some(it.next()?.clone()),
+            "--dry-run" => o.dry_run = true,
             s if s.starts_with("--") => return None,
             _ => o.positional.push(a.clone()),
         }
@@ -648,6 +654,9 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         ["node", "untrust"] => Box::new(trustcli::node_untrust),
         ["node", "secret"] => Box::new(secretcmd::secret),
         ["history", "purge"] => Box::new(history_purge),
+        // ADR-0064: the workspaces this machine's node made for its agents.
+        ["workspaces"] => Box::new(workspacescmd::list),
+        ["workspaces", "clean"] => Box::new(workspacescmd::clean),
         ["node", "stdio"] => Box::new(|say, o| bridge_stdio(say, &socket_path(o))),
         ["mesh", "stdio"] => Box::new(|say, o| match &o.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.

@@ -52,6 +52,8 @@ cli-usage =
       agora node untrust DEVICE_ID [--data DIR]
       agora node secret set NAME | list | remove NAME [--data DIR]
       agora history purge [--data DIR]
+      agora workspaces [--data DIR] [--worktrees DIR] [--socket PATH]
+      agora workspaces clean [--older-than 7d] [--dry-run] [--data DIR] [--worktrees DIR] [--socket PATH]
       agora tui [--hub HOST:PORT --ca FILE --code CODE] [--hub-dir DIR]
       agora update [--check] [--version X] [--release-url URL] [--release-key FILE] [--unsigned]
       agora adapter install NAME [--registry URL] [--root-key FILE] [--yes] | update [NAME] | list | remove NAME
@@ -948,3 +950,22 @@ cli-explain-bad-file = Could not read the screen file { $path }: { $reason }
 cli-explain-file-too-large = The screen file { $path } is larger than { $max } bytes, so it is not a captured screen.
 cli-explain-manifest-problem = Skipped the manifest file { $path }, as the node does: { $reason }
 cli-explain-bad-size = --size takes the terminal size as COLSxROWS, for example 120x40 (each from 2 to 1000).
+# ADR-0064: `agora workspaces` and `agora workspaces clean`. Each workspace line is fixed tokens for scripts (path, state, reason,
+# size, free for, branch); only these sentences are translated.
+cli-workspaces-empty = This node has made no workspaces that are still on disk.
+cli-workspaces-summary = { $count } workspaces, { $size } in all; { $cleanable } can be removed with: agora workspaces clean
+cli-workspaces-ledger-unreadable = The node's record of its agents could not be read, so it cannot be told which workspaces are in use. Nothing was changed.
+cli-workspaces-node-unasked = The node is running but could not be asked which agents it runs. Nothing was removed.
+cli-workspaces-removed = Removed workspace { $path }
+cli-workspaces-would-remove = Would remove workspace { $path }
+cli-workspaces-forgotten = Workspace { $path } was already gone; it is no longer listed.
+cli-workspaces-kept = Kept workspace { $path }: { $reason ->
+        [changes] it has changes that are not committed
+        [submodules] it has a submodule checked out
+        [unmerged] its branch has commits that are on no other branch and were not pushed
+        [links-moved] its Git links were changed, so its repository cannot be trusted
+        [moved] it is no longer where the node made it
+       *[other] Git could not check it
+    }
+cli-workspaces-clean-summary = { $removed } removed, { $kept } kept (the reason is given for each).
+cli-workspaces-clean-dry-summary = { $removed } would be removed, { $kept } would be kept. Nothing was changed.
