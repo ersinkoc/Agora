@@ -2186,13 +2186,26 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
 }
 
 fn response(request_id: &str, r: Result<v1::CommandOk, Error>) -> v1::CommandResponse {
-    v1::CommandResponse {
+    let resp = v1::CommandResponse {
         request_id: request_id.to_string(),
         result: Some(match r {
             Ok(ok) => Res::Ok(ok),
             Err(e) => Res::Err(e.to_info()),
         }),
+    };
+    // F1680: an answer above the frame limit cannot be written (`send` fails) and the request would get no answer at all: it is
+    // refused instead, and that refusal is what an idempotency key stores.
+    if resp.encoded_len() > DEFAULT_MAX_PAYLOAD {
+        let limit = i64::try_from(DEFAULT_MAX_PAYLOAD).unwrap_or(i64::MAX);
+        let e = Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", "response")
+            .with("limit", limit);
+        return v1::CommandResponse {
+            request_id: request_id.to_string(),
+            result: Some(Res::Err(e.to_info())),
+        };
     }
+    resp
 }
 
 /// A running control server. Dropping it stops accepting and removes the socket file.
@@ -3602,5 +3615,107 @@ mod accept_tests {
             "{took:?}"
         );
         assert!(p95(took.clone()) < Duration::from_secs(2), "{took:?}");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod answer_size_tests {
+    use super::*;
+
+    fn code_of(r: &v1::CommandResponse) -> (String, Vec<(String, String)>) {
+        match &r.result {
+            Some(Res::Err(e)) => (
+                e.code.clone(),
+                e.params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                    .collect(),
+            ),
+            other => panic!("not an error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_answer_above_the_frame_limit_is_refused_not_dropped() {
+        // Audit F1680: an answer that encodes above the frame limit could not be written, the write's error was dropped and the
+        // request got no answer at all (a `files.list` of a big folder; `Client::call` then waits for good). Gated by order: a
+        // connection's requests are served one after the other, so the small request's answer must come after the big one's.
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-ctl-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sup = Supervisor::new(crate::supervisor::SupervisorConfig {
+            node: agora_core::NodeId::new("n"),
+            restart: crate::supervisor::RestartPolicy::default(),
+            terminal: crate::terminal::TerminalOptions::default(),
+            limits: crate::supervisor::NodeLimits::default(),
+        });
+        let ctx = Arc::new(ControlContext::new(
+            Arc::new(Mutex::new(sup)),
+            vec![ProjectEntry {
+                id: "p".into(),
+                // The project list answer is then above the 1 MiB frame limit.
+                name: "n".repeat(DEFAULT_MAX_PAYLOAD + 1),
+                root: dir.clone(),
+            }],
+            dir.join("worktrees"),
+            "n".into(),
+            None,
+            None,
+            None,
+            Arc::new(crate::chat::ChatBoard::new()),
+        ));
+        let sock = dir.join("c.sock");
+        let server = ControlServer::start(&sock, ctx).unwrap();
+        let mut c = Client::connect(&sock).unwrap();
+        let w = c.writer().unwrap();
+        w.send(Cmd::ProjectList(v1::ProjectList {})).unwrap();
+        w.send(Cmd::AgentList(v1::AgentList::default())).unwrap();
+        let mut order = Vec::new();
+        let mut big = None;
+        while order.last().map(String::as_str) != Some("1000001") {
+            let f = c
+                .read_frame(Some(Duration::from_secs(60)))
+                .unwrap()
+                .expect("no answer to agent.list");
+            if f.stream_id == STREAM_COMMANDS && f.kind == KIND_RESPONSE {
+                let r = v1::CommandResponse::decode(f.payload.as_slice()).unwrap();
+                if r.request_id == "1000000" {
+                    big = Some(r.clone());
+                }
+                order.push(r.request_id);
+            }
+        }
+        assert_eq!(order, ["1000000", "1000001"], "the big answer was dropped");
+        let (code, params) = code_of(&big.unwrap());
+        assert_eq!(code, "node.resource_limit");
+        assert!(
+            params
+                .iter()
+                .any(|(k, v)| k == "resource" && v.contains("response")),
+            "{params:?}"
+        );
+        // With an idempotency key: the refusal is what is stored, and a retry gets it too (addressed to the retry).
+        for id in ["7", "8"] {
+            let r = c
+                .request(
+                    &v1::CommandRequest {
+                        request_id: id.into(),
+                        idempotency_key: "k".into(),
+                        command: Some(Cmd::ProjectList(v1::ProjectList {})),
+                        target_node: String::new(),
+                    },
+                    Duration::from_secs(60),
+                )
+                .unwrap();
+            assert_eq!(r.request_id, id);
+            assert_eq!(code_of(&r).0, "node.resource_limit");
+        }
+        drop(c);
+        drop(server);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

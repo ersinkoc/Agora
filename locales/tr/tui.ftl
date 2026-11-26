@@ -278,6 +278,7 @@ tui-cleanup-explain = Unutulan makineler ve bitmiş ajanları bütün pencereler
 tui-cleanup-keys = y unutur · r unutur ve yeniden bağlanırlarsa reddeder · başka bir tuş tutar
 tui-cleanup-done = { $count } makine unutuldu.
 tui-cleanup-failed = Bir makine unutulamadı ({ $code }); öncesinde { $count } unutuldu.
+tui-cleanup-role = Eski makineleri yalnızca sahip temizleyebilir. Hiçbir şey gönderilmedi.
 tui-app-start-read = İsteğin tamamını okudunuz. İzin vermek için y, reddetmek için n.
 
 # ADR-0065: the owner's card for a machine that asks to join (the same words as the web's pair-*).

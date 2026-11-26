@@ -1,0 +1,1 @@
+- An agent whose program ended right as it started is listed as ended, no longer offered for Resume (or restarted with `resume = auto`) after the node restarts. (#1221)

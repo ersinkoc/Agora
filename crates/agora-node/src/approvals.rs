@@ -1985,9 +1985,21 @@ impl NodeApprovals {
         self.q().pending().count()
     }
 
-    /// Every request still waiting for a decision, for the node to announce again (ADR-0054).
+    /// Every request still waiting for a decision (a copy: for a count or a check, never to announce them, see
+    /// [`Self::announce_waiting`]).
     pub fn waiting(&self) -> Vec<Pending> {
         self.q().pending().cloned().collect()
+    }
+
+    /// Hands every request still waiting for a decision to `record`, for the node to announce again (ADR-0054), under this queue's
+    /// lock: a decision, an expiry or a withdrawal takes its request out under the same lock before its `ApprovalResolved` is
+    /// recorded, so a request is announced only before that record, never after it (#1150, review of #1216, N3). `record` may take
+    /// the event sink's locks (the lock order is spawner, routes, queue, event sink) and nothing else.
+    pub fn announce_waiting(&self, mut record: impl FnMut(&Pending)) {
+        let q = self.q();
+        for p in q.pending() {
+            record(p);
+        }
     }
 }
 
@@ -2103,6 +2115,45 @@ mod tests {
         assert_eq!(n.waiting(), before, "listed before its route");
         drop(routes);
         t.join().unwrap()
+    }
+
+    /// #1150 (review of #1216, N3): the waiting requests are recorded under the queue's lock, not from a copy: a decision on another
+    /// thread waits until the recording is done, so its resolution is always recorded after the request is stated.
+    #[test]
+    fn a_decision_waits_while_the_waiting_requests_are_recorded() {
+        use std::sync::{mpsc, Arc};
+        use std::time::Duration;
+        let n = Arc::new(node_approvals());
+        let agent = agora_core::AgentId::new("agent-1");
+        let p = n.request(&agent, "a-1", "shell.exec", "ls", 0).unwrap();
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let recording = {
+            let n = Arc::clone(&n);
+            std::thread::spawn(move || {
+                n.announce_waiting(|_| {
+                    let _ = inside_tx.send(());
+                    let _ = go_rx.recv();
+                })
+            })
+        };
+        inside_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let deciding = {
+            let (n, id) = (Arc::clone(&n), p.id.clone());
+            std::thread::spawn(move || {
+                let _ = done_tx.send(n.take_pending(&id));
+            })
+        };
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a decision took the request while it was being stated"
+        );
+        go_tx.send(()).unwrap();
+        recording.join().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_secs(10)).unwrap());
+        deciding.join().unwrap();
+        assert!(n.waiting().is_empty());
     }
 
     /// #1150: a start request cannot be seen (nor so decided) before its route is in place. A decision that came between the two

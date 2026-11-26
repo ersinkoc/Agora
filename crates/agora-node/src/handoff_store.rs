@@ -261,15 +261,27 @@ impl Store {
         Ok(())
     }
 
-    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
-        let id = record.id().map_err(InsertError::Storage)?;
-        if self.records.contains_key(&id) {
+    /// Refuses a record under `id` that this store holds, or whose file is on disk although `open` did not load it (it could not be
+    /// read then): that file stays for the next start, so a retry is refused for now (F1640), never written over it as a second
+    /// entry. Only a proven absence passes. Like [`Self::room_for`], answered before a number is taken (review of #1221).
+    pub fn present(&self, id: &Id) -> Result<(), InsertError> {
+        if self.records.contains_key(id) {
             return Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into()));
         }
+        match std::fs::symlink_metadata(self.root.join(filename(*id))) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => Err(InsertError::Storage(io::ErrorKind::AlreadyExists.into())),
+            Err(e) => Err(InsertError::Storage(e)),
+        }
+    }
+
+    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
+        let id = record.id().map_err(InsertError::Storage)?;
+        self.present(&id)?;
         self.room_for(&record.delivery)?;
+        let path = self.root.join(filename(id));
         let bytes = record.bytes().map_err(InsertError::Storage)?;
-        agora_platform::write_private(&self.root.join(filename(id)), &bytes)
-            .map_err(InsertError::Storage)?;
+        agora_platform::write_private(&path, &bytes).map_err(InsertError::Storage)?;
         self.records.insert(id, (record, bytes.len()));
         self.bytes += bytes.len();
         Ok(())
@@ -483,6 +495,36 @@ mod tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
         let store = Store::open(&root).unwrap();
         assert_eq!(store.get(&id_of(2)).unwrap().delivery.summary, "locked");
+    }
+
+    /// F1640: a retry of a delivery whose record could not be read at start (left in place for the next start) is refused for now,
+    /// never written over that record under a new number: one entry per delivery id, the original one.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_never_replaces_a_record_left_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new("retry-in-place");
+        let root = dir.0.join("handoffs");
+        plant(&root, &record(2, "locked".into()));
+        let locked = root.join(filename(id_of(2)));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&locked).is_ok() {
+            return; // running with privileges that read it anyway
+        }
+        let mut store = Store::open(&root).unwrap();
+        assert!(store.insert(record(3, String::new())).is_ok());
+        let mut retry = record(9, "locked".into());
+        retry.delivery.delivery_id = id_of(2).to_vec();
+        assert!(matches!(
+            store.insert(retry),
+            Err(InsertError::Storage(ref e)) if e.kind() == io::ErrorKind::AlreadyExists
+        ));
+        assert!(store.get(&id_of(2)).is_none());
+        drop(store);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let store = Store::open(&root).unwrap();
+        assert_eq!(store.get(&id_of(2)).unwrap().number, 2);
+        assert_eq!(store.len(), 2);
     }
 
     /// Review of #1175 (N5): one file that is not a record this node wrote does not stop the store from opening (which would turn

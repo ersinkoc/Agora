@@ -402,7 +402,7 @@ pub fn describe(item: &ChatItem) -> (ChatKind, String, String) {
         ChatItem::Plan(lines) => (ChatKind::Plan, lines.join("\n"), String::new()),
         ChatItem::Diff { path, unified_diff } => {
             // ADR-0080: what a secret file's change says is not shown, only that it changed and where.
-            let text = if agora_core::secrets::is_secret_path(path) {
+            let text = if is_secret_file(path) {
                 String::new()
             } else {
                 unified_diff.clone()
@@ -583,6 +583,19 @@ fn json_string(s: &str) -> String {
 
 /// A text from an adapter made safe and bounded: at most `PRE_BOUND` bytes of it are looked at (head and tail), control characters and
 /// escape sequences are removed, and it is cut to `max` bytes. `true` when something was cut. Done before any lock is taken.
+/// ADR-0080: whether `path` names a secret file, also with each of its parts trimmed: cleaning turns a line break or a tab into a
+/// space (`cfg/.env\n` becomes `cfg/.env `), and the name is still the secret one (review of #1221).
+fn is_secret_file(path: &str) -> bool {
+    agora_core::secrets::is_secret_path(path)
+        || agora_core::secrets::is_secret_path(
+            &path
+                .split(['/', '\\'])
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
+}
+
 fn tidy(text: &str, max: usize, style: Style) -> (String, bool) {
     let (out, cut, _) = tidy_cuts(text, max, style);
     (out, cut)
@@ -1952,7 +1965,24 @@ impl ChatBoard {
             ChatItem::Tool(tool) => self.upsert_tool(agent, tool, cuts, at_ms),
             ChatItem::PlanSteps(steps) => self.upsert_plan(agent, steps, cuts, at_ms),
             other => {
-                let (kind, text, path) = describe(other);
+                let (kind, mut text, path) = describe(other);
+                // Audit F1660: a diff's path is untrusted like a tool call's: cleaned and cut before the entry exists (each place the
+                // adapter reported lands where cleaning puts it), and a secret file is known by the cleaned path (ADR-0080).
+                let (path, path_at) = match other {
+                    ChatItem::Diff { .. } => {
+                        let (path, _, at) = tidy_cuts_at(
+                            &path,
+                            MAX_PATH_BYTES,
+                            Style::Label,
+                            &reported(cuts, &CutField::DiffPath),
+                        );
+                        if is_secret_file(&path) {
+                            text.clear();
+                        }
+                        (path, at)
+                    }
+                    _ => (path, Vec::new()),
+                };
                 // The places in the entry's text (as `describe` made it) and its path; the node only cuts the text's end.
                 let at: Vec<usize> = match other {
                     ChatItem::Text(_) => reported(cuts, &CutField::Text),
@@ -1962,10 +1992,6 @@ impl ChatBoard {
                     }
                     _ => Vec::new(),
                 };
-                let path_at: Vec<usize> = reported(cuts, &CutField::DiffPath)
-                    .into_iter()
-                    .filter(|&a| a <= path.len())
-                    .collect();
                 let (text, end) = cut_at(text);
                 let text_at: Vec<usize> = at
                     .into_iter()
@@ -2041,10 +2067,9 @@ impl ChatBoard {
                 .collect()
         });
         let path_cuts = paths.as_ref().map(|_| path_cuts);
-        let secret_path = paths.as_ref().is_some_and(|p| {
-            p.iter()
-                .any(|p| agora_core::secrets::is_secret_path(&p.path))
-        });
+        let secret_path = paths
+            .as_ref()
+            .is_some_and(|p| p.iter().any(|p| is_secret_file(&p.path)));
         let (output, output_cuts) = match item.output.as_ref() {
             Some(o) => {
                 let (o, truncated, c) = tidy_cuts_at(
@@ -2094,11 +2119,7 @@ impl ChatBoard {
                 e.output_truncated = truncated;
             }
             // What a tool printed about a secret file is not shown, whatever order the pieces arrived in.
-            if secret_path
-                || e.paths
-                    .iter()
-                    .any(|p| agora_core::secrets::is_secret_path(&p.path))
-            {
+            if secret_path || e.paths.iter().any(|p| is_secret_file(&p.path)) {
                 e.output.clear();
                 e.output_truncated = false;
             }
@@ -2859,6 +2880,32 @@ mod tests {
         assert!(!o.output_truncated && o.output == "ok");
     }
 
+    /// Audit F1660: a diff's path is untrusted like a tool call's: cleaned and cut to `MAX_PATH_BYTES` before the entry exists (one
+    /// long path does not empty the ring), and a secret file is known by the cleaned path, so its change keeps no text.
+    #[test]
+    fn a_diffs_path_is_cleaned_and_cut_before_the_entry_exists() {
+        let b = ChatBoard::new();
+        let a = AgentId::new("a");
+        b.push_item(&a, &ChatItem::Text("kept".into()), 0);
+        let diff = |path: String, text: &str| ChatItem::Diff {
+            path,
+            unified_diff: text.into(),
+        };
+        b.push_item(&a, &diff("p".repeat(MAX_BYTES + 1), "+x"), 0);
+        b.push_item(
+            &a,
+            &diff("src/\u{1b}]0;t\u{7}b.rs\u{1b}[2J".into(), "+y"),
+            0,
+        );
+        b.push_item(&a, &diff("cfg/.env\u{7}".into(), "+KEY=v"), 0);
+        let s = b.snapshot(&a);
+        assert_eq!(s.len(), 4, "one long path does not empty the ring");
+        assert_eq!(s[0].text, "kept");
+        assert!(s[1].path.len() <= MAX_PATH_BYTES && s[1].text == "+x");
+        assert_eq!(s[2].path, "src/b.rs");
+        assert_eq!((s[3].path.as_str(), s[3].text.as_str()), ("cfg/.env", ""));
+    }
+
     #[test]
     fn at_most_one_version_of_an_entry_is_sent_per_150_ms_and_the_last_is_never_lost() {
         let b = ChatBoard::new();
@@ -2975,6 +3022,56 @@ mod tests {
         // A plan step is never failed.
         assert_eq!(plan_status("failed"), ToolStatus::Unspecified);
         accounted(&b, &a);
+    }
+
+    /// Review of #1221: a path whose end is a line break or a tab is cleaned to a trailing space, and is still known as a secret file's:
+    /// a diff of it keeps no text, and a tool call naming it keeps no output (in one piece, or with the output after the location).
+    #[test]
+    fn a_secret_path_with_trailing_whitespace_is_still_secret() {
+        for (i, path) in ["cfg/.env\n", "cfg/.env\t", "cfg/id_rsa\r\n"]
+            .into_iter()
+            .enumerate()
+        {
+            let b = ChatBoard::new();
+            let a = AgentId::new("a");
+            b.push_item(
+                &a,
+                &ChatItem::Diff {
+                    path: path.into(),
+                    unified_diff: "+KEY=v".into(),
+                },
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    locations: Some(vec![(path.into(), 1)]),
+                    output: Some("KEY=v".into()),
+                    ..tool(&format!("one-{i}"))
+                }),
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    locations: Some(vec![(path.into(), 1)]),
+                    ..tool(&format!("two-{i}"))
+                }),
+                0,
+            );
+            b.push_item(
+                &a,
+                &ChatItem::Tool(ToolItem {
+                    output: Some("KEY=v".into()),
+                    ..tool(&format!("two-{i}"))
+                }),
+                0,
+            );
+            let s = b.snapshot(&a);
+            assert_eq!(s.len(), 3, "{path:?}");
+            assert_eq!(s[0].text, "", "{path:?}: {:?}", s[0].path);
+            assert!(s.iter().all(|e| e.output.is_empty()), "{path:?}: {s:?}");
+        }
     }
 
     #[test]

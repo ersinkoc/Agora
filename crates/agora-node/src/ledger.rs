@@ -13,7 +13,7 @@
 //! ends; a state change is kept in memory and written with the next write (and when the node stops cleanly, [`Ledger::flush`]).
 //! An agent the node stops with itself does not end: that is exactly what makes it interrupted at the next start.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -123,6 +123,11 @@ struct State {
     /// The same for the last state: a state change can be recorded (by the supervision tick) before the control thread records the
     /// agent's `AgentStarted`, and an idle agent reports no further change, so a dropped one would leave `last_state` empty for good.
     early_states: BTreeMap<String, String>,
+    /// F1620: the same for an exit (a process that ended at once, its exit recorded by the tick before its start): the start then
+    /// records an agent that ended, not one that runs, which the next open would offer as interrupted. Oldest first: at
+    /// [`MAX_EARLY`] the oldest goes (exits of agents whose start never comes would otherwise keep a new one out for good; review of
+    /// #1221), as the newest is the one whose start is due.
+    early_exits: VecDeque<String>,
     /// ADR-0093 (#932): what each adapter agent last reported of its session, as the node recorded it, in `kept-<id>.pb` beside the
     /// ledger (not in it: a full set of config options is larger than the ledger may be). Filled as the node records, or from the file
     /// when an agent is taken up from the holder.
@@ -901,6 +906,7 @@ impl Ledger {
         let held = st.entries.remove(agent_id).is_some();
         st.early_sessions.remove(agent_id);
         st.early_states.remove(agent_id);
+        take_early_exit(&mut st.early_exits, agent_id);
         st.bound.remove(agent_id);
         if st.kept.remove(agent_id).is_some() || held {
             st.mark_kept_pending(agent_id.to_string());
@@ -1188,8 +1194,8 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             if let Some(state) = st.early_states.remove(&a.agent_id) {
                 e.last_state = state;
             }
-            // Running again (a restart after a crash, a resume): neither ended nor interrupted.
-            e.ended = false;
+            // Running again (a restart after a crash, a resume): neither ended nor interrupted. Unless its exit was recorded first.
+            e.ended = take_early_exit(&mut st.early_exits, &a.agent_id);
             e.interrupted_at_ms = 0;
             let changed = *e != before;
             if changed {
@@ -1254,9 +1260,30 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 st.dirty = true;
                 true
             }
+            // Before the agent's start is recorded: held for it (F1620), as a state is.
+            None if !x.agent_id.is_empty() && x.agent_id.len() <= MAX_FIELD => {
+                if !st.early_exits.contains(&x.agent_id) {
+                    if st.early_exits.len() >= MAX_EARLY {
+                        st.early_exits.pop_front();
+                    }
+                    st.early_exits.push_back(x.agent_id.clone());
+                }
+                false
+            }
             _ => false,
         },
         _ => false,
+    }
+}
+
+/// Removes `agent_id`'s held exit (F1620); whether there was one.
+fn take_early_exit(exits: &mut VecDeque<String>, agent_id: &str) -> bool {
+    match exits.iter().position(|x| x == agent_id) {
+        Some(i) => {
+            exits.remove(i);
+            true
+        }
+        None => false,
     }
 }
 
@@ -1393,6 +1420,34 @@ mod tests {
         // The held state is used once: a later start of the same id does not bring it back.
         l.observe(&started("agent-1", "/wt/a", ""), 14);
         assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
+    }
+
+    /// F1620: a process that ended at once can have its exit recorded by the tick before the control thread records its start; the
+    /// agent ended all the same, so the next open lists it as ended and never offers it for Resume.
+    #[test]
+    fn an_exit_recorded_before_the_agent_started_ends_it() {
+        let exited = |id: &str| {
+            Body::AgentExited(v1::AgentExited {
+                agent_id: id.into(),
+                exit_code: 1,
+            })
+        };
+        let dir = temp("exit-first");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(&exited("agent-1"), 10);
+        assert!(l.get("agent-1").is_none(), "an exit alone made an entry");
+        l.observe(&started("agent-1", "/wt/a", ""), 11);
+        assert!(l.get("agent-1").unwrap().ended);
+        l.observe(&started("agent-2", "/wt/b", ""), 12);
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
+        assert_eq!(offered, vec!["agent-2".to_string()]);
+        assert!(l.get("agent-1").unwrap().ended);
+        // The held exit is used once: a later start of the id (a resume) runs.
+        l.observe(&started("agent-1", "/wt/a", ""), 21);
+        let e = l.get("agent-1").unwrap();
+        assert!(!e.ended && !e.interrupted(), "a resume after it runs");
     }
 
     /// #907: what the launch said of acting without asking is kept with the agent and written, so a node that takes the agent up from
@@ -1780,6 +1835,28 @@ mod tests {
             l.observe(&state_event(&format!("agent-{n}"), v1::AgentState::Idle), 1);
         }
         assert_eq!(l.st().early_states.len(), MAX_EARLY);
+    }
+
+    /// Review of #1221 (F1620): exits held for agents whose start never comes (more than [`MAX_EARLY`] of them) do not keep a new
+    /// one out: the oldest goes, and an agent whose exit is recorded just before its start still ends.
+    #[test]
+    fn an_early_exit_is_held_after_many_orphaned_ones() {
+        let exited = |id: &str| {
+            Body::AgentExited(v1::AgentExited {
+                agent_id: id.into(),
+                exit_code: 1,
+            })
+        };
+        let l = Ledger::in_memory();
+        for n in 0..(MAX_EARLY + 10) {
+            l.observe(&exited(&format!("orphan-{n}")), 1);
+        }
+        assert_eq!(l.st().early_exits.len(), MAX_EARLY);
+        l.observe(&exited("agent-1"), 2);
+        assert_eq!(l.st().early_exits.len(), MAX_EARLY);
+        l.observe(&started("agent-1", "/wt/a", ""), 3);
+        assert!(l.get("agent-1").unwrap().ended);
+        assert_eq!(l.st().early_exits.len(), MAX_EARLY - 1);
     }
 
     fn directory_start(l: &Ledger, id: &str, path: &str, now: u64) {

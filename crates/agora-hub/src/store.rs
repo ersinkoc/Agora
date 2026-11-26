@@ -538,6 +538,18 @@ impl SqliteStore {
         events: &[(u64, Vec<u8>)],
         setting: Option<(&str, &[u8])>,
     ) -> Result<Vec<u64>, StoreError> {
+        self.append_batch_with_settings(producer, first_seq, events, setting.as_slice())
+    }
+
+    /// [`append_batch_with_setting`](Self::append_batch_with_setting) with any number of settings (ADR-0115: a merged board and the
+    /// markers of the boards merged into it, #1150), all in the one transaction.
+    pub fn append_batch_with_settings(
+        &self,
+        producer: &str,
+        first_seq: u64,
+        events: &[(u64, Vec<u8>)],
+        settings: &[(&str, &[u8])],
+    ) -> Result<Vec<u64>, StoreError> {
         let mut conn = self.lock()?;
         let tx = write_tx(&mut conn)?;
         let last: i64 = tx
@@ -571,7 +583,7 @@ impl SqliteStore {
                 params![producer, to_i64(seq - 1)?],
             )?;
         }
-        if let Some((key, value)) = setting {
+        for (key, value) in settings {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",

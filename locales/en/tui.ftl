@@ -309,6 +309,8 @@ tui-cleanup-done = { $count ->
        *[other] Forgot { $count } machines.
     }
 tui-cleanup-failed = Could not forget a machine ({ $code }); { $count } forgotten before it.
+# ADR-0106: "Clean up old machines" chosen by a member or a viewer. Nothing was sent.
+tui-cleanup-role = Only the owner can clean up old machines. Nothing was sent.
 tui-app-start-read = You read the whole request. Press y to allow it or n to deny it.
 
 # ADR-0065: the owner's card for a machine that asks to join (the same words as the web's pair-*).
