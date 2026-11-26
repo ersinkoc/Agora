@@ -9,10 +9,11 @@ Agora keeps a machine's files in one folder, the **Agora folder**: `$AGORA_HOME`
 | --- | --- | --- |
 | `themes/NAME.json` | a theme for the terminal client (`agora manual themes`) | every `*.json` directly in the folder, at most 200, by name; a file over 256 KiB is refused before it is read; read again while in use when it changes |
 | `layouts/NAME.json` | a saved layout of the terminal client (`agora manual layouts`) | at most 50 listed; a name of at most 60 characters; a file over 256 KiB is refused before it is read |
+| `keybindings.json` | the terminal client's own keys (`agora manual keys`) | read when `agora tui` starts; a file over 64 KiB is refused before it is read; a problem leaves the default keys in force |
 | `manifests/NAME.toml` | an agent kind added on this machine: how to start it and read its state | read when the node starts, and a new or changed file again before it lists kinds or starts an agent; a file that does not parse is skipped. `agora agent kinds` lists what it read, `agora doctor` names a file it skipped, `agora agent explain` tests a screen rule |
 
 After writing a theme or layout, tell the person how to choose it: `t` in `agora tui` for a theme, **Use layout “NAME”** in its
-commands for a layout.
+commands for a layout. A keybindings file is used at the next start of `agora tui`.
 
 ## Files the terminal client keeps
 

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { COMMANDS } from './keys/commands';
-import { MAX_ENTRIES, MAX_FILE_BYTES as MAX_KEYS_BYTES, MAX_KEYS_PER_COMMAND, readKeys } from './keys/file';
+import { MAX_ENTRIES, MAX_FILE_BYTES as MAX_KEYS_BYTES, MAX_KEYS_PER_COMMAND, conflicts, keymap, readKeys } from './keys/file';
 import { BUILTIN_PANELS } from './layout/panels';
 import { MAX_DEPTH, MAX_PANES, deserialiseLayout } from './layout/tree';
 import { CAPABILITIES } from './plugins/capabilities';
@@ -90,10 +90,12 @@ describe('agora manual keys', () => {
       expect(r.ok && r.unknown).toEqual([]);
     }
     expect(files.map((f) => f.info)).toContain('json agora-keys');
+    const example = readKeys(block('keys', 'json agora-keys'));
+    expect(example.ok && conflicts(keymap(example.file))).toEqual([]);
   });
   it('lists every command, and only real ones', () => {
     const named = new Set<string>();
-    for (const cell of tableIds(topic('keys'), '| Command |')) {
+    for (const cell of tableIds(topic('keys'), '| Web window command |')) {
       // `pane.tab-1` … `pane.tab-9` names the nine.
       const range = /^\s*`([a-z.-]+-)(\d)` … `\1(\d)`/.exec(cell);
       if (range) for (let i = Number(range[2]); i <= Number(range[3]); i++) named.add(`${range[1] ?? ''}${i}`);

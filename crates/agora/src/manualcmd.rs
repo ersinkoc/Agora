@@ -564,6 +564,66 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_topic_matches_the_terminal_clients_commands_and_reader() {
+        use agora_tui::keys::commands::{commands, KEPT_KEYS};
+        use agora_tui::keys::file::{read, FILE, MAX_FILE_BYTES};
+        use agora_tui::keys::strokes::{parse_binding, stroke_text};
+        let s = topic("keys");
+        // The terminal client's table names exactly its commands (`a-1` … `a-9` names nine).
+        let mut named = BTreeSet::new();
+        for row in s
+            .lines()
+            .skip_while(|l| !l.starts_with("| Terminal client command |"))
+            .skip(2)
+            .take_while(|l| l.starts_with("| `"))
+        {
+            let cell = row.split('|').nth(1).unwrap_or_default();
+            let codes: Vec<&str> = cell.split('`').skip(1).step_by(2).collect();
+            match (codes.as_slice(), cell.contains('…')) {
+                ([first, last], true) => {
+                    let (stem, a) = first.rsplit_once('-').unwrap();
+                    let b = last.rsplit_once('-').unwrap().1;
+                    for i in a.parse::<u32>().unwrap()..=b.parse::<u32>().unwrap() {
+                        named.insert(format!("{stem}-{i}"));
+                    }
+                }
+                _ => named.extend(codes.iter().map(|c| c.to_string())),
+            }
+        }
+        let real: BTreeSet<String> = commands().into_iter().map(|c| c.id).collect();
+        assert_eq!(named, real);
+        for (key, _) in KEPT_KEYS {
+            assert!(s.contains(&format!("`{key}`")), "{key}");
+        }
+        assert!(s.contains(&format!("`{FILE}`")) && topic("files").contains(&format!("`{FILE}`")));
+        assert!(s.contains(&format!("at most {} KiB", MAX_FILE_BYTES / 1024)));
+        assert!(topic("files").contains(&format!("over {} KiB", MAX_FILE_BYTES / 1024)));
+        // Every file in the topic is one the terminal client reads, and the example takes no key it keeps.
+        let files: Vec<String> = blocks(s)
+            .into_iter()
+            .filter(|(info, _)| info.starts_with("json"))
+            .map(|(_, b)| b)
+            .collect();
+        assert_eq!(files.len(), 2);
+        for f in &files {
+            assert!(read(f).is_ok(), "{:?}\n{f}", read(f));
+        }
+        let example = blocks(s)
+            .into_iter()
+            .find(|(info, _)| info == "json agora-keys")
+            .map(|(_, b)| b)
+            .unwrap();
+        for entry in read(&example).unwrap().entries {
+            for key in &entry.keys {
+                for stroke in parse_binding(key).unwrap() {
+                    let t = stroke_text(&stroke);
+                    assert!(!KEPT_KEYS.iter().any(|(k, _)| *k == t), "{t}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_layout_example_is_read_by_the_terminal_client_as_it_is_written() {
         use agora_tui::layout::tree::{deserialise_layout, layout_value};
         let examples: Vec<String> = blocks(topic("layouts"))
