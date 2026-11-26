@@ -207,6 +207,12 @@ impl Drop for Rig {
     }
 }
 
+/// How many agents the holder of `home` says run (`run/hold.pid`: `pid start agents`); `None` before it said.
+fn running_in_holder(home: &Path) -> Option<usize> {
+    let text = std::fs::read_to_string(home.join("run/hold.pid")).ok()?;
+    text.split_whitespace().nth(2)?.parse().ok()
+}
+
 fn alive(pid: u32) -> bool {
     agora_platform::process_start_time(pid).is_some()
 }
@@ -433,15 +439,25 @@ fn the_holders_own_read_ends_before_the_handover() {
 #[test]
 fn an_agent_that_ends_while_no_node_is_attached_keeps_its_status_and_output_until_collected() {
     let mut rig = Rig::new("ended");
-    let short = script(&rig.home, "short", &[("bye", 0)]);
+    // It writes and ends 2 s after it started, when its node is long gone and the holder reads its terminal. Written while the node
+    // was there (which never reads it), its output would wait in the terminal for nobody; macOS discards a terminal's output that is
+    // still unread 0.6 s after the last close of its program's side (`ptsclose` drains with a 60-tick timeout, then flushes), so on a
+    // slow runner, where the holder took longer than that to start reading, the agent ended with nothing kept.
+    let short = script(&rig.home, "short", &[("", 2000), ("bye", 0)]);
     let mut a = helper("node", &rig, Some(&short));
     rig.lock_for(a.id());
     say_go(&mut a);
     let _ = helper_line(&mut a);
     a.kill().expect("kill the node");
     a.wait().expect("wait");
-    // The agent ended on its own; the holder has no node and keeps running.
-    std::thread::sleep(Duration::from_millis(600));
+    // The agent ends on its own while no node is there (`run/hold.pid` counts it in, then out); the holder keeps running.
+    let end = Instant::now() + Duration::from_secs(20);
+    for want in [1, 0] {
+        while running_in_holder(&rig.home) != Some(want) {
+            assert!(Instant::now() < end, "the holder never said {want} running");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     assert!(rig.holder_running());
 
     rig.lock_self();
