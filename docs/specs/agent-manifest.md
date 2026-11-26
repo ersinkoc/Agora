@@ -155,7 +155,7 @@ screen, its arguments or its path) and reads the terminal with this kind's scree
 id, kind, ledger entry and resume) and the mark grants nothing (skip-permissions rules apply only to agents started as a kind). Linux
 reports at most 15 characters of a name. A renamed program is not recognised. Windows has no foreground group for a pseudoconsole: there
 the program in front is the shell's newest direct child, followed down through shells (`cmd`, `pwsh`, `powershell`, `sh`, `bash`), and
-the name is the image's file name without `.exe` (ADR-0094 Amendment A). An agent installed as an npm `.cmd`/`.ps1` shim runs as `node`
+the name is the image's file name without `.exe`, compared ignoring ASCII case (ADR-0094 Amendment A). An agent installed as an npm `.cmd`/`.ps1` shim runs as `node`
 and is not recognised, and a program started in the background stays marked while the prompt is in front.
 
 A manifest that lists no `[process] names` is matched by the program of its ACP launch (`[structured] acp argv[0]`) when that is a plain

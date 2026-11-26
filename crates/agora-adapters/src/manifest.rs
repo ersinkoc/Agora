@@ -110,7 +110,8 @@ fn foreground_names(names: &[String]) -> bool {
 pub struct Process {
     /// ADR-0094: the program names this kind runs as (the executable's file name the system reports for a process, `claude`,
     /// `claude.exe`). A plain terminal whose foreground program has one of them runs this kind inside it, and this kind's screen
-    /// rules read it. Compared exactly, never with arguments or a path.
+    /// rules read it. Compared exactly (ignoring ASCII case on Windows, `agora_platform::same_program_name`), never with arguments or
+    /// a path. None listed: [`Manifest::program_names`] takes the kind's own ACP program.
     #[serde(default)]
     pub names: Vec<String>,
     #[serde(default)]
