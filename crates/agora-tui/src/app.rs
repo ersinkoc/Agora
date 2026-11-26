@@ -259,6 +259,13 @@ pub struct Areas {
     /// The column of the divider right of the tree, and left of the inspector (when shown).
     pub tree_divider: Option<u16>,
     pub inspector_divider: Option<u16>,
+    /// The tree's and the inspector's whole columns, their room included (a theme's `density: roomy` keeps one column clear on each
+    /// side of their text, [`Areas::tree`] and [`Areas::inspector`]).
+    pub tree_box: Rect,
+    pub inspector_box: Rect,
+    /// A theme's lines under the tab bar and above the footer (`pane-borders: always`, ADR-0113).
+    pub tab_rule: Option<Rect>,
+    pub footer_rule: Option<Rect>,
 }
 
 /// Whether the inspector is shown: by default when the window has room for it beside a usable terminal; `i` shows or hides it
@@ -312,6 +319,8 @@ pub struct App {
     focus_changes: Vec<(String, bool)>,
     /// ADR-0106: the hub said the person is a viewer: the footer shows only the keys that read, and typing is not sent.
     pub viewer: bool,
+    /// ADR-0113: the theme in use, mapped to this terminal (`theme::map::Shell`); `None` draws in the terminal's own colours.
+    pub look: Option<crate::theme::map::Shell>,
 }
 
 impl Default for App {
@@ -335,6 +344,7 @@ impl Default for App {
             pane_focus: None,
             focus_changes: Vec::new(),
             viewer: false,
+            look: None,
         }
     }
 }
@@ -356,13 +366,20 @@ impl App {
 
     /// Splits the window: footer on the last row; tree | terminal (under its tab bar) | inspector, each divider one column wide.
     pub fn areas(&self, area: Rect) -> Areas {
+        let chrome = self.look.map(|l| l.chrome).unwrap_or_default();
+        let rules = chrome.borders == crate::theme::map::Borders::Always && area.height >= 6;
         let footer = Rect {
             y: area.bottom().saturating_sub(1),
             height: area.height.min(1),
             ..area
         };
+        let footer_rule = rules.then_some(Rect {
+            y: footer.y.saturating_sub(1),
+            height: 1,
+            ..area
+        });
         let body = Rect {
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(1 + u16::from(rules)),
             ..area
         };
         // The tree first: it keeps at least MIN_TREE while the terminal can keep MIN_MIDDLE; a window narrower than both gives the
@@ -406,9 +423,15 @@ impl App {
             height: middle.height.min(1),
             ..middle
         };
-        let terminal = Rect {
+        let tab_rule = rules.then_some(Rect {
             y: middle.y + tabs.height,
-            height: middle.height.saturating_sub(tabs.height),
+            height: 1,
+            ..middle
+        });
+        let below_tabs = tabs.height + u16::from(rules);
+        let terminal = Rect {
+            y: middle.y + below_tabs,
+            height: middle.height.saturating_sub(below_tabs),
             ..middle
         };
         let (inspector, inspector_divider) = if show_inspector {
@@ -431,14 +454,30 @@ impl App {
                 None,
             )
         };
+        // `density: roomy`: a column clear on each side of the tree's and the inspector's text, where there is room for it.
+        let room = |r: Rect| {
+            if chrome.roomy && r.width > 8 {
+                Rect {
+                    x: r.x + 1,
+                    width: r.width - 2,
+                    ..r
+                }
+            } else {
+                r
+            }
+        };
         Areas {
-            tree,
+            tree: room(tree),
             tabs,
             terminal,
-            inspector,
+            inspector: room(inspector),
             footer,
             tree_divider,
             inspector_divider,
+            tree_box: tree,
+            inspector_box: inspector,
+            tab_rule,
+            footer_rule,
         }
     }
 
@@ -750,6 +789,7 @@ impl App {
             ('v', key!("tui-app-cmd-devices")),
             ('g', key!("tui-app-cmd-grant")),
             ('p', key!("tui-app-cmd-pair")),
+            ('t', key!("tui-app-cmd-theme")),
         ] {
             all.push((Command::Letter(c), t(label, &[])));
         }
@@ -1120,9 +1160,9 @@ impl App {
     /// Draws the whole window. Reads the state only.
     pub fn draw(&self, f: &mut Frame<'_>, s: &Screen<'_>) {
         let a = self.areas(f.area());
+        let whole = f.area();
         let buf = f.buffer_mut();
         let strong = Style::default().add_modifier(Modifier::BOLD);
-        let chosen = Style::default().add_modifier(Modifier::REVERSED);
         // Secondary text and dividers: a fixed mid grey (palette 244) where the terminal has 256 colours, since ConPTY drops DIM and
         // the 16-colour DarkGray is whatever the theme makes it (magenta or yellow-green on some dark themes); DIM with 16 colours.
         let dim = match s.colors {
@@ -1130,12 +1170,56 @@ impl App {
             ColorMode::Ansi16 => Style::default().add_modifier(Modifier::DIM),
             ColorMode::Full | ColorMode::Ansi256 => Style::default().fg(Color::Indexed(244)),
         };
+        // ADR-0113: a theme's colours for each part of the window; without one, the terminal's own (every fill a no-op), as before.
+        let chrome = self.look.map(|l| l.chrome).unwrap_or_default();
+        let plain = crate::theme::map::Part {
+            fill: Style::default(),
+            dim,
+        };
+        let (base, tree, tabs, inspector, footer, chosen, line, title_style) = match &self.look {
+            Some(l) => {
+                let st = &l.styles;
+                (
+                    st.base,
+                    st.tree,
+                    st.tabs,
+                    st.inspector,
+                    st.footer,
+                    st.chosen,
+                    st.line,
+                    st.tabs.dim,
+                )
+            }
+            None => (
+                plain,
+                plain,
+                plain,
+                plain,
+                plain,
+                Style::default().add_modifier(Modifier::REVERSED),
+                dim,
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        };
+        // The floor (ADR-0113 decision 3): what needs the user keeps its own colours under any theme.
         let attention = attention_style(s.colors);
+        if self.look.is_some() {
+            buf.set_style(whole, base.fill);
+            buf.set_style(a.tree_box, tree.fill);
+            buf.set_style(a.tabs, tabs.fill);
+            buf.set_style(a.inspector_box, inspector.fill);
+            buf.set_style(a.footer, footer.fill);
+        }
+        for (rule, width) in [(a.tab_rule, a.tabs.width), (a.footer_rule, whole.width)] {
+            if let Some(r) = rule {
+                Span::styled(chrome.rule().repeat(usize::from(width)), line).render(r, buf);
+            }
+        }
 
         // The tree.
         if s.rows.is_empty() {
             Paragraph::new((s.t)(key!("tui-app-tree-empty"), &[]))
-                .style(dim)
+                .style(tree.dim)
                 .render(a.tree, buf);
         }
         let (top, kept) = tree_window(self.selected, a.tree.height, s.rows);
@@ -1152,12 +1236,15 @@ impl App {
                 let label = clip_to(&row.label, usize::from(a.tree.width));
                 let room = usize::from(a.tree.width).saturating_sub(text_width(&label) + 2);
                 // A machine in bold; a project under it (its folder) dim, as the web's tree.
-                let mut line = vec![Span::styled(label, if row.group { dim } else { strong })];
+                let mut line = vec![Span::styled(
+                    label,
+                    if row.group { tree.dim } else { strong },
+                )];
                 // What the machine says (its memory, or when it was last seen) is cut with an ellipsis, never mid-word silently.
                 if !row.state.is_empty() && room > 1 {
                     line.push(Span::styled(
                         format!("  {}", clip_to(&row.state, room)),
-                        dim,
+                        tree.dim,
                     ));
                 }
                 Line::from(line).render(
@@ -1191,11 +1278,19 @@ impl App {
                 ),
                 Span::raw(label),
             ];
+            // Under a theme the selected row is in the accent: its secondary text takes the text on the accent, which is checked to read
+            // there (without one the row is inverted, which keeps it readable as it is).
+            let state_dim =
+                if i == self.selected && self.focus == Focus::Tree && self.look.is_some() {
+                    Style::default()
+                } else {
+                    tree.dim
+                };
             if !state.is_empty() {
                 spans.push(Span::raw(" ".repeat(gap)));
                 spans.push(Span::styled(
                     state,
-                    if row.needs_you { attention } else { dim },
+                    if row.needs_you { attention } else { state_dim },
                 ));
             }
             let mut line = Line::from(spans);
@@ -1225,11 +1320,11 @@ impl App {
                 let style = if self.drag == Some(dragged) {
                     strong
                 } else {
-                    dim
+                    line
                 };
                 for y in a.tree.y..a.tree.bottom() {
                     if let Some(cell) = buf.cell_mut(Position { x, y }) {
-                        cell.set_symbol("│").set_style(style);
+                        cell.set_symbol(chrome.divider()).set_style(style);
                     }
                 }
             }
@@ -1300,7 +1395,7 @@ impl App {
             if room > 2 + 3 {
                 spans.push(Span::styled(
                     format!("\u{2014} {}", fit_width(&title, room - 2)),
-                    Style::default().add_modifier(Modifier::DIM),
+                    title_style,
                 ));
             }
         }
@@ -1328,17 +1423,18 @@ impl App {
             Paragraph::new(shown).render(a.terminal, buf);
         } else {
             match (self.active_agent(), s.terminal) {
-                (None, _) => welcome(s, a.terminal, buf, (strong, dim, attention)),
+                (None, _) => welcome(s, a.terminal, buf, (strong, base.dim, attention)),
                 (Some(_), None) => Paragraph::new(
                     s.no_screen
                         .map_or_else(|| (s.t)(key!("tui-app-no-screen"), &[]), str::to_string),
                 )
-                .style(dim)
+                .style(base.dim)
                 .wrap(Wrap { trim: true })
                 .render(a.terminal, buf),
                 (Some(_), Some(term)) => {
                     TerminalPane::new(term)
                         .colors(s.colors)
+                        .palette(self.look.as_ref().map(|l| &l.styles.pane))
                         .selection(self.selection)
                         .scroll(self.scroll)
                         .render(a.terminal, buf);
@@ -1419,11 +1515,11 @@ impl App {
             &(s.t)(keys, &[]),
             &mouse,
         );
-        let mut footer = vec![Span::styled(notice, strong), Span::styled(keys, dim)];
+        let mut foot = vec![Span::styled(notice, strong), Span::styled(keys, footer.dim)];
         if let Some(m) = mouse {
-            footer.push(Span::styled(m, dim));
+            foot.push(Span::styled(m, footer.dim));
         }
-        Line::from(footer).render(a.footer, buf);
+        Line::from(foot).render(a.footer, buf);
 
         // A notice too long for the footer, whole, in a box just above it (until the next key).
         if let Some(lines) = s.note {
@@ -1434,6 +1530,7 @@ impl App {
             let r = note_area(body, lines);
             let buf = f.buffer_mut();
             Clear.render(r, buf);
+            buf.set_style(r, base.fill);
             let block = Block::bordered();
             let inner = block.inner(r);
             block.render(r, buf);
@@ -1475,6 +1572,7 @@ impl App {
             };
             let buf = f.buffer_mut();
             Clear.render(r, buf);
+            buf.set_style(r, base.fill);
             let block = Block::bordered().title(Span::styled(
                 (s.t)(key!("tui-app-palette-title"), &[]),
                 strong,
@@ -1483,7 +1581,10 @@ impl App {
             block.render(r, buf);
             let mut lines = vec![Line::raw(format!("> {}", p.query))];
             if items.is_empty() {
-                lines.push(Line::styled((s.t)(key!("tui-app-palette-none"), &[]), dim));
+                lines.push(Line::styled(
+                    (s.t)(key!("tui-app-palette-none"), &[]),
+                    base.dim,
+                ));
             }
             // The rows under the query line; the list scrolls so the chosen command stays in view.
             let shown = usize::from(inner.height.saturating_sub(1)).max(1);
@@ -1562,8 +1663,13 @@ const FOOTER_KEYS: usize = 40;
 /// What needs the user, in a colour that reads on a dark and on a light background alike (the review: yellow was unreadable on
 /// white): a burnt orange (palette 166, #d75f00) where there are 256 colours, red with 16 (yellow is the theme's, often pale), bold
 /// in every mode, bold alone without colour.
+///
+/// It is the floor of ADR-0113 (decision 3): never a theme's colour, and on the user's terminal's own background (`Color::Reset`)
+/// whatever background a theme gives the part of the window it is in, so no theme can hide it.
 pub fn attention_style(colors: ColorMode) -> Style {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let bold = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .bg(Color::Reset);
     match colors {
         ColorMode::Mono => bold,
         ColorMode::Ansi16 => bold.fg(Color::Red),
@@ -4479,5 +4585,261 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(app.handle(up, &small), vec![], "nothing was dragged over");
+    }
+}
+
+/// ADR-0113 in the shell: a theme colours the parts of the window and its chrome, and never what needs the user.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod theme_tests {
+    use super::*;
+    use crate::theme::map::{Borders, Shell};
+    use crate::theme::{built_ins, file::read_text, Scheme};
+    use ratatui::buffer::Buffer;
+    use ratatui::Terminal as Tui;
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 24,
+    };
+
+    fn text(id: &str, _: &[(&str, Arg)]) -> String {
+        id.to_string()
+    }
+
+    fn rows() -> Vec<Row> {
+        ["claude", "codex", "shell"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Row {
+                id: format!("mac/agent-{}", i + 1),
+                label: (*name).to_string(),
+                state: if i == 2 {
+                    "needs you".into()
+                } else {
+                    "idle".into()
+                },
+                needs_you: i == 2,
+                terminal: true,
+                header: false,
+                group: false,
+                request: i == 2,
+                request_always: false,
+                approval: String::new(),
+            })
+            .collect()
+    }
+
+    fn shell(id: &str, mode: ColorMode) -> Shell {
+        let b = built_ins().into_iter().find(|b| b.id == id).unwrap();
+        Shell::new(&b.theme, b.scheme, mode).unwrap()
+    }
+
+    /// The window with two tabs open (the one in front does not need the user, the other does) and a request's box on top.
+    fn frame(look: Option<Shell>, colors: ColorMode, dialog: Option<&[String]>) -> (App, Buffer) {
+        let rows = rows();
+        let app = App {
+            tabs: vec!["mac/agent-1".into(), "mac/agent-3".into()],
+            active: 0,
+            selected: 1,
+            look,
+            ..App::default()
+        };
+        let mut tui =
+            Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
+        let details = vec!["Machine: mac".to_string()];
+        tui.draw(|f| {
+            app.draw(
+                f,
+                &Screen {
+                    rows: &rows,
+                    terminal: None,
+                    details: &details,
+                    notice: "",
+                    no_screen: None,
+                    conversation: None,
+                    dialog,
+                    note: None,
+                    colors,
+                    t: &text,
+                },
+            );
+        })
+        .unwrap();
+        let buf = tui.backend().buffer().clone();
+        (app, buf)
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The cells of `needle` on row `y` (by display column: these are ASCII).
+    fn cells_of(buf: &Buffer, y: u16, needle: &str) -> Vec<(u16, u16)> {
+        let row = row_text(buf, y);
+        let at = row
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle:?} not in {row:?}"));
+        let x0 = u16::try_from(row[..at].chars().count()).unwrap();
+        (0..u16::try_from(needle.chars().count()).unwrap())
+            .map(|i| (x0 + i, y))
+            .collect()
+    }
+
+    /// ADR-0113 decision 3 and its verification: under any theme, the request's box and every "needs you" mark off the selected row
+    /// are drawn exactly as without one: the same character, colours and attributes in every cell. (On the selected row the row's
+    /// highlight is the accent instead of inverted; the mark keeps its colour and the terminal's own background there too.)
+    #[test]
+    fn the_request_box_and_the_needs_you_marks_are_the_same_under_every_theme() {
+        let question = vec![
+            "codex asks: run `rm -rf build`".to_string(),
+            String::new(),
+            "y allow · n deny".to_string(),
+        ];
+        for colors in [ColorMode::Full, ColorMode::Ansi256, ColorMode::Ansi16] {
+            let (_, plain) = frame(None, colors, Some(&question));
+            let (app, _) = frame(None, colors, None);
+            let a = app.areas(AREA);
+            let (box_rect, _) = dialog_layout(AREA, &question);
+            // The tree row of the agent that needs the user (not the selected one), its tab, and the bar's count.
+            let tree_y = a.tree.y + 2;
+            let tab_y = a.tabs.y;
+            let mut marks = cells_of(&plain, tree_y, "! ");
+            marks.extend(cells_of(&plain, tree_y, "needs you"));
+            marks.extend(cells_of(&plain, tab_y, "2 ! shell"));
+            marks.extend(cells_of(&plain, tab_y, "! tui-app-tabs-waiting"));
+            for b in built_ins() {
+                let (_, themed) = frame(Some(shell(b.id, colors)), colors, Some(&question));
+                for y in box_rect.y..box_rect.bottom() {
+                    for x in box_rect.x..box_rect.right() {
+                        assert_eq!(
+                            themed[(x, y)],
+                            plain[(x, y)],
+                            "{} {colors:?}: the box at {x},{y}",
+                            b.id
+                        );
+                    }
+                }
+                for &(x, y) in &marks {
+                    assert_eq!(
+                        themed[(x, y)],
+                        plain[(x, y)],
+                        "{} {colors:?}: needs you at {x},{y}",
+                        b.id
+                    );
+                }
+            }
+            // The same holds for a theme file with its own terminal palette, regions and chrome.
+            let harbour = read_text(include_str!("theme/testdata/harbour.json"));
+            let theme = harbour.theme().unwrap();
+            for scheme in [Scheme::Dark, Scheme::Light] {
+                let look = Shell::new(theme, scheme, colors).unwrap();
+                let (_, themed) = frame(Some(look), colors, Some(&question));
+                let (_, themed_plain) = frame(None, colors, Some(&question));
+                for y in box_rect.y..box_rect.bottom() {
+                    for x in box_rect.x..box_rect.right() {
+                        assert_eq!(
+                            themed[(x, y)],
+                            themed_plain[(x, y)],
+                            "harbour {scheme:?} {colors:?}: the box"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_theme_colours_the_parts_of_the_window() {
+        let look = shell("slate", ColorMode::Full);
+        let (app, buf) = frame(Some(look), ColorMode::Full, None);
+        let a = app.areas(AREA);
+        let bg = |x: u16, y: u16| buf[(x, y)].bg;
+        assert_eq!(
+            bg(a.terminal.x + 5, a.terminal.y + 5),
+            look.styles.base.fill.bg.unwrap()
+        );
+        assert_eq!(
+            bg(a.tree.x + 20, a.tree.bottom() - 1),
+            look.styles.tree.fill.bg.unwrap()
+        );
+        assert_eq!(
+            bg(a.footer.right() - 1, a.footer.y),
+            look.styles.footer.fill.bg.unwrap()
+        );
+        // The selected row is in the accent, not inverted.
+        let sel = &buf[(a.tree.x + 3, a.tree.y + 1)];
+        assert_eq!(sel.bg, look.styles.chosen.bg.unwrap());
+        assert!(!sel.modifier.contains(Modifier::REVERSED));
+        // Its secondary text (the state) takes the text on the accent, not the secondary colour that may not read on the accent.
+        assert_eq!(
+            buf[(a.tree.right() - 1, a.tree.y + 1)].fg,
+            look.styles.chosen.fg.unwrap()
+        );
+        // Without a theme nothing is filled: the terminal's own colours.
+        let (_, plain) = frame(None, ColorMode::Full, None);
+        assert_eq!(plain[(a.terminal.x + 5, a.terminal.y + 5)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn the_chrome_moves_through_the_areas() {
+        let read = |chrome: &str| {
+            let t = format!(
+                r#"{{"agora-theme": 2, "name": "x", "inherits": "dark", "chrome": {chrome}}}"#
+            );
+            let r = read_text(&t);
+            Shell::new(r.theme().unwrap(), Scheme::Dark, ColorMode::Full).unwrap()
+        };
+        let plain = App::default().areas(AREA);
+        let with = |look: Shell| App {
+            look: Some(look),
+            ..App::default()
+        };
+        // A theme with today's chrome leaves every area where it was.
+        assert_eq!(with(read("{}")).areas(AREA), plain);
+        // Always: a line under the tab bar and above the footer; the terminal is a row shorter at each.
+        let always = with(read(r#"{"pane-borders": "always"}"#));
+        let a = always.areas(AREA);
+        assert_eq!(a.tab_rule.map(|r| r.y), Some(plain.tabs.y + 1));
+        assert_eq!(a.footer_rule.map(|r| r.y), Some(plain.footer.y - 1));
+        assert_eq!(
+            (a.terminal.y, a.terminal.height),
+            (plain.terminal.y + 1, plain.terminal.height - 2)
+        );
+        assert_eq!(always.look.unwrap().chrome.borders, Borders::Always);
+        let (_, buf) = frame(always.look, ColorMode::Full, None);
+        assert_eq!(
+            buf[(a.terminal.x + 1, a.tab_rule.unwrap().y)].symbol(),
+            "\u{2500}"
+        );
+        // Roomy: a column clear on each side of the tree's and the inspector's text; the dividers stay where they were.
+        let roomy = with(read(r#"{"density": "roomy"}"#)).areas(AREA);
+        assert_eq!(
+            (roomy.tree.x, roomy.tree.width),
+            (plain.tree.x + 1, plain.tree.width - 2)
+        );
+        assert_eq!(roomy.tree_box, plain.tree);
+        assert_eq!(
+            (roomy.tree_divider, roomy.terminal),
+            (plain.tree_divider, plain.terminal)
+        );
+        // Off, or a gap: the divider column is blank; a heavy line is drawn heavy.
+        for (chrome, glyph) in [
+            (r#"{"pane-borders": "off"}"#, " "),
+            (r#"{"pane-gap": 6}"#, " "),
+            (r#"{"line-width": 2}"#, "\u{2503}"),
+            ("{}", "\u{2502}"),
+        ] {
+            let (_, buf) = frame(Some(read(chrome)), ColorMode::Full, None);
+            assert_eq!(
+                buf[(plain.tree_divider.unwrap(), 3)].symbol(),
+                glyph,
+                "{chrome}"
+            );
+        }
     }
 }

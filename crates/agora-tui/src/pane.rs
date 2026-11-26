@@ -77,6 +77,8 @@ impl Selection {
 pub struct TerminalPane<'a> {
     term: &'a dyn Terminal,
     colors: ColorMode,
+    /// A theme's colours for what the program leaves to the terminal (ADR-0113); `None` draws them as the user's terminal does.
+    palette: Option<&'a crate::theme::map::PanePalette>,
     selection: Option<Selection>,
     /// Lines scrolled back from the live bottom (the wheel): the screen's rows above the area first, then the scrollback.
     scroll: usize,
@@ -87,6 +89,7 @@ impl<'a> TerminalPane<'a> {
         Self {
             term,
             colors: ColorMode::Full,
+            palette: None,
             selection: None,
             scroll: 0,
         }
@@ -95,6 +98,13 @@ impl<'a> TerminalPane<'a> {
     #[must_use]
     pub fn colors(mut self, colors: ColorMode) -> Self {
         self.colors = colors;
+        self
+    }
+
+    /// Draws the program's default colours and its 16 colours in a theme's palette (precomputed: a lookup per cell).
+    #[must_use]
+    pub fn palette(mut self, palette: Option<&'a crate::theme::map::PanePalette>) -> Self {
+        self.palette = palette;
         self
     }
 
@@ -131,6 +141,9 @@ impl<'a> TerminalPane<'a> {
     fn selected(&self, style: Style, y: u16, x: u16) -> Style {
         if !self.selection.is_some_and(|s| s.contains(y, x)) {
             return style;
+        }
+        if let Some(p) = self.palette {
+            return crate::theme::map::selected(style, p);
         }
         if style.add_modifier.contains(Modifier::REVERSED) {
             style.remove_modifier(Modifier::REVERSED)
@@ -234,10 +247,17 @@ impl Widget for TerminalPane<'_> {
                         continue;
                     };
                     out.reset();
+                    if let Some(p) = self.palette {
+                        out.set_style(Style::default().fg(p.fg).bg(p.bg));
+                    }
                     let Some(cell) = self.term.history_cell(line, x) else {
                         continue;
                     };
-                    out.set_style(self.selected(to_style(cell.style, self.colors), y, x));
+                    out.set_style(self.selected(
+                        themed_style(cell.style, self.colors, self.palette),
+                        y,
+                        x,
+                    ));
                     let ch = if cell.spacer || cell.ch.is_control() {
                         ' '
                     } else {
@@ -255,13 +275,20 @@ impl Widget for TerminalPane<'_> {
                     continue;
                 };
                 out.reset();
+                if let Some(p) = self.palette {
+                    out.set_style(Style::default().fg(p.fg).bg(p.bg));
+                }
                 if row >= size.rows || x >= size.cols {
                     continue;
                 }
                 let Some(cell) = self.term.cell(row, x) else {
                     continue;
                 };
-                out.set_style(self.selected(to_style(cell.style, self.colors), y, x));
+                out.set_style(self.selected(
+                    themed_style(cell.style, self.colors, self.palette),
+                    y,
+                    x,
+                ));
                 if cell.spacer {
                     // The right half of a wide character: ratatui skips it when it draws the left half.
                     out.set_symbol(" ");
@@ -283,6 +310,15 @@ impl Widget for TerminalPane<'_> {
 
 /// The ratatui style for a cell's SGR attributes.
 pub fn to_style(s: VtStyle, colors: ColorMode) -> Style {
+    themed_style(s, colors, None)
+}
+
+/// [`to_style`] under a theme's palette: the program's default colours and its 16 colours from the palette (never in `Mono`).
+pub fn themed_style(
+    s: VtStyle,
+    colors: ColorMode,
+    palette: Option<&crate::theme::map::PanePalette>,
+) -> Style {
     let mut m = Modifier::empty();
     for (on, flag) in [
         (s.bold, Modifier::BOLD),
@@ -301,7 +337,27 @@ pub fn to_style(s: VtStyle, colors: ColorMode) -> Style {
     if colors == ColorMode::Mono {
         return style;
     }
-    style.fg(to_color(s.fg, colors)).bg(to_color(s.bg, colors))
+    match palette {
+        None => style.fg(to_color(s.fg, colors)).bg(to_color(s.bg, colors)),
+        Some(p) => style
+            .fg(palette_color(s.fg, colors, p, p.fg))
+            .bg(palette_color(s.bg, colors, p, p.bg)),
+    }
+}
+
+/// A cell's colour under a palette: its default (`default`, the palette's text or background) and the 16 colours from the palette,
+/// the rest as without one.
+fn palette_color(
+    c: VtColor,
+    colors: ColorMode,
+    p: &crate::theme::map::PanePalette,
+    default: Color,
+) -> Color {
+    match c {
+        VtColor::Default => default,
+        VtColor::Indexed(i) if i < 16 => p.ansi[usize::from(i)],
+        c => to_color(c, colors),
+    }
 }
 
 /// A cell's colour in the given mode; [`VtColor::Default`] is the user's own terminal colour.
@@ -321,7 +377,7 @@ pub fn to_color(c: VtColor, colors: ColorMode) -> Color {
 }
 
 /// The RGB value xterm gives a 256-colour palette index (16-231 the 6x6x6 cube, 232-255 the grey ramp, below 16 the classic set).
-fn xterm_rgb(i: u8) -> (u8, u8, u8) {
+pub(crate) fn xterm_rgb(i: u8) -> (u8, u8, u8) {
     match i {
         0..=15 => ANSI16[usize::from(i)],
         16..=231 => {
@@ -358,7 +414,7 @@ const ANSI16: [(u8, u8, u8); 16] = [
 
 /// The nearest entry of xterm's 256-colour palette above the first 16 (whose look the user's theme decides): the 6×6×6 cube or the
 /// grey ramp.
-fn nearest256(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn nearest256(r: u8, g: u8, b: u8) -> u8 {
     let d = |(x, y, z): (u8, u8, u8)| {
         let (dr, dg, db) = (
             i32::from(r) - i32::from(x),
@@ -370,7 +426,7 @@ fn nearest256(r: u8, g: u8, b: u8) -> u8 {
     (16..=255u8).min_by_key(|&i| d(xterm_rgb(i))).unwrap_or(16)
 }
 
-fn nearest16(r: u8, g: u8, b: u8) -> u8 {
+pub(crate) fn nearest16(r: u8, g: u8, b: u8) -> u8 {
     let d = |(x, y, z): (u8, u8, u8)| {
         let (dr, dg, db) = (
             i32::from(r) - i32::from(x),

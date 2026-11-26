@@ -119,7 +119,7 @@ and exported as files and kept in the browser. The terminal palette follows the 
 
 1. Format 2 in the web window: both schemes, terminal palette, regions, chrome values, the floor and its checks, editor rows.
 2. Packs (themes and layouts; keybindings when rung 4 lands).
-3. The terminal client reads format 2 (ADR-0068 rung 5).
+3. The terminal client reads format 2 (ADR-0068 rung 5). Done: `docs/ux/themes.md`, "The terminal client".
 4. Per-person sync through the hub (schema message, fixtures).
 5. The catalog repository and `agora hub themes update`.
 
