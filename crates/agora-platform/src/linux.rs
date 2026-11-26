@@ -2148,3 +2148,67 @@ mod closed_grant_tests {
         let _ = std::fs::remove_dir_all(base);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod held_output_tests {
+    use std::time::{Duration, Instant};
+
+    use crate::{HeldBuffer, HeldTerminal, ProcessLimits, PtyConfig};
+
+    /// A program that writes `bye` and ends at once, collected by the holder before anything read its terminal.
+    fn ended_unread() -> HeldTerminal {
+        let mut t = HeldTerminal::start(&PtyConfig {
+            argv: vec!["printf".into(), "bye".into()],
+            cwd: None,
+            env: vec![("PATH".into(), std::env::var("PATH").unwrap_or_default())],
+            cols: 80,
+            rows: 24,
+            limits: ProcessLimits {
+                cpu_seconds: None,
+                memory_bytes: None,
+            },
+            sandbox: None,
+            identity: None,
+            env_remove: Vec::new(),
+        })
+        .unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        while t.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < end, "it did not end");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        t
+    }
+
+    /// The holder may collect an agent's end before it reads the agent's last output: Linux keeps that output readable on the master
+    /// after the last close of the terminal's program side, so it is kept whichever way it is read (the holder's reader to the end;
+    /// a drain alone; a reader ended at once, then a drain, as `attach` does). macOS keeps it only 0.6 s (holder-link.md decision 5),
+    /// so this holds on Linux only.
+    #[test]
+    fn output_left_by_a_collected_agent_is_read_in_every_order() {
+        for _ in 0..30 {
+            let t = ended_unread();
+            let r = t.start_reader().unwrap();
+            let end = Instant::now() + Duration::from_secs(10);
+            while !r.ended() {
+                assert!(Instant::now() < end, "the reader never saw the end");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(r.end().buffer.into_vec(), b"bye", "reader");
+
+            let t = ended_unread();
+            let mut b = HeldBuffer::default();
+            assert!(t.drain(&mut b).unwrap(), "the drain saw the end");
+            assert_eq!(b.into_vec(), b"bye", "drain");
+
+            let t = ended_unread();
+            let c = t.start_reader().unwrap().end();
+            let mut b = c.buffer;
+            if !c.ended {
+                assert!(t.drain(&mut b).unwrap(), "the drain saw the end");
+            }
+            assert_eq!(b.into_vec(), b"bye", "reader ended at once, then a drain");
+        }
+    }
+}

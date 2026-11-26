@@ -62,6 +62,11 @@ Holder to node: `HelloOk`(64: version, holder pid, holder start time), `Refused`
    in the exiting state until that output is read. The holder then reads what waits in that terminal (non-blocking, into the agent's
    bounded buffer) so the agent can exit. It never does this while a node whose link dropped still runs (that node may read it), nor
    for an agent that was not asked to end, nor within the grace: a node that reads its terminal lets an ending agent go by itself.
+   The wait was seen on a real Mac (#776). From the XNU source (not measured on a Mac), it is bounded at the **last** close of the
+   terminal's program side (no other process of the agent keeps it open): output still unread 0.6 s after that close is discarded
+   (`ptsclose` drains with a 60-tick timeout, then flushes), where Linux keeps it readable on the master (tested). So on macOS, what an
+   agent wrote last before it ended is kept only when someone reads the terminal within that time: its node, or the holder, which
+   starts reading a tick (50 ms) after it sees the node's process end.
 6. `Release` of an ended agent forgets it. A holder that held agents and has none left ends (decision 2).
 
 A running agent gets `SIGHUP` when the holder dies (Linux `PR_SET_PDEATHSIG` on its first process; the kernel's hangup on the last
