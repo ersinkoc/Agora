@@ -414,3 +414,74 @@ async fn grant_changes_past_the_limit_are_refused_with_one_row() {
         .count();
     assert_eq!(limited, 1);
 }
+
+/// ADR-0114 decision 7: every signed-in person may list the catalog's entries, and only while the owner has it on; a request naming a
+/// node is refused. The list says what is available; nothing in it installs anything.
+#[tokio::test]
+async fn the_catalog_is_listed_to_everyone_only_while_it_is_on() {
+    use agora_hub::plugin_catalog::{self, Entry, Fetched};
+    let (st, addr) = start().await;
+    let store = st.hub.store();
+    // A public key made of chosen bytes, for the test only: no private key exists for it.
+    let mut blob = Vec::new();
+    for part in [b"ssh-ed25519".as_slice(), &[7u8; 32]] {
+        blob.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        blob.extend_from_slice(part);
+    }
+    let line = format!("ssh-ed25519 {}", agora_hub::sshsig::base64_encode(&blob));
+    let key = plugin_catalog::set_key(store, &line, 1).unwrap();
+    let fetched = Fetched {
+        serial: 3,
+        entries: vec![Entry {
+            id: "demo".into(),
+            name: "Demo".into(),
+            version: "1.2.0".into(),
+            author: "Someone".into(),
+            licence: "MIT".into(),
+            description: "Lists the agents.".into(),
+            capabilities: vec!["agents.read".into()],
+            sha256: "a".repeat(64),
+            size: 1000,
+            file: "plugins/demo.json".into(),
+        }],
+        refused: Vec::new(),
+    };
+    plugin_catalog::save(store, &fetched, "http://127.0.0.1:9/index.json", &key, 50).unwrap();
+    let list = || cr::Command::PluginCatalogList(v1::PluginCatalogList {});
+    let catalog = |r: v1::CommandResponse| match ok(r) {
+        command_ok::Result::PluginCatalogList(l) => l,
+        other => panic!("{other:?}"),
+    };
+    let mut people = Vec::new();
+    for token in ["owner-token", "member-token", "viewer-token"] {
+        people.push(window(addr, token).await);
+    }
+    for c in &mut people {
+        assert_eq!(
+            catalog(ask(c, "", list()).await),
+            v1::PluginCatalogListResult::default(),
+            "off: nothing"
+        );
+    }
+    plugin_catalog::set_on(store, true, 60).unwrap();
+    for c in &mut people {
+        let l = catalog(ask(c, "", list()).await);
+        assert!(l.on);
+        assert_eq!(l.updated_at_ms, 50);
+        assert_eq!(l.entries.len(), 1);
+        assert_eq!(
+            (
+                l.entries[0].plugin_id.as_str(),
+                l.entries[0].version.as_str()
+            ),
+            ("demo", "1.2.0")
+        );
+        assert_eq!(
+            err(&ask(c, "n1", list()).await),
+            "protocol.invalid_message",
+            "it names no node"
+        );
+    }
+    // Listing installs nothing.
+    assert!(Plugins::new(store).list().unwrap().is_empty());
+}

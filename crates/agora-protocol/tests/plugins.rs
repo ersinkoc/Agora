@@ -129,8 +129,9 @@ fn the_typed_messages_read_what_the_fixtures_say() {
     );
 }
 
-/// Only the owner installs, on the hub's machine (`agora hub plugin add`): no message a client can send installs or removes a plugin.
-/// The plugin arms of `CommandRequest` are exactly the five that read the installed plugins and keep the sender's own grants.
+/// Only the owner installs, on the hub's machine (`agora hub plugin add`, `agora hub plugins install`): no message a client can send
+/// installs, upgrades or removes a plugin. The plugin arms of `CommandRequest` are exactly the five that read the installed plugins and
+/// keep the sender's own grants, and the one that reads the catalog's entries (ADR-0114 decision 7).
 #[test]
 fn no_message_installs_or_removes_a_plugin() {
     let pool = DescriptorPool::decode(agora_protocol::FILE_DESCRIPTOR_SET).expect("descriptor set");
@@ -146,6 +147,7 @@ fn no_message_installs_or_removes_a_plugin() {
     assert_eq!(
         arms,
         [
+            "plugin_catalog_list",
             "plugin_fetch",
             "plugin_grant_list",
             "plugin_grant_remove",
@@ -163,6 +165,9 @@ fn no_message_installs_or_removes_a_plugin() {
     assert_eq!(
         names,
         [
+            "PluginCatalogEntry",
+            "PluginCatalogList",
+            "PluginCatalogListResult",
             "PluginFetch",
             "PluginFetchResult",
             "PluginGrant",
