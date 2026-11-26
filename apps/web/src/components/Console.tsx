@@ -44,6 +44,8 @@ import { subscribePanelRequests, subscribeProjectRequests, subscribeToolRequests
 import { type ToolPanel, changedFolders, isToolPanel, soleTarget, toolTarget } from '../net/paneTools';
 import type { MenuItem } from '../layout/Menu';
 import { BUILTIN_REGISTRY, type HostActions, homeView } from '../layout/builtinPanels';
+import { usePlugins } from '../plugins/usePlugins';
+import { withPlugins } from '../plugins/registry';
 import { TOOL_PANELS, type PanelSources, type PanelState } from '../layout/panels';
 import { CloseAgentContext } from './CloseAgent';
 import { ChatActionsContext } from './chatActions';
@@ -324,6 +326,9 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
     resolve: onResolve, sendPrompt, chooseOption, revokeGrant, answers: banners, pairing, closeAgent, chat: chatActions, give,
   });
   const welcome = homeView(panelState, panelActions);
+  // The panels: the built-ins, then the panels of the plugins this browser loaded and the person granted (ADR-0114; none in safe mode).
+  const plugins = usePlugins();
+  const panels = useMemo(() => withPlugins(BUILTIN_REGISTRY, plugins.plugins), [plugins]);
 
   return (
     <Arrangement.Provider value={arrangement}>
@@ -351,7 +356,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {showAgents && <Explorer watching={watching} by={groupBy} onBy={saveGroupBy} spread={spread} fleet={projectFilter ? fleet.filter((a) => a.projectId === projectFilter) : fleet} machines={machines} projects={projectOptions} project={projectFilter} onProject={chooseProject} open={shownAgents} current={current?.id} onToggle={select} onStart={onStart} onCollapse={() => setShowAgents(false)} onDismiss={removeClosed} everyone={!!onForget} forgetError={forgetError} onResume={resume} resuming={resuming} resumeError={resumeError} />}
 
         <main className="flex min-h-[55dvh] min-w-0 flex-1 flex-col lg:min-h-0" aria-label={t('focus-terminal')}>
-          <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} panels={BUILTIN_REGISTRY}
+          <Workspace ws={ws} dispatch={dispatch} fleet={fleet} bindings={bindings} narrow={narrow} panels={panels}
             state={panelState} sources={panelSources} actions={panelActions} terminalFor={terminalFor} plusItems={plusItems} welcome={welcome} />
         </main>
         </div>

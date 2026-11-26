@@ -66,6 +66,8 @@ import { type Handler, handlerOf, listenForKeys, runCommand, useCommands, useCom
 import { keyStore } from './keys/store';
 import { IS_MAC } from './keys/strokes';
 import { ariaKey, commandLabel, shownKey, useKeymap } from './keys/view';
+import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
+import { SAFE, safeAddress } from './plugins/safe';
 
 // ADR-0059: why the machine refused the chosen launch option, as a message id (its `policy` parameter, a stable value).
 function optionForbidden(e: unknown): string {
@@ -91,6 +93,8 @@ export function App() {
   // ADR-0067 rung 2: a phone gets one column (the list, then one agent); a tablet and a desktop keep the window.
   const phone = usePhone();
   const [palette, setPalette] = useState(false);
+  // Plugins loaded from a local file, for development (ADR-0114): the palette opens the list, the loading and the install screen.
+  const [pluginsOpen, setPluginsOpen] = useState(false);
   // With a hub token the fleet comes from the hub; without one (development) the demo data stands in.
   const [hub, setHub] = useState(hubConnection);
   const [signInNotice, setSignInNotice] = useState<string | undefined>();
@@ -565,6 +569,10 @@ export function App() {
     // The language, here too: on a phone the title bar has no room for its picker.
     ...Object.fromEntries((['system', 'en', 'tr'] as const).map((l) => [`language.${l}`, { run: () => { chooseLanguage(l); } }])),
     'theme.editor': { run: editTheme },
+    // Plugins loaded from a local file, and safe mode (ADR-0114): the safe-mode key itself is heard before anything else (plugins/safe.ts),
+    // so its command is here for the palette and its keys are fixed.
+    'plugins.open': { run: () => setPluginsOpen(true) },
+    'window.safe-mode': SAFE ? false : { run: () => location.assign(safeAddress(location.href)) },
   });
   const keymap = useKeymap();
   const commandsVersion = useCommandsVersion();
@@ -583,7 +591,7 @@ export function App() {
     return [
       ...cmd('attention.next'), ...cmd('go.home'), ...cmd('agent.start'), ...TOOL_PANELS.flatMap((p) => cmd(`tool.${p}`)), ...cmd('terminal.new'), ...cmd('go.machines'),
       ...objects, ...cmd('machines.allow'), ...cmd('window.lock'), ...cmd('go.settings'), ...cmd('go.audit'),
-      ...(['system', 'en', 'tr'] as const).flatMap((l) => cmd(`language.${l}`)), ...cmd('theme.editor'),
+      ...(['system', 'en', 'tr'] as const).flatMap((l) => cmd(`language.${l}`)), ...cmd('theme.editor'), ...cmd('plugins.open'), ...cmd('window.safe-mode'),
       ...themeStore.themes().map((x) => ({ id: `theme-${x.id}`, label: t('palette-theme', { name: themeName(x) }), run: () => themeStore.choose(x.id), group: 'appearance' as const, icon: 'sun' as const })),
       ...agents.map((a) => ({ id: `agent-${a.id}`, label: t('palette-open-agent', { name: a.name }), run: () => open(a.id), group: 'agents' as const, agent: { accent: a.accent, kind: a.kind || a.name } })),
       // Close agent: opens that agent and asks for the confirm there; nothing is closed from the palette itself.
@@ -644,6 +652,8 @@ export function App() {
       {/* The demo Settings page shows Settings only: no demo requests over it. */}
       <AttentionLayer items={settingsDemo && !hub ? [] : attention} stale={hub ? link !== 'live' : false} phone={phone} onResolve={answerRequest} onReview={reviewAttention} />
       {palette && <CommandPalette items={items} onClose={() => setPalette(false)} />}
+      {pluginsOpen && <PluginsDialog onClose={() => setPluginsOpen(false)} />}
+      {SAFE && <SafeModeNote />}
       {giving && giveApi && <GiveDialog key={giving.key} task={giving} give={giveApi} onClose={giveAsk.cancel} />}
       {hub && live && changes && waiting[0] && <DeviceRequest key={waiting[0].deviceId ?? ''}
         request={{ id: waiting[0].deviceId ?? '', name: deviceLabel(waiting[0].name, waiting[0].deviceId ?? ''), fingerprint: prints.get(waiting[0].deviceId ?? '') ?? '' }}

@@ -1,6 +1,7 @@
 // The person's keybindings file, kept in this browser (docs/ux/keybindings.md). Like themes and layouts it stays here (the hub is not
 // involved); when the browser cannot store, a change still holds for the visit. Another tab's change applies here at once. Reading never
 // throws: a stored file that cannot be read (another version's, edited by hand) is set aside and the defaults stand.
+import { SAFE } from '../plugins/safe';
 import { type Bound, EMPTY_FILE, type KeyFile, keymap, readKeys, writeKeys } from './file';
 
 export const KEYS_KEY = 'agora.keybindings.v1';
@@ -55,4 +56,4 @@ export function createKeyStore(env: { kv?: KV; safe?: boolean; events?: Pick<Win
 export type KeyStore = ReturnType<typeof createKeyStore>;
 
 const browserKv = (): KV | undefined => { try { return typeof window !== 'undefined' ? window.localStorage : undefined; } catch { return undefined; } };
-export const keyStore: KeyStore = createKeyStore({ kv: browserKv(), events: typeof window !== 'undefined' ? window : undefined });
+export const keyStore: KeyStore = createKeyStore({ kv: browserKv(), safe: SAFE, events: typeof window !== 'undefined' ? window : undefined });

@@ -54,6 +54,10 @@ export const COMMANDS: readonly CommandDef[] = [
   { id: 'go.audit', label: 'audit-link', group: 'go', icon: 'history', context: 'anywhere', keys: [] },
   ...(['system', 'en', 'tr'] as const).map((l): CommandDef => ({ id: `language.${l}`, label: 'palette-language', args: { name: `language-${l}` }, group: 'appearance', icon: 'globe', context: 'anywhere', keys: [] })),
   { id: 'theme.editor', label: 'palette-theme-editor', group: 'appearance', icon: 'pencil', context: 'anywhere', keys: [] },
+  { id: 'plugins.open', label: 'palette-plugins', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: [] },
+  // The safe-mode key (ADR-0114): heard by the window before anything else (plugins/safe.ts `installSafeKey`), never through this list,
+  // and no keybinding can move it or take it (FIXED_KEYS).
+  { id: 'window.safe-mode', label: 'palette-safe-mode', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: ['ctrl+alt+shift+s', 'alt+shift+meta+s'], fixed: true },
   { id: 'window.agents', label: 'keys-cmd-agents', group: 'actions', icon: 'panelLeft', context: 'window', keys: ['ctrl+b', 'meta+b'] },
   ...n9.map((i): CommandDef => ({ id: `pane.tab-${i}`, label: 'keys-cmd-tab', args: { n: i }, group: 'go', icon: 'single', context: 'tabs', keys: [`alt+${i}`] })),
   ...n5.map((i): CommandDef => ({ id: `side.place-${i}`, label: 'keys-cmd-side', args: { n: i }, group: 'go', icon: 'panelRight', context: 'side', keys: [`alt+shift+${i}`] })),

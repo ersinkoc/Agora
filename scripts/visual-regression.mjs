@@ -1,4 +1,4 @@
-// Visual regression: the component gallery, Home (the demo window's fleet console), the window with one empty pane, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
+// Visual regression: the component gallery, Home (the demo window's fleet console), the window with one empty pane, a plugin's panel, the sign-in page and the Settings page on demo data (#/gallery/settings), in both themes on a desktop and a phone viewport, compared with
 // the committed baselines in apps/web/visual/. A pull request that changes how a screen looks updates them on purpose.
 //
 //   cd apps/web && npm ci && npm run build
@@ -11,6 +11,8 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { hubHeaders } from './hub-headers.mjs';
+import { pack } from './pack-plugin.mjs';
 
 const root = new URL('..', import.meta.url).pathname;
 const dist = join(root, 'apps/web/dist');
@@ -24,10 +26,13 @@ const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('pla
 const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.svg': 'image/svg+xml' };
 
+// Every answer carries the headers the hub sends for its path (scripts/hub-headers.mjs, from web.rs), so the pages are captured under
+// the hub's real page policies, the plugin frame page's own included.
 const server = createServer((req, res) => {
-  const path = join(dist, !req.url || req.url === '/' ? 'index.html' : req.url.split('?')[0]);
-  if (!existsSync(path)) { res.writeHead(404).end(); return; }
-  res.writeHead(200, { 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
+  const url = (req.url ?? '/').split('?')[0];
+  const path = join(dist, url === '/' ? 'index.html' : url);
+  if (!existsSync(path)) { res.writeHead(404, hubHeaders(url, false)).end(); return; }
+  res.writeHead(200, { ...hubHeaders(url), 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
 }).listen(0, '127.0.0.1');
 await new Promise((r) => server.once('listening', r));
 const base = `http://127.0.0.1:${server.address().port}/`;
@@ -41,6 +46,14 @@ const pages = [
   // A phone has no panes (phone.md), so it is captured on a desktop only.
   { name: 'welcome', hash: '#/demo', ready: '[data-layout-root]:not([data-tiled])', quiet: true, only: 'desktop',
     storage: { 'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'pane', id: 'p1', panel: 'empty' } }, focus: 'p1', touched: true }) } },
+  // A plugin's panel (ADR-0114, docs/ux/plugins.md): the sample plugin, loaded for development and granted, beside Usage; the window's
+  // pane bar with the plugin's name and its marker above the sandboxed frame. Captured once the plugin has drawn.
+  { name: 'plugin', hash: '#/demo', ready: 'iframe[data-plugin-frame]', frameReady: 'body[data-ready]', quiet: true, only: 'desktop',
+    storage: {
+      'agora.plugins.dev.v1': JSON.stringify([{ text: pack(join(root, 'apps/web/plugins/sample')) }]),
+      'agora.plugins.grants.v1': JSON.stringify({ 'sample-agents': { version: '0.1.0', seen: ['agents.read', 'theme.read'], granted: ['agents.read', 'theme.read'] } }),
+      'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'split', direction: 'row', ratios: [0.6, 0.4], children: [{ type: 'pane', id: 'p1', panel: 'plugin.sample-agents.list' }, { type: 'pane', id: 'p2', panel: 'usage' }] } }, focus: 'p1', touched: true }),
+    } },
   { name: 'signin', hash: '', ready: 'form' },
   // Its dates are written in the browser's zone and language, so both are fixed; notifications are allowed so the switch is enabled.
   { name: 'settings', hash: '#/gallery/settings', ready: '[data-settings] .set-kind', context: { locale: 'en-US', timezoneId: 'UTC', permissions: ['notifications'] } },
@@ -127,6 +140,7 @@ for (const p of pages) {
       await page.clock.setFixedTime(CLOCK);
       await page.goto(base + p.hash);
       await page.waitForSelector(p.ready);
+      if (p.frameReady) await page.frameLocator(p.ready).locator(p.frameReady).waitFor();
       await settle(page);
       const shot = await capture(page, cdp);
       await ctx.close();

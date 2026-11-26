@@ -15,3 +15,5 @@ manifests/agents/fixtures/**/*.expect text eol=lf
 # never let a checkout rewrite its line endings.
 manifests/agents/registry/** -text
 crates/agora-adapters/tests/fixtures/registry/** -text
+# A plugin's files are listed by their SHA-256 in its manifest (ADR-0114): a rewritten line ending would be a wrong hash.
+apps/web/plugins/** -text

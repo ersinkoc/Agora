@@ -87,13 +87,13 @@
   :root[data-line-height] * { --tw-leading: var(--ui-line-height); }
   :root[data-ligatures='off'] body { font-variant-ligatures: none; }
   /* What needs the person keeps today's text whatever a theme's weight, line height or ligatures say (the floor, ADR-0113). */
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you),
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) * { --tw-leading: initial; font-variant-ligatures: normal; }
-  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { line-height: var(--text-sm--line-height); }
-  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you) { font-weight: 400; }
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark),
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) * { --tw-leading: initial; font-variant-ligatures: normal; }
+  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { line-height: var(--text-sm--line-height); }
+  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { font-weight: 400; }
   /* …and the window's own font (the floor rule at the end of this file sets the font variables there). In the base layer, so a utility on
      the same element (a mono code line) still wins. */
-  :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) { font-family: var(--font-ui); }
+  :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   h2 { @apply text-xs font-semibold uppercase tracking-wider text-muted; }
   button { @apply cursor-pointer; }
@@ -484,6 +484,11 @@
 @container pane-bar (max-width: 26rem) { .pane-bar [data-pane-tool='split'] { display: none; } }
 @container pane-bar (max-width: 18rem) { .pane-bar [data-pane-tool='maximize'] { display: none; } }
 @container pane-bar (max-width: 13rem) { .pane-bar [data-pane-name] { @apply sr-only; } }
+/* A narrow plugin pane keeps its "Plugin" marker whole (ADR-0114 decision 4): its own space comes first, the name and the pane's buttons
+   give way, then the word "development" (still in the marker's tooltip), and in the narrowest pane the marker's icon. */
+@container pane-bar (max-width: 16rem) { .pane-bar .plugin-mark__dev { display: none; } }
+@container pane-bar (max-width: 13rem) { .pane-bar:has(.plugin-mark) [data-pane-label] { padding-inline: 0.25rem; } .pane-bar:has(.plugin-mark) [data-pane-label] > svg { display: none; } }
+@container pane-bar (max-width: 7rem) { .pane-bar .plugin-mark > svg { display: none; } }
 /* An agent's pane is measured as a whole (not its header row: a size container there would hold the header's own menus under the
    terminal): below 24rem the header drops the machine and the branch, which stay in its tooltip. */
 .agent-body { container: agent-body / inline-size; }
@@ -542,6 +547,13 @@
   .kit-tone-accent { --kit-fg: var(--accent); --kit-tint: var(--tint-accent); --kit-line: var(--line-accent); }
   .kit-tone-working { --kit-fg: var(--state-working); --kit-tint: var(--tint-working); --kit-line: var(--line-working); }
   .kit-tone-needs { --kit-fg: var(--state-needs-you); --kit-tint: var(--tint-needs); --kit-line: var(--line-needs); }
+  /* The "plugin" marker beside a plugin panel's name (ADR-0114 decision 4): the window's words in the base tokens, never shrunk or cut. It
+     is in the floor (ADR-0113 decision 3) with what needs the person, so no theme's regions, fonts, weight or line height reach it. */
+  .plugin-mark { display: inline-flex; flex: none; align-items: center; gap: 0.25rem; padding: 0 0.375rem; border: 1px solid var(--border); border-radius: var(--radius-full); background: var(--surface-2); color: var(--text); font-size: 0.6875rem; line-height: 1.125rem; font-weight: 500; white-space: nowrap; }
+  .plugin-mark__dev { color: var(--text-muted); }
+  /* A plugin's tab keeps room for its name's start and the whole marker; the strip scrolls rather than cut it. */
+  .ide-tab:has(> .plugin-mark) { min-width: 15rem; }
+  .plugin-mark__dev::before { content: '·'; margin-inline: 0.125rem 0.25rem; color: var(--text-muted); }
   .kit-tone-finished { --kit-fg: var(--state-finished); --kit-tint: var(--tint-finished); --kit-line: var(--line-finished); }
   .kit-tone-danger { --kit-fg: var(--danger); --kit-tint: var(--tint-danger); --kit-line: var(--line-danger); }
   .kit-tone-idle { --kit-fg: var(--state-idle); --kit-tint: var(--tint-idle); --kit-line: var(--border); }
@@ -953,7 +965,7 @@
 /* The floor (ADR-0113 decision 3): what needs the person (an approval card, a "needs you" card or count) is drawn in the base tokens
    and the fixed red whatever a theme's regions say, so no theme can restyle, hide or fake it. Its buttons, cards, code and fields take
    the base colours here, and the focus ring is the base rule's. */
-:is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {
+:is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) {
   /* The window's own fonts: a theme's font list (format 1 or 2) never reaches what needs the person, so no font can turn the action it
      asks about into pictures. Held equal to tokens.css by themes/format2.test.ts. */
   --font-ui: 'Inter Variable', Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
