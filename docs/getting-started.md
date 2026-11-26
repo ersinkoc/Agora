@@ -109,6 +109,37 @@ Everything works as before by hand too (`agora hub run`, `agora node enroll`, `a
 `~/.agora` elsewhere. A machine whose `~/.agora` already has a hub folder or a link made by hand is not taken over yet: `agora`
 says so and changes nothing (use a new `AGORA_HOME`, or keep starting it by hand).
 
+## Script agents from a shell
+
+The node's commands also work from scripts on the same machine (the control socket, `--socket PATH` to choose one):
+
+```sh
+agora agent prompt agent-1 "fix the failing test" --wait --timeout 600   # sends, then waits for the turn to end
+agora agent wait agent-1 --until blocked,idle --timeout 60                # waits for one of these states
+agora events --json --agent agent-1                                       # one JSON object per line, until Ctrl-C
+```
+
+- `agora agent prompt AGENT_ID TEXT --wait [--timeout SECS]` sends the prompt and waits until the agent leaves Working. An agent that
+  waits for you (blocked) is not sent the prompt: the command says `agent.blocked` and exits with 6; `--force` sends it anyway (for
+  example to type the answer to a terminal agent's question). The check is the node's agent list just before the prompt goes out, not
+  one step with it.
+- `agora agent wait AGENT_ID [--until STATE[,STATE...]] [--timeout SECS]` returns as soon as the agent is in one of the states
+  (`working`, `blocked`, `idle`, `done`; `exited` waits only for its end). Without `--until`: `idle,done,blocked`.
+- Both print `AGENT_ID<TAB>STATE` on stdout (`exited` when its process ended) and say why on stderr when it is not a plain end.
+  Exit codes: **0** idle or done (or the `--until` state, working included), **3** blocked (it needs you), **4** exited (stopped,
+  crashed, restarted, interrupted or no longer listed; this ends every wait), **5** `--timeout` ran out, **6** prompt refused because
+  the agent is blocked, **1** an error (no node, unknown agent, a refusal from the node), **2** a usage error.
+- `agora events [--agent AGENT_ID] [--json]` prints a line for each agent when it starts (`present`), then one per change: `added`,
+  `state` (with `previous`), `exited`, `running`, `restarted`, `interrupted`, `removed`. With `--json` each line is an object with
+  `event`, `agent_id`, `kind`, `state`, `running`, `restarts`, `time_ms` and, for `state`, `previous`; the words are fixed tokens. It runs
+  until interrupted, exits with 1 when the node goes away, and with 0 at its next line after the reader did (`| head -1`).
+
+The control socket has no event stream, so these commands ask for the node's agent list every 200 ms: a state the agent held for
+less than that may not be seen, and `events` lines have no sequence numbers. After a prompt, an agent still showing the state it had
+before (its turn too quick to see, or not shown yet) counts as finished after 5 s; a prompt sent while the agent was working (queued, or
+typed into its running turn) counts as finished once the agent stayed out of Working for 5 s. An agent whose state Agora cannot
+tell (unknown) is waited for until it shows one, so give such waits a `--timeout`.
+
 ## Certificates
 
 Every certificate Agora issues lasts 90 days. A machine renews its own by itself when 30 days are left, while it is connected to a hub that is

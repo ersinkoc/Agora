@@ -17,4 +17,5 @@ pub mod review;
 pub mod role;
 pub mod split;
 pub mod termio;
+pub mod theme;
 pub mod tool;

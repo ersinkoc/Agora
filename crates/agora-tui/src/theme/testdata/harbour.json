@@ -1,0 +1,15 @@
+{
+  "agora-theme": 2,
+  "name": "Harbour",
+  "inherits": "slate",
+  "dark": {
+    "tokens": { "accent": "#5cc8c2" },
+    "regions": { "sidebar": { "surface": "#0b1016" }, "person-entries": { "surface": "#14302f", "line": "#2b6b68" } },
+    "terminal": { "background": "#0b1016", "foreground": "#d8e1ea", "red": "#ff7b72" },
+    "syntax": { "keyword": "#ff9e8f" }
+  },
+  "light": { "tokens": { "accent": "#0b6e69", "on-accent": "#ffffff" } },
+  "shape": { "radius-m": "10px" },
+  "text": { "font-mono": "'JetBrains Mono', monospace", "weight": 400, "line-height": "normal", "ligatures": true },
+  "chrome": { "pane-borders": "always", "pane-gap": 8, "tab-style": "pill", "density": "compact" }
+}
