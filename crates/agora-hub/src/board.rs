@@ -450,11 +450,17 @@ impl Boards {
     /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
     /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
     /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
-    /// its owner is told, as `task_moved` after a join), and a live lease on a path a live lease already holds is dropped (the first
-    /// holder keeps it, and both are told, as after a join; an ended lease, which `load` drops, holds nothing).
+    /// its owner is told, as `task_moved` after a join, unless the task is done), and where several boards' live leases hold one
+    /// path, one holder keeps it, the others' leases are passed on as ended and both are told (see the lease rules below; `running`
+    /// says whether an agent runs in the project).
     /// A dependency on a task its own board no longer has stays unmet: when another board's task has that id, it is given an id of
     /// its own that no task has or will have, instead of naming that task (#1150). A damaged one is left out.
-    pub fn merge_snapshots(parts: &[Vec<u8>], now_ms: u64) -> Merged {
+    pub fn merge_snapshots(
+        &self,
+        parts: &[Vec<u8>],
+        now_ms: u64,
+        running: impl Fn(&str) -> bool,
+    ) -> Merged {
         let boards: Vec<Value> = parts
             .iter()
             .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
@@ -493,7 +499,8 @@ impl Boards {
                 if taken.contains(&id) {
                     let to = format!("t-{next}");
                     next += 1;
-                    if let Some(owner) = t["owner"].as_str() {
+                    let done = t["done"].as_bool().unwrap_or(false);
+                    if let Some(owner) = t["owner"].as_str().filter(|_| !done) {
                         notices.extend(notice_to(
                             owner,
                             json!({"board": "task_moved", "from": id, "to": to}),
@@ -510,8 +517,8 @@ impl Boards {
             }
             renames.push(renamed);
         }
-        let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
-        let mut held = BTreeMap::<String, String>::new();
+        let mut tasks = Vec::<Value>::new();
+        let mut all_leases = Vec::<Value>::new();
         for (board, renamed) in boards.iter().zip(&renames) {
             let mine = tasks_of(board);
             let own: BTreeSet<String> = mine.iter().map(id_of).collect();
@@ -543,37 +550,73 @@ impl Boards {
                 }
                 tasks.push(t);
             }
-            for l in board["leases"].as_array().cloned().unwrap_or_default() {
-                // An ended lease holds no path (`load` drops it): it never shadows a later board's live one.
-                let (Some(path), Some(holder), Some(expires)) = (
-                    l["path"].as_str(),
-                    l["holder"].as_str(),
-                    l["expires_at_ms"].as_u64(),
-                ) else {
-                    continue;
-                };
-                if expires <= now_ms {
-                    continue;
-                }
-                match held.get(path) {
-                    None => {
-                        held.insert(path.to_string(), holder.to_string());
-                        leases.push(l);
-                    }
-                    // #1150: both holders are told, as when a join finds the path held.
-                    Some(kept) if kept != holder => {
-                        notices.extend(notice_to(
-                            holder,
-                            json!({"board": "lease_refused", "path": path, "holder": kept}),
-                        ));
-                        notices.extend(notice_to(
-                            kept,
-                            json!({"board": "lease_conflict", "path": path, "other": holder}),
-                        ));
-                    }
-                    Some(_) => {}
+            all_leases.extend(board["leases"].as_array().cloned().unwrap_or_default());
+        }
+        // Leases (#1150). A live lease whose holder runs keeps its path before one whose holder is gone (not running in the project,
+        // or on a node that started again since this hub opened: `load` and the next `sync` free those), first board first. Every
+        // other live lease on that path is passed on as ended, so `load` says it released (a window still shows the older hub's
+        // grant) and both holders are told, as when a join finds the path held. An ended lease is passed on too, for the same
+        // reason, unless the holder that keeps the path is its own (its release would end the kept lease in the window's view).
+        let restarted = self
+            .restarted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let gone = |holder: &str| {
+            !running(holder)
+                || holder
+                    .split_once('/')
+                    .is_some_and(|(node, _)| restarted.contains(node))
+        };
+        let fields = |l: &Value| -> Option<(String, String, u64)> {
+            Some((
+                l["path"].as_str()?.to_string(),
+                l["holder"].as_str()?.to_string(),
+                l["expires_at_ms"].as_u64()?,
+            ))
+        };
+        let live = |l: &&Value| fields(l).is_some_and(|(_, _, expires)| expires > now_ms);
+        let mut keeper = BTreeMap::<String, String>::new();
+        for pass_gone in [false, true] {
+            for (path, holder, _) in all_leases.iter().filter(live).filter_map(fields) {
+                if gone(&holder) == pass_gone {
+                    keeper.entry(path).or_insert(holder);
                 }
             }
+        }
+        let mut leases = Vec::<Value>::new();
+        // Live ones first: a holder's kept or refused lease is passed on once, and its ended one then adds nothing.
+        let mut passed = BTreeSet::<(String, String)>::new();
+        let (live_ones, ended_ones): (Vec<&Value>, Vec<&Value>) = all_leases.iter().partition(live);
+        for l in live_ones.into_iter().chain(ended_ones) {
+            let Some((path, holder, expires)) = fields(l) else {
+                continue;
+            };
+            let kept = keeper.get(&path).cloned().unwrap_or_default();
+            if !passed.insert((path.clone(), holder.clone())) {
+                continue;
+            }
+            if expires <= now_ms {
+                if kept != holder {
+                    leases.push(l.clone());
+                }
+                continue;
+            }
+            if kept == holder {
+                leases.push(l.clone());
+                continue;
+            }
+            let mut ended = l.clone();
+            ended["expires_at_ms"] = json!(0);
+            leases.push(ended);
+            notices.extend(notice_to(
+                &holder,
+                json!({"board": "lease_refused", "path": path, "holder": kept}),
+            ));
+            notices.extend(notice_to(
+                &kept,
+                json!({"board": "lease_conflict", "path": path, "other": holder}),
+            ));
         }
         Merged {
             bytes: json!({"next": next, "tasks": tasks, "leases": leases})
@@ -1192,7 +1235,7 @@ mod tests {
                 task("t-3", "later three", &["t-1"])
             ]),
         );
-        let m = Boards::merge_snapshots(&[first, later], 0);
+        let m = Boards::default().merge_snapshots(&[first, later], 0, |_| true);
         let v: Value = serde_json::from_slice(&m.bytes).unwrap();
         let tasks = v["tasks"].as_array().unwrap();
         let by_title = |t: &str| tasks.iter().find(|x| x["title"] == t).unwrap();
@@ -1224,50 +1267,89 @@ mod tests {
         }
     }
 
-    /// #1150 (ADR-0115 note 4, first half): when two boards' live leases hold one path, the first board's holder keeps it and both
-    /// are told (`lease_refused`, `lease_conflict`), as after a join; an ended lease never keeps a path from a live one.
-    #[test]
-    fn a_merged_lease_on_a_held_path_tells_both_holders() {
-        let board = |leases: Value| {
-            json!({"next": 1, "tasks": [], "leases": leases})
-                .to_string()
-                .into_bytes()
-        };
-        let lease = |path: &str, holder: &str, expires: u64| json!({"path": path, "holder": holder, "expires_at_ms": expires});
-        let first = board(json!([
-            lease("src/a", "n1/x", 500),
-            lease("src/b", "n1/x", 50)
-        ]));
-        let later = board(json!([
-            lease("src/a", "n2/y", 500),
-            lease("src/b", "n2/y", 500),
-            lease("src/a", "n1/x", 500)
-        ]));
-        let m = Boards::merge_snapshots(&[first, later], 100);
+    fn merge_lease(path: &str, holder: &str, expires: u64) -> Value {
+        json!({"path": path, "holder": holder, "expires_at_ms": expires})
+    }
+
+    fn lease_board(leases: Value) -> Vec<u8> {
+        json!({"next": 1, "tasks": [], "leases": leases})
+            .to_string()
+            .into_bytes()
+    }
+
+    /// The merged board's leases as `(path, holder, live)`, and what loading it says was released.
+    fn merged_leases(
+        b: &Boards,
+        m: &Merged,
+        now: u64,
+    ) -> (Vec<(String, String, bool)>, Vec<(String, String)>) {
         let v: Value = serde_json::from_slice(&m.bytes).unwrap();
-        let kept: Vec<(String, String)> = v["leases"]
+        let leases = v["leases"]
             .as_array()
             .unwrap()
             .iter()
             .map(|l| {
                 (
-                    l["path"].as_str().unwrap().into(),
-                    l["holder"].as_str().unwrap().into(),
+                    l["path"].as_str().unwrap().to_string(),
+                    l["holder"].as_str().unwrap().to_string(),
+                    l["expires_at_ms"].as_u64().unwrap() > now,
                 )
             })
             .collect();
+        b.load("p", &m.bytes, now);
+        let released = b
+            .by_project
+            .lock()
+            .unwrap()
+            .get_mut("p")
+            .unwrap()
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Body::LeaseReleased(r) => Some((r.path, r.agent_id)),
+                _ => None,
+            })
+            .collect();
+        (leases, released)
+    }
+
+    fn told(node: &str, agent: &str, body: Value) -> Notice {
+        Notice {
+            to_node: node.into(),
+            to_agent: agent.into(),
+            body: body.to_string(),
+        }
+    }
+
+    /// #1150 (ADR-0115 note 4, first half): when two boards' live leases hold one path, the first board's holder keeps it and both
+    /// are told (`lease_refused`, `lease_conflict`), as after a join; the other lease is passed on as ended, so loading says it was
+    /// released. An ended lease never keeps a path from a live one.
+    #[test]
+    fn a_merged_lease_on_a_held_path_tells_both_holders() {
+        let first = lease_board(json!([
+            merge_lease("src/a", "n1/x", 500),
+            merge_lease("src/b", "n1/x", 50)
+        ]));
+        let later = lease_board(json!([
+            merge_lease("src/a", "n2/y", 500),
+            merge_lease("src/b", "n2/y", 500),
+            merge_lease("src/a", "n1/x", 500)
+        ]));
+        let b = Boards::default();
+        let m = b.merge_snapshots(&[first, later], 100, |_| true);
+        let (leases, released) = merged_leases(&b, &m, 100);
+        let live: Vec<(String, String)> = leases
+            .iter()
+            .filter(|l| l.2)
+            .map(|l| (l.0.clone(), l.1.clone()))
+            .collect();
         assert_eq!(
-            kept,
+            live,
             [
                 ("src/a".to_string(), "n1/x".to_string()),
                 ("src/b".into(), "n2/y".into())
             ]
         );
-        let told = |node: &str, agent: &str, body: Value| Notice {
-            to_node: node.into(),
-            to_agent: agent.into(),
-            body: body.to_string(),
-        };
         assert_eq!(
             m.notices,
             [
@@ -1283,6 +1365,77 @@ mod tests {
                 ),
             ]
         );
+        let mut released = released;
+        released.sort();
+        assert_eq!(
+            released,
+            [
+                ("src/a".to_string(), "n2/y".to_string()),
+                ("src/b".into(), "n1/x".into())
+            ]
+        );
+    }
+
+    /// #1150 (review of #1223, H1): an ended lease of any merged board, the folded board's own included, is passed on, so loading says
+    /// it was released and a window that rebuilt its view from the log stops showing it held; but not when the holder that keeps
+    /// the path is its own (its release would end the kept lease in that view).
+    #[test]
+    fn a_merge_passes_ended_leases_on_to_be_released() {
+        let own = lease_board(json!([
+            merge_lease("src/old", "n1/x", 50),
+            merge_lease("src/c", "n1/x", 50)
+        ]));
+        let other = lease_board(json!([merge_lease("src/c", "n1/x", 500)]));
+        let b = Boards::default();
+        let m = b.merge_snapshots(&[own, other], 100, |_| true);
+        let (leases, released) = merged_leases(&b, &m, 100);
+        assert_eq!(released, [("src/old".to_string(), "n1/x".to_string())]);
+        assert!(leases.contains(&("src/c".into(), "n1/x".into(), true)));
+        assert!(m.notices.is_empty());
+    }
+
+    /// #1150 (review of #1223, L2): a lease whose holder is gone (not running in the project, or on a node that started again since
+    /// the hub opened) does not keep a path from a later board's running holder: `load` would free it and leave the path to no one.
+    #[test]
+    fn a_merged_lease_of_a_gone_holder_gives_way_to_a_running_one() {
+        for (first_holder, running) in [("n1/x", false), ("n3/z", true)] {
+            let first = lease_board(json!([merge_lease("src/a", first_holder, 500)]));
+            let later = lease_board(json!([merge_lease("src/a", "n2/y", 500)]));
+            let b2 = Boards::default();
+            b2.node_restarted("n3", 0);
+            let m = b2.merge_snapshots(&[first, later], 100, |h| running || h != first_holder);
+            let (leases, released) = merged_leases(&b2, &m, 100);
+            assert!(
+                leases.contains(&("src/a".into(), "n2/y".into(), true)),
+                "{first_holder}: {leases:?}"
+            );
+            assert_eq!(released, [("src/a".to_string(), first_holder.to_string())]);
+            let held = b2.by_project.lock().unwrap()["p"].export_leases("p", 100);
+            assert_eq!(held.len(), 1);
+            assert_eq!(held[0].1.as_str(), "n2/y");
+        }
+    }
+
+    /// #1150 (review of #1223, L1): the owner of a done task that got a new id is not told (it no longer works on it).
+    #[test]
+    fn a_done_task_moved_by_a_merge_tells_no_one() {
+        let task = |title: &str, done: bool| json!({"id": "t-1", "title": title, "detail": "", "depends_on": [], "done": done, "owner": "n2/y", "summary": ""});
+        let board = |t: Value| {
+            json!({"next": 2, "tasks": [t], "leases": []})
+                .to_string()
+                .into_bytes()
+        };
+        let b = Boards::default();
+        let m = b.merge_snapshots(
+            &[
+                board(task("first", false)),
+                board(task("later, done", true)),
+            ],
+            0,
+            |_| true,
+        );
+        assert!(m.notices.is_empty(), "{:?}", m.notices);
+        assert_eq!(m.restated.len(), 2);
     }
 
     fn view(online: &[&str]) -> View {

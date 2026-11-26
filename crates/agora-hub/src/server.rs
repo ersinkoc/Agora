@@ -263,6 +263,10 @@ where
     }
     // ADR-0108: the forgets owed to it, oldest first (a node without `agent.forget.local` is never sent one; they wait).
     give_forgets(hub, node_id, hub.forgets().pending(node_id));
+    // #1150: board notices made while it was away (a merge of an older hub's boards that renamed its agent's task or dropped its lease).
+    for n in hub.take_owed_notices(node_id) {
+        board_notice(hub, &n);
+    }
     // ADR-0039 amendment B, #1036: board membership looks now, not only at the node's next event. A redial that wrote the node's
     // late end together with its `up` makes it due to hand over its local work, and an idle node that is caught up may send no
     // event for a long time (ADR-0054). The asks go out after the device changes, before anything the connection carries.

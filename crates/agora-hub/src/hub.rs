@@ -71,6 +71,20 @@ struct Inner {
     /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
     /// machine is left out until it connects again.
     fleet_agreed: std::collections::BTreeSet<String>,
+    /// #1150: board notices for agents whose machine was not connected when they were made (a merge of an older hub's boards runs at
+    /// the first board call after a start, often before every machine is back), at most [`OWED_NOTICES`] per machine, sent when it
+    /// connects ([`Hub::take_owed_notices`]). Memory only: a hub that restarts first loses them.
+    owed_notices: std::collections::BTreeMap<String, Vec<crate::board::Notice>>,
+}
+
+/// The most board notices kept for one machine that is not connected (see `Inner::owed_notices`).
+const OWED_NOTICES: usize = 1024;
+
+/// Whether `agent` (`<node>/<agent>`) runs in `project`, as the board's `sync` keeps an agent registered.
+fn runs_in(view: &View, agent: &str, project: &str) -> bool {
+    view.agents
+        .get(agent)
+        .is_some_and(|a| a.running && a.project_id == project)
 }
 
 pub struct Hub {
@@ -196,6 +210,7 @@ impl Hub {
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
                 fleet_agreed: std::collections::BTreeSet::new(),
+                owed_notices: std::collections::BTreeMap::new(),
             }),
         };
         {
@@ -718,6 +733,12 @@ impl Hub {
         self.boards.membership(&g.view, now_ms)
     }
 
+    /// #1150: the board notices kept for `node` while it was not connected (see `Inner::owed_notices`), for the connection that
+    /// just opened to send; each is given once.
+    pub fn take_owed_notices(&self, node: &str) -> Vec<crate::board::Notice> {
+        self.lock().owed_notices.remove(node).unwrap_or_default()
+    }
+
     /// A node will not answer its `BoardJoin`: board calls stop waiting for it.
     pub fn board_join_settled(&self, node: &str, project: &str) {
         self.boards.join_settled(node, project);
@@ -900,7 +921,9 @@ impl Hub {
             (0, _) => {}
             (1, true) => self.boards.load(project, &parts[0], now_ms),
             _ => {
-                let m = crate::board::Boards::merge_snapshots(&parts, now_ms);
+                let m = self
+                    .boards
+                    .merge_snapshots(&parts, now_ms, |a| runs_in(&g.view, a, project));
                 let none = self.boards.checkpoint(project);
                 self.boards.load(project, &m.bytes, now_ms);
                 // #1150: the window learns what the merge changed (a task with a new id, and the one that kept the id it had), and
@@ -923,14 +946,23 @@ impl Hub {
                     }
                     return (key, Vec::new());
                 }
-                // As after a join, only an agent running in the project is told (a node that started again lost its agents).
-                let mut notices = m.notices;
-                notices.retain(|n| {
-                    g.view
-                        .agents
-                        .get(&format!("{}/{}", n.to_node, n.to_agent))
-                        .is_some_and(|a| a.running && a.project_id == project)
-                });
+                // As after a join, only an agent running in the project is told (a node that started again lost its agents). One
+                // whose machine is not connected now (after a hub start, before it is back) is told when it connects: the markers
+                // are stored, so this merge will not run again to tell it.
+                let mut notices = Vec::new();
+                for n in m.notices {
+                    if !runs_in(&g.view, &format!("{}/{}", n.to_node, n.to_agent), project) {
+                        continue;
+                    }
+                    if self.router.is_connected(&n.to_node) {
+                        notices.push(n);
+                    } else {
+                        let owed = g.owed_notices.entry(n.to_node.clone()).or_default();
+                        if owed.len() < OWED_NOTICES {
+                            owed.push(n);
+                        }
+                    }
+                }
                 return (key, notices);
             }
         }
@@ -2486,12 +2518,19 @@ mod tests {
         }
     }
 
-    /// #1150 (ADR-0115 notes 1 and 2): merging an older hub's boards tells the window of each task given a new id and of the task
-    /// that kept the id (it showed both boards' `t-1` as one), and tells the owner of a moved task its new id (`task_moved`, as after
-    /// a join), once.
-    #[test]
-    fn a_board_merge_restates_the_tasks_it_renamed_and_tells_their_owners() {
-        let (hub, path) = hub_on_file("adr0115-merge-events");
+    /// The ADR-0115 merge scenario of the tests below: the folded board's `t-1` and `t-2`, and the older spelling's `t-1`, claimed by
+    /// `old/a`. The hub is opened again on its file, so the agents are still running and their nodes did not start again since (a
+    /// node that did lost its agents, and their claims go back as the board loads); the machines in `linked` connect.
+    fn merge_scenario(
+        name: &str,
+        linked: &[&str],
+    ) -> (
+        Hub,
+        std::path::PathBuf,
+        String,
+        Vec<crate::router::Registration>,
+    ) {
+        let (hub, path) = hub_on_file(name);
         let (old, folded) = two_spellings(&hub);
         let put = |spelling: &str, text: String| {
             hub.store()
@@ -2503,14 +2542,24 @@ mod tests {
             board_text(&[("t-1", "folded one", None), ("t-2", "folded two", None)]),
         );
         put(&old, board_text(&[("t-1", "cased one", Some("old/a"))]));
-        // Opened again: the agents are still running and their nodes did not start again since (a node that did lost its agents,
-        // and their claims go back as the board loads).
         drop(hub);
         let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let mut links = Vec::new();
+        for n in linked {
+            links.push(hub.node_link_opened(n, Vec::new(), 5).unwrap().0);
+        }
         for n in ["old", "new"] {
-            let _ = hub.node_link_opened(n, Vec::new(), 5).unwrap();
             hub.board_join_settled(n, &folded);
         }
+        (hub, path, folded, links)
+    }
+
+    /// #1150 (ADR-0115 notes 1 and 2): merging an older hub's boards tells the window of each task given a new id and of the task
+    /// that kept the id (it showed both boards' `t-1` as one), and tells the owner of a moved task its new id (`task_moved`, as after
+    /// a join), once.
+    #[test]
+    fn a_board_merge_restates_the_tasks_it_renamed_and_tells_their_owners() {
+        let (hub, path, folded, links) = merge_scenario("adr0115-merge-events", &["old", "new"]);
         let first = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
         let view = hub.view().0;
         let task = |title: &str| {
@@ -2547,6 +2596,29 @@ mod tests {
         );
         let again = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 7);
         assert!(again.notices.is_empty());
+        assert!(hub.take_owed_notices("old").is_empty());
+        drop(links);
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #1150 (review of #1223, H2): after a hub start, the merge runs at the first board call, often before every machine is back. A
+    /// notice for an agent whose machine is not connected is kept and given when it connects, once; nothing is sent to it before.
+    #[test]
+    fn a_board_merge_notice_for_a_machine_not_connected_waits_for_it() {
+        let (hub, path, folded, mut links) = merge_scenario("adr0115-merge-owed", &["new"]);
+        let first = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        assert!(first.notices.is_empty(), "{:?}", first.notices);
+        links.push(hub.node_link_opened("old", Vec::new(), 7).unwrap().0);
+        let owed = hub.take_owed_notices("old");
+        assert_eq!(owed.len(), 1, "{owed:?}");
+        assert_eq!(
+            (owed[0].to_node.as_str(), owed[0].to_agent.as_str()),
+            ("old", "a")
+        );
+        assert!(owed[0].body.contains("task_moved"), "{}", owed[0].body);
+        assert!(hub.take_owed_notices("old").is_empty(), "given once");
+        drop(links);
         drop(hub);
         remove_db(&path);
     }
