@@ -1553,7 +1553,7 @@ pub(crate) fn program_path(program: &str, child_path: Option<&std::ffi::OsStr>) 
         .unwrap_or(unchanged)
 }
 
-/// Herdr G11: the session ends (a log off, a shutdown or a restart) or this process's console is closed: see [`catch_session_end`].
+/// Shutdown safety: the session ends (a log off, a shutdown or a restart) or this process's console is closed: see [`catch_session_end`].
 static SESSION_ENDING: AtomicBool = AtomicBool::new(false);
 
 /// How long a session-end notice is held once it came: the system ends the process as soon as its handler returns, so the handler
@@ -1668,7 +1668,7 @@ fn session_window_loop() {
     }
 }
 
-/// See [`crate::catch_stop_requests_once`] on Windows (herdr G11): the session's end and the console's closing become a stop request.
+/// See [`crate::catch_stop_requests_once`] on Windows: the session's end and the console's closing become a stop request.
 /// A process with no console (the node, started detached) hears the session end only through a window: a hidden one, on a thread of
 /// its own. With a console, its closing is heard too (a log off or a shutdown reaches a console handler only in a process without
 /// windows, so the window hears those). Each holds the notice ([`SESSION_END_HOLD`]) while the process stops.

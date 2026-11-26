@@ -12,7 +12,7 @@
 //! or ends is covered without a call at each place. It writes when an agent starts, when its session id is reported, and when it
 //! ends; a state change is kept in memory and written with the next write (and when the node stops cleanly, [`Ledger::flush`]).
 //! An agent the node stops with itself does not end: that is exactly what makes it interrupted at the next start. Nor does one whose
-//! end the node sees once its own stop began (herdr G11): an OS shutdown or reboot signals the node, its terminal holder and its agents
+//! end the node sees once its own stop began: an OS shutdown or reboot signals the node, its terminal holder and its agents
 //! at once, and those ends are the shutdown's, so the agents are interrupted at the next start and offered to Resume. A stop someone
 //! asked for ([`STOPPED_ON_REQUEST`]) is an end whenever it is recorded.
 
@@ -147,13 +147,13 @@ struct State {
     kept_writer: bool,
     /// Something changed that is not on disk yet.
     dirty: bool,
-    /// Herdr G11: the node's stop began ([`Ledger::stopping`]), or [`Ledger::stops_when`]'s check says it did.
+    /// Shutdown safety: the node's stop began ([`Ledger::stopping`]), or [`Ledger::stops_when`]'s check says it did.
     stopping: bool,
     stops_when: Option<fn() -> bool>,
 }
 
 impl State {
-    /// Herdr G11: whether the node is stopping. An OS shutdown (a login session's end, launchd's, a reboot) signals the node, its
+    /// Shutdown safety: whether the node is stopping. An OS shutdown (a login session's end, launchd's, a reboot) signals the node, its
     /// terminal holder and its agents at once: an agent's end the node sees then is the shutdown's doing, not the agent's, and is not
     /// recorded as an end, so the next start finds the agent interrupted and offers it to Resume. A stop someone asked for still is.
     fn stopping(&self) -> bool {
@@ -1057,12 +1057,12 @@ impl Ledger {
         }
     }
 
-    /// Herdr G11: the node's stop began. From now on an agent's end is not recorded as one (see the module documentation).
+    /// Shutdown safety: the node's stop began. From now on an agent's end is not recorded as one (see the module documentation).
     pub fn stopping(&self) {
         self.st().stopping = true;
     }
 
-    /// Herdr G11: `check` says the node's stop began, from the moment the stop request came (`agora_platform::stop_requested`, which
+    /// Shutdown safety: `check` says the node's stop began, from the moment the stop request came (`agora_platform::stop_requested`, which
     /// the signal handler itself sets), before the node acts on it: an agent's end it records meanwhile counts as [`Self::stopping`].
     pub fn stops_when(&self, check: fn() -> bool) {
         self.st().stops_when = Some(check);
@@ -1277,7 +1277,7 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             }
             false
         }
-        // Herdr G11: see `State::stopping`. A stop someone asked for (`STOPPED_ON_REQUEST`: the person, an agent stopping its helper)
+        // Shutdown safety: see `State::stopping`. A stop someone asked for (`STOPPED_ON_REQUEST`: the person, an agent stopping its helper)
         // is an end whenever it comes, so it is never resumed by itself.
         Body::AgentExited(x) if x.exit_code != STOPPED_ON_REQUEST && st.stopping() => false,
         Body::AgentExited(x) => match st.entries.get_mut(&x.agent_id) {
@@ -1454,7 +1454,7 @@ mod tests {
         assert_eq!(l.get("agent-1").unwrap().last_state, "blocked");
     }
 
-    /// Herdr G11: an OS shutdown signals the node and its agents at once. An agent's end the node sees once its stop began (the stop
+    /// Shutdown safety: an OS shutdown signals the node and its agents at once. An agent's end the node sees once its stop began (the stop
     /// request caught, before the node acts on it, or the stop itself) is the shutdown's doing: the agent is interrupted at the next
     /// open and offered to Resume. One that ended before is still an end.
     #[test]

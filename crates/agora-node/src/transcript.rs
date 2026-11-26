@@ -1253,7 +1253,7 @@ impl Store {
         file_stem(agent).map(|s| self.dir.join(format!("{s}.jsonl")))
     }
 
-    /// Herdr G11: makes what was written to `agent`'s file last through a power loss (the writer's own appends only reach the system).
+    /// Shutdown safety: makes what was written to `agent`'s file last through a power loss (the writer's own appends only reach the system).
     /// Fine when there is none.
     pub fn sync(&self, agent: &str) -> io::Result<()> {
         let path = self
@@ -1710,7 +1710,7 @@ pub fn flush(board: &crate::chat::ChatBoard) {
         written.sort();
         written.dedup();
         write_batches(board, &store, all, &mut HashMap::new());
-        // Herdr G11: the node is stopping (an OS shutdown may follow): the files it just wrote are made to last through a power loss.
+        // Shutdown safety: the node is stopping (an OS shutdown may follow): the files it just wrote are made to last through a power loss.
         for agent in written {
             let _ = store.sync(agent.as_str());
         }
