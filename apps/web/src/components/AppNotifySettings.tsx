@@ -10,7 +10,8 @@ const useAppNotifyPrefs = (): DesktopNotifyPrefs =>
 
 // This device, inside the desktop app only: the app's own notification when an agent finishes or needs you (net/desktopNotify.ts). Off
 // until the person turns it on here, kept in this app's page storage only. Safe mode (ADR-0114) has the switch off and disabled, and says
-// why under it. The system's own permission is asked by the system itself, at the first notification (macOS asks once).
+// why under it. Whether the app may notify at all is the system's own setting, asked by the system itself if at all (macOS is expected to
+// ask when the app first notifies; not tried yet).
 export function AppNotifySettings({ safe = SAFE }: { safe?: boolean }) {
   const p = useAppNotifyPrefs();
   const on = p.on && !safe;

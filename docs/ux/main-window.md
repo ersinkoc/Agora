@@ -214,7 +214,9 @@ sign: everything it says is on screen too.
   words itself ("claude · amber finished.", "An agent needs you.", "3 agents finished.") and holds to the same rules again. It brings
   the window forward and opens the agent when the notification is clicked (`apps/desktop/README.md` says what each system does). The
   app's own count of approvals waiting stays always on. Inside the app, the Needs you card's browser-notification switch is off and
-  points to App notifications. Muting an agent's sounds does not mute its notifications.
+  points to App notifications. The page first asks the app once, with no event, whether it has the command; an app built before
+  App notifications refuses, and there the card is not shown and the browser's switch stays as it was. Muting an agent's sounds does not mute its notifications
+  (the terminal client has no mute either).
   Screens: `docs/ux/screens/app-notifications-{dark,light}.png`, `docs/ux/screens/app-notifications-needs-you-{dark,light}.png`.
   Tests: `net/desktopNotify.test.ts`, `components/appNotify.test.tsx`; the app's side in `apps/desktop/src-tauri/src/notify.rs`.
 - **In the terminal client** (`agora tui`, M6.7): the same two signs from the same rules (`crates/agora-tui/src/alerts.rs`, ported from

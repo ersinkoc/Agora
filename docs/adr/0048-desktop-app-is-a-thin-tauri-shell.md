@@ -84,14 +84,21 @@ reports a click.
 
    The page's title count of approvals (decision 5) goes through the same rate rule, so a new approval and its agent's "needs you"
    become one notification.
-4. **A plugin's frame cannot reach it.** ADR-0114 frames are sandboxed, opaque origins under `connect-src 'none'`, and Tauri's
-   invoke key lives only in the top frame's own script. A frame has no IPC request the shell would take (Tauri rejects one without the
-   key), and the custom-protocol request carries the frame's `null` origin, which no capability matches.
+4. **A plugin's frame cannot reach it.** ADR-0114 frames are sandboxed, opaque origins under `connect-src 'none'`. Tauri drops an IPC
+   request that does not carry its invoke key. The frame has two ways to send a request, and both fail:
+   - **The custom-protocol request** (`ipc://localhost`, or `http://ipc.localhost` on Windows) is stopped by the frame's
+     `connect-src 'none'`. Even if it were sent, it would carry the frame's `null` Origin, which Tauri cannot parse, so it would be
+     refused.
+   - **The webview's message channel:** on Linux (WebKitGTK `TopFrame`) and macOS (`forMainFrameOnly`), the key is only in the top
+     frame. On Windows, wry 0.57 adds Tauri's scripts to every frame, the key included. There the frame's message would have to reach
+     wry, but wry listens only for messages from the top document (`CoreWebView2.WebMessageReceived`), not from a frame.
+
+   This rests on reading Tauri 2.12 and wry 0.57. It has not been tried in a running app on each system.
 5. **The notifier is Tauri's official notification plugin** (`tauri-plugin-notification` 2.8.1, used from Rust only; the page is granted
    none of its commands). It posts as the app on macOS (as Terminal in a development run), Windows and Linux, and it reports a click,
    which brings the window forward and opens the agent. The same plugin now shows decision 5's approval count, so macOS gets it too.
-   Permission is the system's own: macOS asks once, at the first notification; Windows and Linux follow the user's notification
-   settings.
+   Permission is the system's own; the plugin asks nothing on a desktop. macOS is expected to ask the person when the app first posts
+   (not tried yet); Windows and Linux follow the user's notification settings.
 
 **What it costs.**
 
@@ -102,5 +109,11 @@ reports a click.
   the app the page's browser notifications do nothing, and the Needs you card's notification switch points to the app's own (App
   notifications).
 - Tauri's plugin and its notifier (`notify-rust`, `zbus` on Linux, `mac-notification-sys` and `tauri-winrt-notification`) are new third-party
-  code in the app only (decision 7; `cargo deny` covers them).
+  code in the app only (decision 7; `cargo deny` covers them). `deny.toml` records three advisories for the zbus 5 sub-crates
+  (RUSTSEC-2026-0370, -0371, -0372). They are "unmaintained" only because zbus 6 took them in as modules, and the plugin still uses
+  zbus 5.
+- On Windows the approvals notification no longer posts through PowerShell but under the app's own identity, which the installer
+  registers. An app unpacked without running the installer may show none (not tried yet).
+- An app built before this one has no such command. A page from a newer hub asks it once, with no event, and keeps to the browser's
+  notifications when it is refused.
 

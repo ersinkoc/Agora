@@ -59,8 +59,12 @@ for a development run):
   - macOS: the system brings the app forward itself, and the plugin reports the click.
 
   The click behaviour on macOS and Windows has not been tried on a real machine yet.
-- **Permission** is the system's: macOS asks once, at the first notification. On Windows and Linux the user's notification settings
-  decide, and nothing is shown when they are off.
+- **Permission** is the system's. The plugin itself asks nothing on a desktop. macOS is expected to ask the person when the app first
+  posts, but this has not been tried with this build. On Windows and Linux the user's notification settings decide, and nothing is
+  shown when they are off.
+- **Windows, approvals waiting:** this used to post through Windows PowerShell. An app run from `target/` still does. An app run
+  from anywhere else now posts under its own identity, which Windows knows only once the installer has registered it. So the app
+  unpacked from the installer without running it (as in the 2026-11-21 review) may show nothing. Not tried yet.
 
 Not done yet: signed installers and per-platform signing (needs
 the maintainer's Apple and Windows accounts; unsigned builds are published as such), a real icon (the name and logo are open question Q1).

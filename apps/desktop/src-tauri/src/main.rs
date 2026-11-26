@@ -724,7 +724,7 @@ mod tests {
                 super::ca_fingerprint,
                 super::notify_agents
             ])
-            .build(tauri::generate_context!())
+            .build(tauri::generate_context!(test = true))
             .unwrap();
         let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()

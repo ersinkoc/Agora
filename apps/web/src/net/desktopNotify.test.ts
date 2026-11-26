@@ -1,6 +1,6 @@
 // The desktop app's notifications, pure: the rules, the rate, the name made plain and the typed bridge (net/desktopNotify.ts).
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_ID_MAX, DESKTOP_NOTIFY_DEFAULTS, NOTIFY_GAP_MS, flush, gate, inDesktopApp, notifiable, parseDesktopNotifyPrefs, sendToApp, shellEvents } from './desktopNotify';
+import { AGENT_ID_MAX, DESKTOP_NOTIFY_DEFAULTS, NOTIFY_GAP_MS, appNotify, flush, gate, inDesktopApp, notifiable, parseDesktopNotifyPrefs, sendToApp, shellEvents } from './desktopNotify';
 import { openGate, type SoundEvent } from './sounds';
 
 const away = { visible: false, focused: false };
@@ -105,5 +105,27 @@ describe('the bridge', () => {
     expect(sendToApp(evs, {})).toBe(false);
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(sendToApp(evs, shell(() => { throw new Error('gone'); }))).toBe(false);
+  });
+
+  it('is asked once whether the app has the command, and only an app that takes it counts', async () => {
+    appNotify.reset();
+    const yes = vi.fn((..._: unknown[]) => Promise.resolve());
+    appNotify.probe(shell(yes));
+    appNotify.probe(shell(yes));
+    expect(yes).toHaveBeenCalledTimes(1);
+    expect(yes).toHaveBeenCalledWith('notify_agents', { events: [] });
+    expect(appNotify.supported()).toBe(false);
+    await Promise.resolve(); await Promise.resolve();
+    expect(appNotify.supported()).toBe(true);
+
+    appNotify.reset();
+    appNotify.probe(shell(() => Promise.reject(new Error('not allowed'))));
+    await Promise.resolve(); await Promise.resolve();
+    expect(appNotify.supported()).toBe(false);
+
+    appNotify.reset();
+    appNotify.probe({});
+    expect(appNotify.supported()).toBe(false);
+    appNotify.reset();
   });
 });

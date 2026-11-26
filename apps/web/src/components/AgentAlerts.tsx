@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { AgentTileModel } from '../model';
 import { whoOf } from '../net/attention';
-import { desktopNotifyPrefs, flush as flushApp, gate as gateApp, inDesktopApp, notifiable, sendToApp, shellEvents, type ShellEvent } from '../net/desktopNotify';
+import { desktopNotifyPrefs, flush as flushApp, gate as gateApp, notifiable, sendToApp, shellEvents, type ShellEvent } from '../net/desktopNotify';
 import type { AttentionItem } from '../net/fleet';
 import { changes, finishedMarks, type Seen } from '../net/finished';
 import { onScreen } from '../net/onScreen';
 import { audible, flush, gate, inFront, openGate, soundPrefs, type Gate, type SoundEvent, type SoundKind, type SoundPresence, type SoundVolume } from '../net/sounds';
 import { SAFE } from '../plugins/safe';
 import { playSound, unlockSounds } from './chime';
+import { useAppNotify } from './useAppNotify';
 
 // Whether the window is shown and has the focus, read when it matters and again on every change of either.
 export interface PagePresence { visible: boolean; focused: boolean }
@@ -30,25 +31,27 @@ function usePagePresence(read: () => PagePresence): PagePresence {
 // tiles, rows and tabs, and every sound has its sign on screen too (the state, the Needs you list, the mark), so a sound is never the only
 // one. `ready`: the window has the fleet as it is (a hub window before its first snapshot, or after it signed out, has not), so the first
 // look after it is taken as it is, with no sound and no mark.
-export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = readPage, play = playSound, inApp = inDesktopApp(), notify = sendToApp }: {
+export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = readPage, play = playSound, inApp, notify = sendToApp }: {
   agents: readonly AgentTileModel[];
   attention: readonly AttentionItem[];
   ready: boolean;
   safe?: boolean;
   page?: () => PagePresence;
   play?: (kind: SoundKind, volume: SoundVolume) => void;
-  // Inside the desktop app, and how a notification is asked of it (tests replace both).
+  // Inside a desktop app that has its own notifications (asked of it once by default), and how one is asked for (tests replace both).
   inApp?: boolean;
   notify?: (events: ShellEvent[]) => void;
 }) {
   const screen = useSyncExternalStore(onScreen.subscribe, onScreen.get, onScreen.get);
+  const hasApp = useAppNotify();
+  const app = inApp ?? hasApp;
   const presence = usePagePresence(page);
   const front = presence.visible && presence.focused;
 
   // The latest of everything a timer reads, so a sound that waited is checked against the window as it is when it plays.
   const seen = useRef<Seen | undefined>(undefined);
-  const latest = useRef({ page, safe, play, inApp, notify, agents, attention });
-  latest.current = { page, safe, play, inApp, notify, agents, attention };
+  const latest = useRef({ page, safe, play, inApp: app, notify, agents, attention });
+  latest.current = { page, safe, play, inApp: app, notify, agents, attention };
   const where = (): SoundPresence => ({ ...latest.current.page(), viewing: onScreen.get().focused });
   const stillAudible = (ev: SoundEvent): boolean => {
     if (!audible(ev, soundPrefs.get(), soundPrefs.muted(), where(), latest.current.safe)) return false;

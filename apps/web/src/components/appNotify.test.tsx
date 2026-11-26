@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { AgentTileModel, UiState } from '../model';
-import { NOTIFY_GAP_MS, desktopNotifyPrefs, type ShellEvent } from '../net/desktopNotify';
+import { NOTIFY_GAP_MS, appNotify, desktopNotifyPrefs, type ShellEvent } from '../net/desktopNotify';
 import { attentionList } from '../net/fleet';
 import { finishedMarks } from '../net/finished';
 import { onScreen } from '../net/onScreen';
@@ -40,6 +40,7 @@ beforeEach(() => {
   localStorage.clear();
   soundPrefs.reset();
   desktopNotifyPrefs.reset();
+  appNotify.reset();
   finishedMarks.set([]);
   asked.length = 0;
   page = { visible: false, focused: false };
@@ -120,17 +121,44 @@ describe('the app is asked for a notification', () => {
     expect(asked).toHaveLength(2);
   });
 
-  it('through the app\'s own command by default', () => {
+  it('through the app\'s own command by default, once the app said it has it', async () => {
     desktopNotifyPrefs.set({ on: true });
-    const invoke = vi.fn(() => Promise.resolve());
+    const invoke = vi.fn((..._: unknown[]) => Promise.resolve());
     const w = window as unknown as { isTauri?: boolean; __TAURI_INTERNALS__?: unknown };
     w.isTauri = true;
     w.__TAURI_INTERNALS__ = { invoke };
     try {
       const go = (agents: AgentTileModel[]) => act(() => root.render(<AgentAlerts agents={agents} attention={attentionList([], agents)} ready safe={false} page={() => page} play={() => {}} />));
       go([agent('a', 'working')]);
+      // The page asks the app once, with no event.
+      expect(invoke).toHaveBeenCalledWith('notify_agents', { events: [] });
+      await act(async () => { await Promise.resolve(); });
       go([agent('a', 'idle')]);
-      expect(invoke).toHaveBeenCalledWith('notify_agents', { events: [{ kind: 'finished', agent: 'a', name: 'claude · a' }] });
+      expect(invoke).toHaveBeenLastCalledWith('notify_agents', { events: [{ kind: 'finished', agent: 'a', name: 'claude · a' }] });
+      expect(invoke).toHaveBeenCalledTimes(2);
+    } finally {
+      delete w.isTauri;
+      delete w.__TAURI_INTERNALS__;
+    }
+  });
+
+  it('never from an app built before App notifications (it refuses the command), which keeps the browser\'s', async () => {
+    desktopNotifyPrefs.set({ on: true });
+    const invoke = vi.fn((..._: unknown[]) => Promise.reject(new Error('Command notify_agents not allowed by ACL')));
+    const w = window as unknown as { isTauri?: boolean; __TAURI_INTERNALS__?: unknown };
+    w.isTauri = true;
+    w.__TAURI_INTERNALS__ = { invoke };
+    try {
+      const go = (agents: AgentTileModel[]) => act(() => root.render(<>
+        <AgentAlerts agents={agents} attention={attentionList([], agents)} ready safe={false} page={() => page} play={() => {}} />
+        <AttentionSettings />
+      </>));
+      go([agent('a', 'working')]);
+      await act(async () => { await Promise.resolve(); });
+      go([agent('a', 'idle')]);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(appNotify.supported()).toBe(false);
+      expect(host.textContent).not.toContain('In the app, use App notifications below.');
     } finally {
       delete w.isTauri;
       delete w.__TAURI_INTERNALS__;

@@ -1,7 +1,7 @@
 // The desktop app's own notifications (ADR-0048 decision 5 and Amendment A; docs/ux/main-window.md, "Sounds"), pure: this device's
 // choice, the rules that decide whether the window asks the app for one, and the small typed bridge to the app.
 //
-// Only inside the desktop app (apps/desktop), whose shell gives the hub's page one command, `notify_agents`, and nothing else. The page
+// Only inside a desktop app (apps/desktop) whose shell gives the hub's page the command `notify_agents` (and nothing else; `appNotify`). The page
 // sends what happened (an agent finished, or needs you), the agent's id and its name made plain; the app writes the words itself from
 // fixed phrases, checks everything again, limits the rate and opens the agent when the notification is clicked
 // (apps/desktop/src-tauri/src/notify.rs). A plugin's frame is an opaque origin and has no way to the app.
@@ -97,8 +97,31 @@ const shellInvoke = (w: unknown): Invoke | undefined => {
   return s.isTauri === true && typeof invoke === 'function' ? (invoke as Invoke) : undefined;
 };
 
-/** This page runs inside the desktop app. */
+/** This page runs inside the desktop app (any version). */
 export const inDesktopApp = (w: unknown = typeof window !== 'undefined' ? window : undefined): boolean => shellInvoke(w) !== undefined;
+
+// Whether this app has the command: an app built before it refuses it (a newer hub serves this page to every app), so the page asks
+// once, with no event, and offers App notifications (and leaves the browser's own notifications aside) only when the app took it.
+type Support = 'unknown' | 'asking' | 'yes' | 'no';
+let support: Support = 'unknown';
+const supportListeners = new Set<() => void>();
+const setSupport = (s: Support) => { support = s; supportListeners.forEach((l) => l()); };
+export const appNotify = {
+  /** The app takes the command (known once `probe` has its answer). */
+  supported: (): boolean => support === 'yes',
+  probe(w: unknown = typeof window !== 'undefined' ? window : undefined) {
+    if (support !== 'unknown') return;
+    const invoke = shellInvoke(w);
+    if (!invoke) { setSupport('no'); return; }
+    setSupport('asking');
+    try {
+      Promise.resolve(invoke('notify_agents', { events: [] })).then(() => setSupport('yes'), () => setSupport('no'));
+    } catch { setSupport('no'); }
+  },
+  subscribe(l: () => void) { supportListeners.add(l); return () => { supportListeners.delete(l); }; },
+  // For tests: as if the page had just loaded.
+  reset() { setSupport('unknown'); },
+};
 
 /** Asks the app for one notification of these events; nothing when not in the app or nothing to say, and an error is ignored. */
 export function sendToApp(events: readonly ShellEvent[], w: unknown = typeof window !== 'undefined' ? window : undefined): boolean {

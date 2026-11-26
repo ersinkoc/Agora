@@ -1,7 +1,7 @@
 import { AttentionSettings } from './components/AttentionSettings';
 import { SoundSettings } from './components/SoundSettings';
 import { AppNotifySettings } from './components/AppNotifySettings';
-import { inDesktopApp } from './net/desktopNotify';
+import { useAppNotify } from './components/useAppNotify';
 import { KeyboardSettings } from './keys/KeyboardSettings';
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
@@ -404,7 +404,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
   const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
   const canVouch = (trustedOn?.length ?? 0) > 0;
-  const inApp = inDesktopApp(); // the desktop app's own notifications have a card there only
+  const inApp = useAppNotify(); // the desktop app's own notifications have a card there only
   const sections: { group: string; items: { id: string; label: string; icon: IconName; show: boolean; count?: number }[] }[] = [
     { group: 'settings-group-device', items: [
       { id: 'device', label: 'settings-device', icon: 'monitor', show: !!device },
