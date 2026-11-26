@@ -229,6 +229,21 @@ pub fn file_url(index: &Url, file: &str) -> Option<Url> {
     })
 }
 
+/// Text from the network as a terminal may print it: every control character (escape, line break and tab included) and every
+/// character that is invisible or turns text around ([`agora_core::text::HIDDEN`]) written as a visible `\u{…}`, so a catalog can
+/// neither run terminal sequences (a clipboard write, a cleared screen) nor make a line read other than it is (#1225 review F2).
+pub fn printable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() || agora_core::text::is_hidden(c) {
+            out.push_str(&format!("\\u{{{:x}}}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn plain_text(s: &str, max: usize) -> bool {
     !s.trim().is_empty()
         && s.chars().count() <= max
@@ -270,7 +285,9 @@ fn read_entry<P>(v: &Value) -> Result<Entry, Refusal<P>> {
         return Err(Refusal::Entry("entry"));
     };
     if let Some(k) = o.keys().find(|k| !ENTRY_FIELDS.contains(&k.as_str())) {
-        return Err(Refusal::UnknownField(k.chars().take(MAX_ID).collect()));
+        return Err(Refusal::UnknownField(printable(
+            &k.chars().take(MAX_ID).collect::<String>(),
+        )));
     }
     let text = |k: &'static str, ok: &dyn Fn(&str) -> bool| -> Result<String, Refusal<P>> {
         o.get(k)
@@ -324,7 +341,9 @@ pub fn read_index<P>(text: &str) -> Result<(Vec<Entry>, Vec<(String, Refusal<P>)
         return Err(IndexError::Newer);
     }
     if let Some(k) = o.keys().find(|k| *k != INDEX_FORMAT_KEY && *k != "themes") {
-        return Err(IndexError::UnknownField(k.chars().take(MAX_ID).collect()));
+        return Err(IndexError::UnknownField(printable(
+            &k.chars().take(MAX_ID).collect::<String>(),
+        )));
     }
     let list = o
         .get("themes")
@@ -364,7 +383,7 @@ pub fn fetch<P>(
     check: impl Fn(&str) -> Result<(), P>,
 ) -> Result<Fetched<P>, UpdateError> {
     let deadline = Instant::now() + limits.deadline;
-    let (status, body) = get_within(url, MAX_INDEX_BYTES, limits.step, Some(deadline))
+    let (status, body) = get_within(url, MAX_INDEX_BYTES, limits.step, deadline)
         .map_err(|e| UpdateError::Index(io_error(&e)))?;
     if status != 200 {
         return Err(UpdateError::Index(IndexError::Status(status)));
@@ -378,8 +397,16 @@ pub fn fetch<P>(
             refused.push((entry.id, Refusal::Entry("file")));
             continue;
         };
-        let body = match get_within(&at, MAX_THEME_BYTES, limits.step, Some(deadline)) {
+        let body = match get_within(&at, MAX_THEME_BYTES, limits.step, deadline) {
             Ok((200, body)) => body,
+            // The server is busy or failing, not the theme wrong: the update stops with nothing changed, so a theme that is fine is
+            // never dropped from the catalog for it (#1225 review F3).
+            Ok((status, _)) if status == 429 || status >= 500 => {
+                return Err(UpdateError::Theme {
+                    id: entry.id,
+                    error: IndexError::Status(status),
+                })
+            }
             Ok((status, _)) => {
                 refused.push((entry.id, Refusal::Status(status)));
                 continue;
@@ -423,8 +450,13 @@ pub fn fetch<P>(
     Ok(Fetched { accepted, refused })
 }
 
-/// Replaces the stored catalog with `accepted`, and says when, in one transaction.
-pub fn save(store: &SqliteStore, accepted: &[Accepted], now_ms: u64) -> Result<(), StoreError> {
+/// Replaces the stored catalog with `accepted`, says when and, with `url`, remembers the address it came from, in one transaction.
+pub fn save(
+    store: &SqliteStore,
+    accepted: &[Accepted],
+    url: Option<&str>,
+    now_ms: u64,
+) -> Result<(), StoreError> {
     let mut conn = store.lock()?;
     let tx = crate::store::write_tx(&mut conn)?;
     tx.execute("DELETE FROM theme_catalog", [])?;
@@ -439,6 +471,12 @@ pub fn save(store: &SqliteStore, accepted: &[Accepted], now_ms: u64) -> Result<(
         "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![UPDATED_SETTING, now_ms.to_string().into_bytes()],
     )?;
+    if let Some(url) = url {
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![URL_SETTING, url.as_bytes()],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -457,8 +495,7 @@ pub fn update<P>(
         .ok_or(UpdateError::Index(IndexError::Address))
         .and_then(|u| fetch(&u, limits, check))
         .and_then(|f| {
-            save(store, &f.accepted, now_ms)?;
-            store.set_setting(URL_SETTING, url.as_bytes())?;
+            save(store, &f.accepted, Some(url), now_ms)?;
             Ok(f)
         });
     let outcome = match &result {
@@ -633,6 +670,16 @@ mod tests {
     }
 
     #[test]
+    fn printable_text_shows_every_control_and_hidden_character() {
+        assert_eq!(printable("ok · Ünï"), "ok · Ünï");
+        assert_eq!(
+            printable("\u{1b}]52;c;x\u{7}\u{1b}[2J\u{202e}\n\t\u{2066}"),
+            r"\u{1b}]52;c;x\u{7}\u{1b}[2J\u{202e}\u{a}\u{9}\u{2066}"
+        );
+        assert_eq!(printable(&printable("\u{1b}")), printable("\u{1b}"));
+    }
+
+    #[test]
     fn only_https_or_this_machine_and_never_the_placeholder() {
         assert!(index_url("https://h.example/i.json").is_some());
         assert!(index_url("http://127.0.0.1:9/i.json").is_some());
@@ -714,7 +761,7 @@ mod tests {
     #[test]
     fn the_list_and_a_theme_are_given_only_while_the_catalog_is_on() {
         let store = SqliteStore::open_in_memory().unwrap();
-        save(&store, &[accepted("b", 1), accepted("a", 3)], 42).unwrap();
+        save(&store, &[accepted("b", 1), accepted("a", 3)], None, 42).unwrap();
         assert_eq!(list(&store).unwrap(), v1::ThemeCatalogListResult::default());
         assert_eq!(
             get(&store, "a").unwrap_err().code,
@@ -741,7 +788,7 @@ mod tests {
             Some(&agora_protocol::ParamValue::Str("zz".into()))
         );
         // An update replaces the whole catalog.
-        save(&store, &[accepted("c", 1)], 60).unwrap();
+        save(&store, &[accepted("c", 1)], None, 60).unwrap();
         assert_eq!(list(&store).unwrap().entries.len(), 1);
         assert_eq!(get(&store, "a").unwrap_err().code, ErrorCode::ThemeNotFound);
         set_on(&store, false, 70).unwrap();
