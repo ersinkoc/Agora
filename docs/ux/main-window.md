@@ -201,6 +201,22 @@ sign: everything it says is on screen too.
   only: a reload is a new look at everything. Screens: `docs/ux/screens/finished-mark-{dark,light}.png`,
   `docs/ux/screens/sounds-settings-{dark,light}.png`. Tests: `net/sounds.test.ts`, `net/finished.test.ts`,
   `components/agentAlerts.test.tsx`.
+- **In the desktop app** (M6.7; ADR-0048 Amendment A, **Proposed**): **App notifications**, a card in Settings shown only inside
+  the app (`#/device/app-notifications`), **off until the person turns them on** and kept in the app's page storage. It has one switch
+  for when an agent finishes and one for when an agent needs you. It uses the same events and the same rules as the sounds
+  (`net/desktopNotify.ts`):
+  - never in safe mode;
+  - only while the window is hidden or not focused. A notification while the person is looking at the window says nothing they cannot
+    see, so there is no "also while in front", and the agent in the focused pane is notified only while the window is out of focus;
+  - one request to the app every 2 s at most, what came meanwhile going with it, each agent once per change of its state.
+
+  The page sends the app only the kind, the agent's id and its name when it is plain (the Needs you card's rule). The app writes the
+  words itself ("claude · amber finished.", "An agent needs you.", "3 agents finished.") and holds to the same rules again. It brings
+  the window forward and opens the agent when the notification is clicked (`apps/desktop/README.md` says what each system does). The
+  app's own count of approvals waiting stays always on. Inside the app, the Needs you card's browser-notification switch is off and
+  points to App notifications. Muting an agent's sounds does not mute its notifications.
+  Screens: `docs/ux/screens/app-notifications-{dark,light}.png`, `docs/ux/screens/app-notifications-needs-you-{dark,light}.png`.
+  Tests: `net/desktopNotify.test.ts`, `components/appNotify.test.tsx`; the app's side in `apps/desktop/src-tauri/src/notify.rs`.
 - **In the terminal client** (`agora tui`, M6.7): the same two signs from the same rules (`crates/agora-tui/src/alerts.rs`, ported from
   `net/finished.ts` and `net/sounds.ts`): an agent *finishes* when it goes from working to idle or finished and ended cleanly; it *needs
   you* when it comes onto the Needs you list (a request waiting, or blocked in its terminal on a machine that is online, as the list's

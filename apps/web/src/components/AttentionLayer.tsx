@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { t } from '../i18n';
 import { type AttentionMode, attentionPrefs, isTypingTarget, mayInterrupt, modalKind, notifyDelay, notifyText, shorten, shownKey, WHO_MAX, whoOf, type NotifyMode, type Presence } from '../net/attention';
+import { inDesktopApp } from '../net/desktopNotify';
 import { titleWithCount } from '../net/alert';
 import { type AttentionItem, askLine } from '../net/fleet';
 import { approvalName } from '../net/approvalText';
@@ -171,7 +172,8 @@ export function AttentionLayer({ items, stale = false, phone = false, onResolve,
   );
 }
 
-const canNotify = () => typeof Notification !== 'undefined' && Notification.permission === 'granted';
+// Not inside the desktop app: its notifications are its own (net/desktopNotify.ts), and the page has no permission for the browser's.
+const canNotify = () => !inDesktopApp() && typeof Notification !== 'undefined' && Notification.permission === 'granted';
 
 // Generic by default; the names only when asked for. Never the request: see `notifyText`.
 function show(items: readonly AttentionItem[], how: NotifyMode, onClick: () => void) {

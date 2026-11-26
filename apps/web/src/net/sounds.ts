@@ -106,7 +106,7 @@ export const SOUND_GAP_MS = 1000;
 // What waits for the end of the gap, bounded for each kind (only the most urgent of it plays): many "finished" never push a "needs you"
 // out (audit F1803).
 const PENDING_MAX = 32;
-const bounded = (evs: readonly SoundEvent[]): SoundEvent[] => {
+export const bounded = (evs: readonly SoundEvent[]): SoundEvent[] => {
   const keep = new Set(SOUND_KINDS.flatMap((k) => evs.filter((e) => e.kind === k).slice(-PENDING_MAX)));
   return evs.filter((e) => keep.has(e));
 };

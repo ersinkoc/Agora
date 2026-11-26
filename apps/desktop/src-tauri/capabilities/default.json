@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The shell's own screens only. The hub's page is a remote origin and is granted nothing: no commands, no file system, no shell (ADR-0048 decision 2).",
+  "description": "The shell's own screens only (local, never a remote page): its connect screen's commands. The hub's page is a remote origin and gets none of these (ADR-0048 decision 2); what it may call is in hub-page.json.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "local": true,
+  "permissions": [
+    "core:default",
+    "allow-ca-fingerprint",
+    "allow-saved",
+    "allow-connect",
+    "allow-forget",
+    "allow-use-locale"
+  ]
 }

@@ -1,5 +1,7 @@
 import { AttentionSettings } from './components/AttentionSettings';
 import { SoundSettings } from './components/SoundSettings';
+import { AppNotifySettings } from './components/AppNotifySettings';
+import { inDesktopApp } from './net/desktopNotify';
 import { KeyboardSettings } from './keys/KeyboardSettings';
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
@@ -402,6 +404,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   const name = (id: string) => machines?.find((m) => m.id === id)?.name ?? id;
   const missing = (machines ?? []).filter((m) => !trustedOn?.includes(m.id));
   const canVouch = (trustedOn?.length ?? 0) > 0;
+  const inApp = inDesktopApp(); // the desktop app's own notifications have a card there only
   const sections: { group: string; items: { id: string; label: string; icon: IconName; show: boolean; count?: number }[] }[] = [
     { group: 'settings-group-device', items: [
       { id: 'device', label: 'settings-device', icon: 'monitor', show: !!device },
@@ -409,6 +412,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
       { id: 'keyboard', label: 'keys-title', icon: 'keyboard', show: true },
       { id: 'notifications', label: 'attention-settings-title', icon: 'bell', show: true },
       { id: 'sounds', label: 'sounds-title', icon: 'volume', show: true },
+      { id: 'app-notifications', label: 'app-notify-title', icon: 'bell', show: inApp },
       { id: 'passkeys', label: 'settings-passkeys', icon: 'key', show: !!onAddPasskey },
       { id: 'lock', label: 'password-title', icon: 'lock', show: !!security },
       { id: 'devices', label: 'device-others', icon: 'globe', show: !!others && others.length > 0, count: others?.filter((d) => !d.removed).length },
@@ -499,6 +503,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
             <KeyboardSettings />
             <div {...anchor('notifications')}><AttentionSettings /></div>
             <SoundSettings />
+            {inApp && <AppNotifySettings />}
             {onAddPasskey && (
               <SettingsCard id="passkeys" icon="key" title={t('settings-passkeys')} description={t('device-passkey-intro')} end={passkeyNeedsPassword ? undefined : addButton}>
                 {passkeyNeedsPassword && (

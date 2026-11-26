@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hub-page",
+  "description": "The hub's page, loaded through the loopback tunnel (http://127.0.0.1:<port>/), may ask for one thing: a notification that an agent finished or needs you (ADR-0048 Amendment A). The shell builds the words itself from a fixed phrase and a checked name, keeps the agent's id, limits the rate and refuses in safe mode; the command also checks that the page is the current tunnel's. No file system, no shell, no other command, no plugin's command. A plugin's frame is an opaque origin and cannot reach it.",
+  "windows": ["main"],
+  "local": false,
+  "remote": { "urls": ["http://127.0.0.1:*"] },
+  "permissions": ["allow-notify-agents"]
+}
