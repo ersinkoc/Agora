@@ -40,7 +40,9 @@ export function ThemeEditor() {
     <label className="grid min-w-0 gap-1">
       <span className="text-xs text-muted">{t(`theme-for-${s}`)}</span>
       <select value={state.choice[s]} onChange={(e) => { themeStore.choose(e.target.value); setProblems([]); }}>
-        {themes.filter((x) => hasScheme(x, s)).map((x) => <option key={x.id} value={x.id}>{themeName(x)}</option>)}
+        {themeGroups(themes.filter((x) => hasScheme(x, s))).map((g) => (
+          <optgroup key={g.key} label={t(g.key)}>{g.themes.map((x) => <option key={x.id} value={x.id}>{themeName(x)}</option>)}</optgroup>
+        ))}
       </select>
     </label>
   );
@@ -77,6 +79,15 @@ export function ThemeEditor() {
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
     </section>
   );
+}
+
+// The theme choices, grouped as the picker shows them: built-in, starter (starter.ts) and the person's own; a group with none is left out.
+export function themeGroups(themes: readonly Theme[]): { key: string; themes: Theme[] }[] {
+  return [
+    { key: 'theme-group-built-in', themes: themes.filter((x) => x.builtIn && !x.starter) },
+    { key: 'theme-group-starter', themes: themes.filter((x) => x.starter) },
+    { key: 'theme-group-yours', themes: themes.filter((x) => !x.builtIn) },
+  ].filter((g) => g.themes.length > 0);
 }
 
 // What the fields hold while they are edited: text as typed (a colour left empty follows the theme), lists as chosen.
@@ -164,12 +175,12 @@ function ThemeFields({ theme, scheme, onSaved }: { theme: Theme; scheme: Scheme;
   return (
     <div className="grid gap-4">
       <div className="flex flex-wrap items-end gap-2">
-        {ro ? <p className="m-0 min-w-0 flex-1 text-sm"><span className="font-semibold">{themeName(theme)}</span> <span className="muted whitespace-nowrap">· {t('theme-built-in')}</span></p>
+        {ro ? <p className="m-0 min-w-0 flex-1 text-sm"><span className="font-semibold">{themeName(theme)}</span> <span className="muted whitespace-nowrap">· {t(theme.starter ? 'theme-starter' : 'theme-built-in')}</span></p>
           : <label className="grid min-w-0 flex-1 gap-1"><span className="text-xs text-muted">{t('theme-name')}</span>
             <input value={draft.name} maxLength={MAX_NAME} onChange={(e) => change({ ...draft, name: e.target.value })} aria-invalid={draft.name.trim().length === 0} /></label>}
         {ro && <button type="button" className="button button--primary" onClick={() => onSaved(themeStore.copy(theme, t('theme-copy-name', { name: themeName(theme) })))}>{t('theme-customize')}</button>}
       </div>
-      {ro && <p className="muted m-0 text-xs">{t('theme-built-in-hint')}</p>}
+      {ro && <p className="muted m-0 text-xs">{theme.starter ? t('theme-starter-hint', { ...theme.starter }) : t('theme-built-in-hint')}</p>}
 
       <Preview look={look} scheme={scheme} />
 

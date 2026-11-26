@@ -67,6 +67,8 @@ export interface Theme {
   scheme: Scheme;
   tokens: Tokens;
   builtIn?: boolean;
+  // A starter theme (starter.ts): read-only like a built-in one, listed in its own group, with where its colours come from.
+  starter?: { project: string; licence: string };
   // Format 2 (ADR-0113): a look per scheme the theme has, and its chrome and text. A theme without them is a format-1 theme of
   // `scheme`: one look, today's chrome and text (`looksOf`, `chromeOf`, `textOf`).
   looks?: Looks;

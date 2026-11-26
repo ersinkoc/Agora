@@ -415,6 +415,7 @@ tui-theme-scheme-light = light
 tui-theme-with-scheme = { $name } · { $scheme }
 tui-theme-refused-row = { $file } · can't be used
 tui-theme-in-file = File: { $file }
+tui-theme-starter = A starter theme: the colours of { $project }, ported ({ $licence } licence).
 tui-theme-shows = Shown in its { $scheme } colours.
 tui-theme-unused = Not used in the terminal client: { $list }.
 tui-theme-unused-sizes = text size, spacing and corners

@@ -276,6 +276,55 @@ on its own background), and refusing would drop such a stored theme on the next 
 
 Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.css` and every built-in theme readable.
 
+## Starter themes
+
+![The theme picker with its Starter themes group (Dark theme list, dark)](../screenshots/starter-themes-picker-dark.png)
+![The same in light: only Gruvbox has light colours](../screenshots/starter-themes-picker-light.png)
+![Gruvbox on the window, dark](../screenshots/starter-theme-gruvbox-dark.png)
+![Gruvbox, light, from the same file](../screenshots/starter-theme-gruvbox-light.png)
+![Catppuccin Mocha](../screenshots/starter-theme-catppuccin-mocha-dark.png)
+![Tokyo Night](../screenshots/starter-theme-tokyo-night-dark.png)
+
+Well-known palettes, ported (roadmap M5.2). Each is an ordinary format-2 file in `apps/web/src/themes/starter/` (no other field, no
+`inherits`), read by the same function as an imported file (`themes/starter.ts`), so the floor and every readability rule hold as
+for any theme; a test asks each file for **no problem and no warning** in the web window's reader and in the terminal client's. They
+are listed in the picker under **Starter themes** and in the command palette (**Theme: ⟨name⟩**), read-only like a built-in theme
+(**Customize** makes a copy), and named after their palette. The editor says where the colours come from and under which licence.
+
+| Theme | Schemes | Colours from (licence) |
+| --- | --- | --- |
+| **Catppuccin Mocha** | dark | `catppuccin/palette` (MIT) |
+| **Dracula** | dark | `dracula/dracula-theme`'s palette, its terminal colours from `dracula/alacritty` (MIT) |
+| **Gruvbox** | dark, light | `morhetz/gruvbox` (MIT/X11; `gruvbox-community/gruvbox`'s LICENSE, MIT) |
+| **Rosé Pine** | dark (main) | `rose-pine/rose-pine-palette` (MIT) |
+| **Tokyo Night** | dark (Night) | `folke/tokyonight.nvim`, its generated `extras/lua/tokyonight_night.lua` (Apache-2.0) |
+
+How a palette becomes a theme (the same for each):
+
+- **Only the palette's published colour values** (hex) are used, never a theme file of the project, and no colour is mixed, lightened
+  or made up. The notices are in `THIRD_PARTY.md`.
+- **Each slot takes the palette's own colour for it**: the background, panels and raised surfaces from its background shades, text
+  and secondary text from its text shades, the accent and the five states from its accents (working blue, needs you yellow or
+  orange, finished green), the terminal's 16 colours from the project's own terminal colours, code colours from its syntax roles.
+- **When that colour does not pass a rule, the next colour of the same palette that does is used** (for example a lighter grey for
+  "bright black", the text colour for secondary text on Rosé Pine, Dracula's darker `#21222c` for the panels). When none does, the
+  slot is left out of the file and Agora's own colour stands in, as for any theme: Tokyo Night's and Dracula's comment colour in code,
+  Gruvbox light's "finished" and four of its code colours.
+- **A variant whose own colours cannot be made readable this way is left out**, rather than bending a rule:
+  - **Catppuccin Latte**: its accents and states are below the minimum on its own backgrounds (green 2.9:1, yellow 2.3:1, blue 4.3:1
+    on Base), so the states and most terminal colours would all be Agora's.
+  - **Tokyo Night Day**: its text is 4.5:1 only on its main background (3.9:1 on its sidebar colour), and no secondary text or
+    accent of the palette reaches 4.5:1 on its surfaces.
+  - **Nord**: the fixed red is below 4.5:1 on every Nord background but its darkest (3.6:1 on Polar Night 1), and with every
+    surface its darkest the red on its error background is 3.6:1 and Frost blue as "working" on its own background 3.7:1.
+  - **Rosé Pine Dawn**: its secondary text (Subtle, 4.0:1) and three of the five state colours (Gold 2.0:1, Foam 3.1:1, Love 3.8:1)
+    are below the minimum on its base.
+  - **Solarized**: light: no accent reaches 4.5:1 on Base3 (orange 4.2:1 at best) and its body text is 4.1:1; dark: the fixed red on
+    its error background is 4.4:1 even on Base03, its darkest.
+
+`scripts/screenshots-starter-themes.mjs` takes the shots above from the demo window (the picker's list is shown in the page by giving
+the select a size for the shot: a browser cannot capture the list the system draws).
+
 ## Choosing (per person, in this browser)
 
 - The title bar's three buttons are unchanged: **Follow the system**, **Dark**, **Light**.
@@ -283,6 +332,7 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
   by itself (Sand by day, Slate by night); Dark or Light shows that scheme's theme. Choosing a theme of the other scheme while
   one is forced moves to that scheme, so the choice shows. A format-2 theme with both schemes is listed under both, and choosing
   or importing it makes it the theme of both.
+- The editor's two lists group the themes as **Built-in**, **Starter themes** and **Your themes**.
 - The command palette (Ctrl K) lists **Theme: ⟨name⟩** for every theme, and **Edit theme**.
 - Stored in this browser's `localStorage`: `agora.theme` (the scheme, as before this rung), `agora.theme.choice.v1` (the two
   themes) and `agora.themes.v1` (the person's own themes, at most 20). Storage that is missing, full or blocked costs only the
@@ -345,9 +395,11 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 These are drawn by the client into ratatui's test screen and shown in a browser (the terminal's own colours as #1c1c1c and
 #d0d0d0), so the cells are exactly what the client writes.
 
-- **Where themes come from.** The six built-in themes above, and every `*.json` file directly in the **themes folder**:
+- **Where themes come from.** The six built-in themes above, the [starter themes](#starter-themes) (the same files, compiled in,
+  `crates/agora-tui/src/theme/starter.rs`; a row per scheme, and the list says where the colours come from), and every `*.json` file
+  directly in the **themes folder**:
   `themes` in the Agora folder, so `~/.agora/themes` (or `$AGORA_HOME/themes`), beside the client's device key. The theme in use
-  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>` or `file <dark|light> <file name>`). The first entry,
+  is kept in `tui-theme` there (one line: `terminal`, `built-in <id>`, `starter <dark|light> <id>` or `file <dark|light> <file name>`). The first entry,
   **Your terminal's colours**, is no theme: the client draws exactly as it did before themes (the default).
 - **Choosing.** `t` in the agents list, or **Theme…** in the commands (Ctrl K), opens the theme list: whole-screen, drawn in the
   theme the keyboard is on, so a theme shows before it is chosen. Enter uses it at once and keeps it for the next start; q or Esc

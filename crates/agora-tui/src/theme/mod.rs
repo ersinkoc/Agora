@@ -11,6 +11,7 @@ pub mod file;
 pub mod folder;
 pub mod list;
 pub mod map;
+pub mod starter;
 
 pub use colour::Rgb;
 
@@ -653,6 +654,22 @@ pub fn built_ins() -> Vec<BuiltIn> {
             soft("16px"),
         ),
     ]
+}
+
+/// Every theme and scheme the tests hold to the floor and to a readable mapping: each built-in theme, and each scheme of each starter
+/// theme, with its id.
+#[cfg(test)]
+pub fn every_look() -> Vec<(String, Theme, Scheme)> {
+    let mut out: Vec<(String, Theme, Scheme)> = built_ins()
+        .into_iter()
+        .map(|b| (b.id.to_string(), b.theme, b.scheme))
+        .collect();
+    for s in starter::starters() {
+        for scheme in s.theme.schemes() {
+            out.push((format!("starter-{}", s.id), s.theme.clone(), scheme));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

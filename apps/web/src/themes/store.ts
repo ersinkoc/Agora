@@ -5,6 +5,7 @@
 // so "follow the system" can switch between, say, Sand by day and Slate by night. Another tab's change applies here at once.
 import { type ThemeData, cloneLooks, deserialise, readTheme, writeTheme } from './file';
 import { SAFE } from '../plugins/safe';
+import { STARTER } from './starter';
 import {
   BUILT_IN, COLOR_TOKENS, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
   applyTheme, chromeOf, hasScheme, looksOf, schemesOf, textOf,
@@ -47,7 +48,7 @@ export function loadState(kv: KV | undefined): ThemeState {
     }
   }
   const c = json(read(kv, CHOICE_KEY)) as Partial<Record<Scheme, unknown>> | undefined;
-  const all = [...BUILT_IN, ...user];
+  const all = [...BUILT_IN, ...STARTER, ...user];
   const pick = (s: Scheme) => {
     const id = c && typeof c === 'object' ? c[s] : undefined;
     return all.some((t) => t.id === id && hasScheme(t, s)) ? (id as string) : DEFAULT_THEME[s];
@@ -66,7 +67,7 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
   let state = loadState(env.kv);
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((l) => l());
-  const all = () => [...BUILT_IN, ...state.user];
+  const all = () => [...BUILT_IN, ...STARTER, ...state.user];
   const byId = (id: string) => all().find((t) => t.id === id);
   const scheme = (): Scheme => (state.mode !== 'system' ? state.mode : env.prefersLight?.() ? 'light' : 'dark');
   const active = (): Theme => byId(state.choice[scheme()]) ?? (BUILT_IN.find((t) => t.id === DEFAULT_THEME[scheme()]) as Theme);

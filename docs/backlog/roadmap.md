@@ -146,7 +146,9 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 
 - [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2, in
   the editor and as `agora theme import`; **decision**: which formats first
-- [ ] **M5.2 Starter themes**: well-known palettes ported after a licence check (**decision**: which ones)
+- [x] **M5.2 Starter themes**: well-known palettes ported after a licence check: Catppuccin Mocha, Dracula, Gruvbox (dark and light),
+  Rosé Pine and Tokyo Night, in both clients ([themes](../ux/themes.md#starter-themes)); Catppuccin Latte, Tokyo Night Day, Nord,
+  Rosé Pine Dawn and Solarized were left out because their own colours do not reach the readability rules
 - [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the
   wrong machine
 - [ ] **M5.4 Plugins can act** (ADR-0114 amendments, **decision** on the order; each one its own amendment, then built)

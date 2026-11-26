@@ -1,4 +1,4 @@
-//! Where the terminal client's themes come from: the built-in themes, and theme files in its themes folder (`themes` in the Agora
+//! Where the terminal client's themes come from: the built-in themes, the starter themes ([`starter`](super::starter)), and theme files in its themes folder (`themes` in the Agora
 //! folder: `$AGORA_HOME/themes`, else `~/.agora/themes`, beside the client's device key), and the one it uses, kept in
 //! `tui-theme` there. The caller passes both paths, so tests never touch the real folder.
 //!
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::file::{read_text, Issue, Read, MAX_FILE_BYTES};
+use super::starter::{starter, starters, Starter, FILES};
 use super::{built_ins, Scheme, Theme};
 
 /// The themes folder's name in the Agora folder.
@@ -27,13 +28,15 @@ pub enum Choice {
     Terminal,
     /// A built-in theme, by id.
     BuiltIn(String),
+    /// One scheme of a starter theme, by id.
+    Starter { id: String, scheme: Scheme },
     /// One scheme of a theme file in the folder, by file name.
     File { name: String, scheme: Scheme },
 }
 
 impl Choice {
-    /// The choice kept in [`CHOICE_FILE`]: one line, `terminal`, `built-in <id>` or `file <dark|light> <file name>`. Anything else is
-    /// no theme.
+    /// The choice kept in [`CHOICE_FILE`]: one line, `terminal`, `built-in <id>`, `starter <dark|light> <id>` or
+    /// `file <dark|light> <file name>`. Anything else is no theme.
     pub fn parse(text: &str) -> Choice {
         let line = text.lines().next().unwrap_or("").trim();
         if let Some(id) = line.strip_prefix("built-in ") {
@@ -41,12 +44,16 @@ impl Choice {
                 return Choice::BuiltIn(id.to_string());
             }
         }
+        if let Some((scheme, id)) = line.strip_prefix("starter ").and_then(scheme_and) {
+            if FILES.iter().any(|f| f.id == id) {
+                return Choice::Starter {
+                    id: id.to_string(),
+                    scheme,
+                };
+            }
+        }
         if let Some(rest) = line.strip_prefix("file ") {
-            let scheme = match rest.split_once(' ') {
-                Some(("dark", name)) => Some((Scheme::Dark, name)),
-                Some(("light", name)) => Some((Scheme::Light, name)),
-                _ => None,
-            };
+            let scheme = scheme_and(rest);
             if let Some((scheme, name)) = scheme.filter(|(_, n)| is_theme_file_name(n)) {
                 return Choice::File {
                     name: name.to_string(),
@@ -61,8 +68,18 @@ impl Choice {
         match self {
             Choice::Terminal => "terminal\n".to_string(),
             Choice::BuiltIn(id) => format!("built-in {id}\n"),
+            Choice::Starter { id, scheme } => format!("starter {} {id}\n", scheme.word()),
             Choice::File { name, scheme } => format!("file {} {name}\n", scheme.word()),
         }
+    }
+}
+
+/// `dark <rest>` or `light <rest>`: the scheme and the rest.
+fn scheme_and(rest: &str) -> Option<(Scheme, &str)> {
+    match rest.split_once(' ') {
+        Some(("dark", r)) => Some((Scheme::Dark, r)),
+        Some(("light", r)) => Some((Scheme::Light, r)),
+        _ => None,
     }
 }
 
@@ -109,7 +126,12 @@ pub fn stamp(path: &Path) -> Stamp {
 pub enum Source {
     Terminal,
     BuiltIn(&'static str),
-    File { name: String, read: Read },
+    /// A starter theme, read when the list was made.
+    Starter(Box<Starter>),
+    File {
+        name: String,
+        read: Read,
+    },
 }
 
 /// One row of the theme list: a theme and the scheme it is shown in (a file with both schemes is two rows), or a file that cannot
@@ -126,6 +148,10 @@ impl Entry {
         match &self.source {
             Source::Terminal => Some(Choice::Terminal),
             Source::BuiltIn(id) => Some(Choice::BuiltIn((*id).to_string())),
+            Source::Starter(s) => Some(Choice::Starter {
+                id: s.id.to_string(),
+                scheme: self.scheme,
+            }),
             Source::File {
                 name,
                 read: Read::Ok { .. },
@@ -145,6 +171,7 @@ impl Entry {
                 .into_iter()
                 .find(|b| b.id == *id)
                 .map(|b| b.theme),
+            Source::Starter(s) => Some(s.theme.clone()),
             Source::File { read, .. } => read.theme().cloned(),
         }
     }
@@ -165,7 +192,8 @@ pub fn file_names(folder: &Path) -> Vec<String> {
     names
 }
 
-/// Every row of the theme list: no theme, the built-in themes, then the folder's files.
+/// Every row of the theme list: no theme, the built-in themes, the starter themes (a row per scheme each has), then the folder's
+/// files.
 pub fn entries(folder: &Path) -> Vec<Entry> {
     let mut out = vec![Entry {
         source: Source::Terminal,
@@ -176,6 +204,14 @@ pub fn entries(folder: &Path) -> Vec<Entry> {
             source: Source::BuiltIn(b.id),
             scheme: b.scheme,
         });
+    }
+    for s in starters() {
+        for scheme in s.theme.schemes() {
+            out.push(Entry {
+                source: Source::Starter(Box::new(s.clone())),
+                scheme,
+            });
+        }
     }
     for name in file_names(folder) {
         let read = load_file(&folder.join(&name));
@@ -209,6 +245,9 @@ pub fn resolve(choice: &Choice, folder: &Path) -> Result<Option<(Theme, Scheme)>
             .into_iter()
             .find(|b| b.id == *id)
             .map(|b| (b.theme, b.scheme))),
+        Choice::Starter { id, scheme } => {
+            Ok(starter(id, *scheme).map(|(s, shown)| (s.theme, shown)))
+        }
         Choice::File { name, scheme } => match load_file(&folder.join(name)) {
             Read::Ok { theme, .. } if theme.look(*scheme).is_some() => Ok(Some((*theme, *scheme))),
             // A file that no longer has the chosen scheme: its first one.
@@ -264,6 +303,10 @@ mod tests {
         for c in [
             Choice::Terminal,
             Choice::BuiltIn("slate".into()),
+            Choice::Starter {
+                id: "gruvbox".into(),
+                scheme: Scheme::Light,
+            },
             Choice::File {
                 name: "my theme.json".into(),
                 scheme: Scheme::Light,
@@ -271,9 +314,20 @@ mod tests {
         ] {
             assert_eq!(Choice::parse(&c.line()), c);
         }
+        assert_eq!(
+            Choice::Starter {
+                id: "dracula".into(),
+                scheme: Scheme::Dark
+            }
+            .line(),
+            "starter dark dracula\n"
+        );
         for bad in [
             "",
             "built-in nope",
+            "starter dark nope",
+            "starter blue gruvbox",
+            "starter gruvbox",
             "file dark ../x.json",
             "file blue x.json",
             "file dark x.txt",
@@ -291,15 +345,32 @@ mod tests {
         std::fs::write(d.join("notes.txt"), "x").unwrap();
         std::fs::write(d.join(".hidden.json"), "{}").unwrap();
         let rows = entries(&d);
-        // No theme, the six built-in themes, the broken file (one row), then Harbour's two schemes.
-        assert_eq!(rows.len(), 1 + 6 + 1 + 2);
+        // No theme, the six built-in themes, the starter themes (a row per scheme), the broken file (one row), then Harbour's two
+        // schemes.
+        let starter_rows: usize = starters().iter().map(|s| s.theme.schemes().len()).sum();
+        let fixed = 1 + 6 + starter_rows;
+        assert_eq!(rows.len(), fixed + 1 + 2);
         assert_eq!(rows[0].choice(), Some(Choice::Terminal));
-        assert!(
-            matches!(&rows[7].source, Source::File { name, read: Read::Refused(_) } if name == "a.json")
-        );
-        assert_eq!(rows[7].choice(), None);
         assert_eq!(
-            rows[8..]
+            rows[7..fixed]
+                .iter()
+                .map(|r| r.choice().unwrap().line())
+                .collect::<Vec<_>>(),
+            [
+                "starter dark catppuccin-mocha\n",
+                "starter dark dracula\n",
+                "starter dark gruvbox\n",
+                "starter light gruvbox\n",
+                "starter dark rose-pine\n",
+                "starter dark tokyo-night\n",
+            ]
+        );
+        assert!(
+            matches!(&rows[fixed].source, Source::File { name, read: Read::Refused(_) } if name == "a.json")
+        );
+        assert_eq!(rows[fixed].choice(), None);
+        assert_eq!(
+            rows[fixed + 1..]
                 .iter()
                 .map(|r| r.choice().unwrap())
                 .collect::<Vec<_>>(),
@@ -314,7 +385,20 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(entries(&d.join("missing")).len(), 7);
+        assert_eq!(entries(&d.join("missing")).len(), fixed);
+        // A starter choice resolves to its theme in the scheme chosen, or its first when it has no such scheme.
+        let gruvbox = Choice::Starter {
+            id: "gruvbox".into(),
+            scheme: Scheme::Light,
+        };
+        let (theme, scheme) = resolve(&gruvbox, &d).unwrap().unwrap();
+        assert_eq!((theme.name.as_str(), scheme), ("Gruvbox", Scheme::Light));
+        let dracula = Choice::Starter {
+            id: "dracula".into(),
+            scheme: Scheme::Light,
+        };
+        assert_eq!(resolve(&dracula, &d).unwrap().unwrap().1, Scheme::Dark);
+        assert_eq!(path_of(&gruvbox, &d), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 
