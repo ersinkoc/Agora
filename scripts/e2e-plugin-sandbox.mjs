@@ -43,9 +43,11 @@ const HEADERS = { 'content-security-policy': CSP, 'x-frame-options': 'DENY', 'x-
 console.log(`hub policy: ${CSP}`);
 
 const hubLog = [];
+const loaderOrigins = [];
 const outLog = [];
 const hub = createServer((req, res) => {
   hubLog.push(req.url);
+  if (req.url?.startsWith('/plugin-frame.js')) loaderOrigins.push(req.headers.origin ?? '');
   if (req.url?.startsWith('/probe')) { res.writeHead(200, { ...HEADERS, 'access-control-allow-origin': '*' }).end('ok'); return; }
   const path = join(dist, !req.url || req.url.split('?')[0] === '/' ? 'index.html' : req.url.split('?')[0]);
   if (!existsSync(path)) { res.writeHead(404, HEADERS).end(); return; }
@@ -117,6 +119,10 @@ const probes = [
   { name: 'window.open', mark: '/probe/popup', host: 'out', popup: true, code: `var w = window.open(${JSON.stringify(`${OUT}/probe/popup`)}); report(w ? 'opened' : 'blocked: null');` },
   { name: 'top navigation', mark: '/probe/top', host: 'out', top: true, code: `top.location.href = ${JSON.stringify(`${OUT}/probe/top`)}; report('assigned');` },
   { name: 'the frame navigating itself away', mark: '/probe/self', host: 'out', self: true, code: `setTimeout(function () { location.href = ${JSON.stringify(`${OUT}/probe/self`)}; }, 50); report('assigned');` },
+  // A blob page the frame makes itself, with no policy of its own, that tries to load from both hosts: the window's `frame-src blob:`
+  // lets the frame go there, so the frame's own policy must come with it (a blob page keeps its maker's policies).
+  { name: 'the frame navigating itself to a blob page it made', mark: '/probe/blobnav', host: 'both', code: `var html = '<!doctype html><img src="${HUB}/probe/blobnav-hub.png"><img src="${OUT}/probe/blobnav-out.png"><link rel="stylesheet" href="${OUT}/probe/blobnav.css"><script>fetch("${OUT}/probe/blobnav-fetch")<\\/script>';
+    var u = URL.createObjectURL(new Blob([html], { type: 'text/html' })); setTimeout(function () { location.href = u; }, 50); report('assigned');` },
   { name: 'a form post', mark: '/probe/form', host: 'out', self: true, code: `var f = document.createElement('form'); f.method = 'post'; f.action = ${JSON.stringify(`${OUT}/probe/form`)}; var i = document.createElement('input'); i.name = 'k'; i.value = 'secret'; f.appendChild(i); document.body.appendChild(f); f.submit(); report('submitted');` },
   { name: 'reading parent.document', code: "var d = parent.document; report('read: ' + d.title + ' ' + d.cookie);" },
 ];
@@ -127,8 +133,8 @@ for (const p of probes) {
   const before = { hub: hubLog.length, out: outLog.length };
   await w.page.waitForSelector('iframe[data-plugin-frame]', { timeout: 15000 });
   const said = await report(w.page, p.name);
-  await w.page.waitForTimeout(p.self || p.top || p.popup ? 2000 : 800);
-  const log = p.host === 'hub' ? hubLog.slice(before.hub) : outLog.slice(before.out);
+  await w.page.waitForTimeout(p.self || p.top || p.popup || p.host === 'both' ? 2000 : 800);
+  const log = p.host === 'hub' ? hubLog.slice(before.hub) : p.host === 'both' ? [...hubLog.slice(before.hub), ...outLog.slice(before.out)] : outLog.slice(before.out);
   const left = p.mark ? log.some((u) => u.includes(p.mark)) || w.requests.some((u) => u.includes(p.mark)) : false;
   // The frame must have run (it says something) for a refusal to count: a frame that never ran proves nothing.
   let ok = said !== undefined && !left && (/^blocked/.test(said) || ['assigned', 'submitted'].includes(said));
@@ -144,6 +150,10 @@ for (const p of probes) {
   check(ok, `from inside a plugin frame, ${p.name} fails (frame said: ${said ?? 'nothing'}; request left: ${left ? 'yes' : 'no'}${blocked.length ? `; browser: ${blocked.join(', ')}` : ''})`);
   await w.ctx.close();
 }
+
+// The hub refuses a request whose Origin is not its own when it sits behind a proxy (ADR-0067, `proxy.rs`, `Origin: null` included):
+// the frame's request for the loader must carry no Origin at all.
+check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the frame asks for the window's loader without an Origin header (${loaderOrigins.length} requests, origins: ${JSON.stringify([...new Set(loaderOrigins)])})`);
 
 // ---- Grants, messages, containment -----------------------------------------------------------------------------------------
 {
@@ -231,9 +241,9 @@ for (const p of probes) {
   check(words.length === 2 && words.every((x) => !/\./.test(x.split(' ')[0] ?? '')), `the install screen lists what it asks to see in plain words (${words.join(' | ')})`);
   await w.page.locator('input[data-cap="agents.read"]').check();
   await w.page.locator('[data-plugin-save]').click();
-  await w.page.getByText('Agents at a glance was added', { exact: false }).waitFor();
+  await w.page.getByText('Agent list was added', { exact: false }).waitFor();
   await w.page.getByRole('button', { name: 'Done' }).click();
-  await w.page.locator('button.ide-chip', { hasText: 'Agents at a glance' }).click();
+  await w.page.locator('button.ide-chip', { hasText: 'Agent list' }).click();
   const frame = w.page.frameLocator('iframe[data-plugin-frame]');
   await frame.locator('body[data-ready]').waitFor({ timeout: 10000 }).catch(() => {});
   const rows = await frame.locator('li').count();

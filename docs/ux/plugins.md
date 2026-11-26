@@ -42,7 +42,7 @@ folders, links or extra fields to get wrong).
 ```json
 {
   "id": "sample-agents",
-  "name": "Agents at a glance",
+  "name": "Agent list",
   "version": "0.1.0",
   "author": "The Agora authors",
   "licence": "Apache-2.0",
@@ -99,7 +99,7 @@ are given as `data:` addresses through `agora.file(name)`.
 
 **Two policies at once.** A blob page keeps the window's policy too, so whatever runs in the frame must pass both. The window's
 `connect-src` allows `ws:`/`wss:`; the frame's `connect-src 'none'` takes it away. The window's `frame-src blob:` is what stops the frame
-navigating itself to any address outside a blob. In step 2, with the window's `img-src 'self' data:` and no `font-src`, a plugin's
+navigating itself to any address outside a blob, and a blob page the frame makes and goes to keeps the frame's policies (its maker's). In step 2, with the window's `img-src 'self' data:` and no `font-src`, a plugin's
 images work as `data:` addresses and its fonts do not load (it draws in the system's fonts).
 
 ## Messages
@@ -185,7 +185,8 @@ runs.
 - Unit (`apps/web/src/plugins/*.test.ts*`): the package checks, the message filter by source, type, size and rate, grants, the store,
   the projection (no approvals, terminal data or actions), the registry's host-set facts, the marker and safe mode.
 - Real browser (`scripts/e2e-plugin-sandbox.mjs`, headless Chromium under the hub's page policy read from `web.rs`): every probe of
-  ADR-0114's Verification list fails from inside a frame, judged by the servers' request logs; a granted read answers and one not granted
-  says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a package loads through the dialog.
+  ADR-0114's Verification list fails from inside a frame, and so does the frame going to a blob page it made, judged by the servers'
+  request logs; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read answers
+  and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a package loads through the dialog.
   `--amendment-a` runs the same under the policy Amendment A proposes.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`).

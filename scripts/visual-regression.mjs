@@ -48,7 +48,7 @@ const pages = [
     storage: {
       'agora.plugins.dev.v1': JSON.stringify([{ text: pack(join(root, 'apps/web/plugins/sample')) }]),
       'agora.plugins.grants.v1': JSON.stringify({ 'sample-agents': { version: '0.1.0', seen: ['agents.read', 'theme.read'], granted: ['agents.read', 'theme.read'] } }),
-      'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'split', direction: 'row', ratios: [0.55, 0.45], children: [{ type: 'pane', id: 'p1', panel: 'plugin.sample-agents.list' }, { type: 'pane', id: 'p2', panel: 'usage' }] } }, focus: 'p1', touched: true }),
+      'agora.workspace.v1': JSON.stringify({ version: 1, layout: { version: 1, root: { type: 'split', direction: 'row', ratios: [0.6, 0.4], children: [{ type: 'pane', id: 'p1', panel: 'plugin.sample-agents.list' }, { type: 'pane', id: 'p2', panel: 'usage' }] } }, focus: 'p1', touched: true }),
     } },
   { name: 'signin', hash: '', ready: 'form' },
   // Its dates are written in the browser's zone and language, so both are fixed; notifications are allowed so the switch is enabled.

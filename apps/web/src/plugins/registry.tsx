@@ -34,7 +34,9 @@ export function pluginPanels(plugins: readonly LoadedPlugin[]): PanelDef[] {
             pane: ctx.pane, kind, ...(follows ? { follows } : {}), agent: ctx.agent, fleet: ctx.state.fleet, boards: ctx.state.boards, now: ctx.state.now,
             chatOf: ctx.sources.chatOf, loadDiff: ctx.sources.loadDiff,
           });
-          return <PluginFrame key={`${id}:${p.granted.join(',')}`} plugin={p.plugin} panel={decl} granted={p.granted} view={view} dev={p.dev} />;
+          // A new grant, or another bound agent (its conversation and changes are read from the agent the frame started with), starts
+          // the frame again.
+          return <PluginFrame key={`${id}:${p.granted.join(',')}:${ctx.agent?.id ?? ''}`} plugin={p.plugin} panel={decl} granted={p.granted} view={view} dev={p.dev} />;
         },
       });
     }
