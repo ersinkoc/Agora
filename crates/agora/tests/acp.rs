@@ -206,6 +206,8 @@ fn node_with_acp_before(
         ("acp-broken", ", \"--fail-at-start\""),
         ("acp-bypass", ", \"--bypass-mode\""),
         ("acp-config", ", \"--config-options\""),
+        // P2-16: an agent whose own session starts in a mode that skips permissions.
+        ("acp-startbypass", ", \"--start-bypass\""),
     ] {
         std::fs::write(
             home.join(format!("manifests/{kind}.toml")),
@@ -400,6 +402,79 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
             let err = skipped.unwrap_err();
             assert_eq!(err.code, "agent.option_forbidden");
             assert!(set_mode("build").is_ok());
+        }
+        drop(node);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+/// P2-16: an ACP agent whose own session starts in a mode that skips permissions (its default or a saved setting) follows the node's
+/// `skip_permissions` policy as a switch to that mode does: under `forbid` its start is refused (`agent.option_forbidden`, said in
+/// words by the command line), the agent never gets a prompt and nothing of it runs, while an agent that starts in a mode that asks
+/// runs; under `allow` it runs (shown acting freely, `skip_approval.rs`).
+#[test]
+fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
+    for (policy, refused) in [
+        ("skip_permissions = forbid\n", true),
+        ("skip_permissions = allow\n", false),
+    ] {
+        let tag = if refused {
+            "start-forbid"
+        } else {
+            "start-allow"
+        };
+        let Some((home, node)) = node_with_acp_policy(tag, Some(policy)) else {
+            return;
+        };
+        if refused {
+            let mut c = Client::connect(&home.join("node.sock")).unwrap();
+            let projects = match c
+                .call(Cmd::ProjectList(v1::ProjectList {}))
+                .unwrap()
+                .unwrap()
+                .result
+            {
+                Some(v1::command_ok::Result::ProjectList(p)) => p.projects,
+                other => panic!("{other:?}"),
+            };
+            let err = c
+                .call(Cmd::AgentStart(v1::AgentStart {
+                    project_id: projects[0].project_id.clone(),
+                    kind: "acp-startbypass".into(),
+                    ..Default::default()
+                }))
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(err.code, "agent.option_forbidden", "{err:?}");
+            let param = |k: &str| match err.params.get(k).and_then(|p| p.value.clone()) {
+                Some(v1::param_value::Value::Str(s)) => s,
+                other => panic!("{k}: {other:?}"),
+            };
+            assert_eq!(param("option"), "bypassPermissions");
+            assert_eq!(param("policy"), "forbid");
+            // The command line says it in words, from the locale files.
+            let (code, out) = agora(&home, &["agent", "start", "acp-startbypass"]);
+            assert_ne!(code, 0, "{out}");
+            assert!(
+                out.contains("does not let agents act without asking"),
+                "{out}"
+            );
+            // What the node started to judge it was stopped: nothing of it runs.
+            let (_, list) = agora(&home, &["agent", "list"]);
+            assert!(
+                list.lines()
+                    .filter(|l| l.contains("acp-startbypass"))
+                    .all(|l| l.contains("done")),
+                "{list}"
+            );
+            // An agent that starts in a mode that asks runs under the same policy, and takes a prompt.
+            let normal = started_agent_of(&home, "acp-fake");
+            let (code, out) = agora(&home, &["agent", "prompt", &normal, "hello"]);
+            assert_eq!(code, 0, "{out}");
+        } else {
+            let id = started_agent_of(&home, "acp-startbypass");
+            let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
+            assert_eq!(code, 0, "{out}");
         }
         drop(node);
         let _ = std::fs::remove_dir_all(&home);

@@ -88,6 +88,7 @@ tui-notice-restarting = (ajan beklenmedik şekilde durdu; Agora onu yeniden baş
 tui-notice-gave_up = (ajan { $restarts } yeniden başlatmadan sonra yine beklenmedik şekilde durdu, son çıkış kodu { $exit_code }; Agora onu yeniden başlatmayı bıraktı)
 tui-notice-gave_up-no_code = (ajan { $restarts } yeniden başlatmadan sonra yine beklenmedik şekilde durdu; Agora onu yeniden başlatmayı bıraktı)
 tui-notice-history_not_saved = (bu konuşma makinesinde kaydedilemedi; ajan çalışmaya devam ediyor, ancak sonraki adımlar yeniden başlatmadan sonra eksik olabilir)
+tui-notice-skip_permissions_refused = (ajan sormadan çalışacak şekilde ayarlıydı ve bu makine buna izin vermiyor; Agora onu durdurdu)
 tui-notice-other = (ajan bunu bildirdi: { $code })
 tui-option-switched = Geçildi.
 tui-option-unknown = Ajan { $id } seçeneğini sunmuyor. Sunduğu: { $ids }

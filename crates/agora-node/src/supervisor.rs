@@ -192,6 +192,14 @@ pub enum SupervisorEvent {
     Stopped {
         agent: AgentId,
     },
+    /// P2-16 (ADR-0090): the node stopped an adapter agent because the mode or a config option it reported in use makes it act without
+    /// asking and the node's `skip_permissions` policy refuses that ([`skip_in_use_refused`]). `policy` is the refusing policy
+    /// (`forbid`, `confined_only`), `setting` what skipped (`mode`, `model` or `config`). A [`Self::Stopped`] follows.
+    SkipRefused {
+        agent: AgentId,
+        policy: &'static str,
+        setting: &'static str,
+    },
     /// `native` is true when the agent's own session was resumed, false for the layout-only fallback
     /// (a fresh process in the same worktree).
     Resumed {
@@ -295,6 +303,8 @@ pub struct AdapterCall {
     generation: u64,
     /// ADR-0101 (Codex review of PR #1007): the run of the adapter process this call was made to (`AdapterRich::epoch`).
     epoch: u64,
+    /// P2-16: set when the node stops that run for what it has in use; a prompt cut off by that stop is answered with it.
+    refusal: Arc<std::sync::OnceLock<SkipVerdict>>,
 }
 
 /// What preparing a switch of a running agent's mode or config option came to (ADR-0090 Amendment A).
@@ -455,8 +465,19 @@ impl AdapterCall {
         let session = self.session.as_str();
         match &self.op {
             CallOp::Prompt { text, from_mesh } => {
-                given(self.caller.prompt(session, text, *from_mesh, wait))
-                    .map_err(client_call_error(&self.kind, "prompt", wait))
+                given(self.caller.prompt(session, text, *from_mesh, wait)).map_err(|e| {
+                    // P2-16: the node stopped the agent for what it has in use while this prompt waited: said as that refusal.
+                    match (&e, self.refusal.get()) {
+                        (HostError::Exited | HostError::Io(_), Some(v)) => {
+                            SupervisorError::OptionForbidden(
+                                self.kind.clone(),
+                                v.option.clone(),
+                                v.policy,
+                            )
+                        }
+                        _ => client_call_error(&self.kind, "prompt", wait)(e),
+                    }
+                })
             }
             CallOp::Cancel => {
                 given(self.caller.cancel(session, wait)).map_err(call_error("cancel"))
@@ -730,11 +751,20 @@ pub struct AgentView {
 /// without asking now: the launch option, the current mode when it skips, or a config option in use that skips (a boolean that is on,
 /// or a select whose current choice skips).
 pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigOption]) -> bool {
-    let mode = options
+    launch_skips || mode_skips(options) || config_skips(config)
+}
+
+/// The current mode is one that makes the agent act without asking.
+fn mode_skips(options: &SessionOptions) -> bool {
+    options
         .modes
         .iter()
-        .any(|m| m.id == options.current_mode && m.skips_permissions);
-    let config = config.iter().any(|o| {
+        .any(|m| m.id == options.current_mode && m.skips_permissions)
+}
+
+/// A config option in use makes the agent act without asking: a boolean that is on, or a select whose current choice skips.
+fn config_skips(config: &[ConfigOption]) -> bool {
+    config.iter().any(|o| {
         if o.boolean {
             o.skips_permissions && o.current == "true"
         } else {
@@ -742,8 +772,106 @@ pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigO
                 .iter()
                 .any(|c| c.id == o.current && c.skips_permissions)
         }
-    });
-    launch_skips || mode || config
+    })
+}
+
+/// P2-16 (ADR-0090): what the node's `skip_permissions` policy refuses an adapter agent for: the mode, model or config option in use
+/// (`setting` `mode`, `model` or `config`, `option` its id: the mode or model id, or the config option's id) that makes it act without
+/// asking, and the refusing policy (`forbid`, `confined_only`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkipVerdict {
+    pub policy: &'static str,
+    pub setting: &'static str,
+    pub option: String,
+}
+
+/// P2-16: the mode or model in use, as reported, that a switch to would be held to the policy for (`adapter_set_option`): `(setting,
+/// id)`. Judged on the report as it came, not as bounded (security review of #1244, F2): an id in use that is not in the list (or not
+/// kept of it: past the caps, a duplicate, too long) is judged on the id alone, and the node's rule (`perm`) is applied to a listed
+/// one's words as well as the adapter's flag. A mode id the rule cannot place counts as skipping; a model counts only by the strong
+/// words, as a model switch does.
+fn options_in_use_skip(o: &SessionOptions) -> Option<(&'static str, String)> {
+    let judged = |current: &str, list: &[SessionOption], category, option| {
+        if current.is_empty() {
+            return false;
+        }
+        match list.iter().find(|m| m.id == current) {
+            Some(m) => {
+                m.skips_permissions
+                    || perm::value_skips(category, option, (&m.id, &m.name, &m.description))
+            }
+            None => perm::value_skips(category, option, (current, "", "")),
+        }
+    };
+    if judged(&o.current_mode, &o.modes, Category::Mode, ("mode", "mode")) {
+        return Some(("mode", o.current_mode.clone()));
+    }
+    if judged(
+        &o.current_model,
+        &o.models,
+        Category::Model,
+        ("model", "model"),
+    ) {
+        return Some(("model", o.current_model.clone()));
+    }
+    None
+}
+
+/// P2-16: the config option whose value in use a switch to would be held to the policy for (`adapter_set_config`), by its id: a
+/// select's choice that skips (a value that is not one of its choices is judged on the value alone, F2), or a boolean's value that
+/// `perm::boolean_value_skips` judges risky. A boolean whose words say which value protects is judged by that (`ask_for_approval` off
+/// skips, on does not); one whose words do not say counts as skipping at either value, as a switch of it does. Judged on the report as
+/// it came, so an option past the caps or repeated is judged too.
+fn config_in_use_skip(config: &[ConfigOption]) -> Option<String> {
+    config.iter().find_map(|o| {
+        let category = Category::from_acp(Some(o.category.as_str()));
+        let skips = if o.boolean {
+            let flagged = o.skips_permissions
+                || perm::boolean_skips(category, (&o.id, &o.name), &o.description);
+            perm::boolean_value_skips(
+                category,
+                (&o.id, &o.name),
+                &o.description,
+                flagged,
+                o.current == "true",
+            )
+        } else if o.current.is_empty() {
+            false
+        } else {
+            match o.choices.iter().find(|c| c.id == o.current) {
+                Some(c) => {
+                    c.skips_permissions
+                        || perm::value_skips(
+                            category,
+                            (&o.id, &o.name),
+                            (&c.id, &c.name, &c.description),
+                        )
+                }
+                None => perm::value_skips(category, (&o.id, &o.name), (&o.current, "", "")),
+            }
+        };
+        skips.then(|| o.id.clone())
+    })
+}
+
+/// P2-16 (ADR-0090): whether the node's `skip_permissions` policy refuses an adapter agent for what it reported in use: its current
+/// mode or model, or a config option's value, that a switch to would be held to the policy for (`adapter_set_option`,
+/// `adapter_set_model`, `adapter_set_config`; [`policy_refusal`] by how its process was launched). `None` when the policy allows it
+/// or nothing in use skips. A launch option is not judged here: a start is decided before any process exists (`launch_choice`).
+pub fn skip_in_use_refused(
+    policy: SkipPermissions,
+    confinement: Confinement,
+    options: &SessionOptions,
+    config: &[ConfigOption],
+) -> Option<SkipVerdict> {
+    let policy = policy_refusal(policy, confinement)?;
+    let (setting, option) = options_in_use_skip(options)
+        .or_else(|| config_in_use_skip(config).map(|id| ("config", id)))?;
+    Some(SkipVerdict {
+        policy,
+        setting,
+        option,
+    })
 }
 
 /// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
@@ -1171,6 +1299,15 @@ struct AdapterEntry {
     /// Review of #1103 (B1): what a resumed session said before it answered its start (see `open_session`), read by the next tick
     /// before anything newer.
     replayed: Vec<AdapterEvent>,
+    /// P2-16: under a policy that refuses skipping, the first report of the mode (`.0`) or the config options (`.1`) after this launch
+    /// has not been judged yet: the agent is being judged, and no prompt is sent to it until it has been ([`first_awaited`]).
+    awaiting: (bool, bool),
+    /// P2-16: what the node holds in use is refused by its policy and the agent is to be stopped by the next tick (an agent taken up from
+    /// the holder, whose recorded mode no report repeats). No prompt is sent meanwhile.
+    verdict: Option<SkipVerdict>,
+    /// P2-16 (security review of #1244, F1): set when the node stops this run for what it has in use, before its process is ended, so
+    /// a prompt call cut off by that end is answered with the refusal (`agent.option_forbidden`), not as a failure.
+    refusal: Arc<std::sync::OnceLock<SkipVerdict>>,
 }
 
 struct Entry {
@@ -1343,6 +1480,7 @@ impl Supervisor {
         let run_id = process_run_id(adapter.pid(), adapter.is_held());
         self.notify_run(&id, &project, run_id);
         let mesh = self.adapter_mesh(&id, &kind, &project, &worktree);
+        let skip_policy = self.skip_permissions;
         let Some(e) = self.adapters.get_mut(&id) else {
             return Err(SupervisorError::NotFound(id));
         };
@@ -1353,6 +1491,16 @@ impl Supervisor {
         e.confinement = Confinement::Unconfined;
         e.session_id = reattach.session_id;
         e.capabilities = reattach.capabilities;
+        // P2-16: what it was recorded using is judged as a report is, on the record as kept (the bounded copy may have dropped an id
+        // in use, F2); a refusal stops it at the next tick, and no prompt reaches it meanwhile (`prompt_gate`).
+        e.verdict = skip_in_use_refused(
+            skip_policy,
+            Confinement::Unconfined,
+            &reattach.options,
+            &reattach.config,
+        );
+        e.refusal = Arc::default();
+        e.awaiting = (false, false);
         // Bounded and judged again as a report is (`perm`): the file is the node's own and the replay the holder's, the words in both are
         // the adapter's.
         e.options = bounded_options(reattach.options);
@@ -2358,6 +2506,8 @@ impl Supervisor {
                     return Err(e);
                 }
             };
+            // P2-16: judged by its first reports before it takes a prompt (by the tick; the caller waits for that off the lock).
+            let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
             let mut agent = Agent::new(
                 id.clone(),
                 project,
@@ -2392,6 +2542,9 @@ impl Supervisor {
                     git_config,
                     confinement,
                     replayed: Vec::new(),
+                    awaiting,
+                    verdict: None,
+                    refusal: Arc::default(),
                 },
             );
         } else {
@@ -2627,6 +2780,8 @@ impl Supervisor {
                 return Err(error);
             }
         };
+        // P2-16: judged by its first reports before it takes a prompt (by the tick; the caller waits for that off the lock).
+        let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
         let mut agent = Agent::new(
             id.clone(),
             checkout.project,
@@ -2661,6 +2816,9 @@ impl Supervisor {
                 git_config,
                 confinement,
                 replayed: Vec::new(),
+                awaiting,
+                verdict: None,
+                refusal: Arc::default(),
             },
         );
         self.publish_run(&id);
@@ -2682,6 +2840,9 @@ impl Supervisor {
             self.restart_adapter(&id, now, events);
         }
         let sent = Arc::clone(&self.sent);
+        // P2-16 (security review of #1244, F3): the queued prompts that are due go out after every adapter's reports of this tick were
+        // judged, so none goes to an agent the same tick stops for what it has in use.
+        let mut sends: Vec<(AgentId, Next)> = Vec::new();
         // ADR-0090: a queued prompt that could not be sent is dropped (its entry says so) and the next one goes.
         let done: Vec<(AgentId, u64, SendOutcome, u64)> =
             std::mem::take(&mut *sent.lock().unwrap_or_else(|e| e.into_inner()));
@@ -2706,19 +2867,20 @@ impl Supervisor {
                     sent: was_sent,
                 },
             });
-            if let (Some(next), Some(e)) =
-                (next.filter(|_| !letting_go), self.adapters.get_mut(&id))
-            {
-                begin_send(e, &id, next, &sent, events);
+            if let Some(next) = next.filter(|_| !letting_go) {
+                sends.push((id.clone(), next));
             }
         }
+        // P2-16: the agents stopped because what they have in use skips permissions under a policy that refuses it.
+        let skip_policy = self.skip_permissions;
+        let mut ended = Vec::new();
         for (id, e) in &mut self.adapters {
             if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
                 continue;
             }
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now).filter(|_| !letting_go) {
-                begin_send(e, id, next, &sent, events);
+                sends.push((id.clone(), next));
             }
             // #933: an adapter whose output ended keeps its launch's Git file until its process is collected (a look that never waits;
             // only an ended adapter that still has a file is asked).
@@ -2769,6 +2931,36 @@ impl Supervisor {
             };
             // ADR-0093: the holder kept only the newest of what the adapter wrote while no node read it: the person is told.
             let lost = e.adapter.as_ref().map_or(0, Adapter::take_dropped);
+            // P2-16: every report of the mode or the config options in this batch is judged first, on the report as sent and in order,
+            // before anything in the batch is acted on (security review of #1244, F2, F3); a verdict the take-up left (`adopt_held_pipe`)
+            // stands. A refused agent's reports are neither kept nor passed on, no queued prompt goes to it, and it is stopped below.
+            let refused = if letting_go {
+                None
+            } else {
+                e.verdict.take().or_else(|| {
+                    let (mut options, mut config) = (None, None);
+                    polled.iter().find_map(|ev| {
+                        match ev {
+                            AdapterEvent::Options { options: o, .. } => {
+                                e.awaiting.0 = false;
+                                options = Some(o);
+                            }
+                            AdapterEvent::Config { options: o, .. } => {
+                                e.awaiting.1 = false;
+                                config = Some(o);
+                            }
+                            _ => return None,
+                        }
+                        skip_in_use_refused(
+                            skip_policy,
+                            e.confinement,
+                            options.unwrap_or(&e.options),
+                            config.map_or(e.rich.config.as_slice(), Vec::as_slice),
+                        )
+                    })
+                })
+            };
+            let refusing = refused.is_some();
             for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
@@ -2776,7 +2968,7 @@ impl Supervisor {
                         // out when it ends, one per end.
                         if e.capabilities.iter().any(|c| c == "turns") {
                             if let Some(next) = e.rich.observe(state, now).filter(|_| !letting_go) {
-                                begin_send(e, id, next, &sent, events);
+                                sends.push((id.clone(), next));
                             }
                         }
                         apply_state(
@@ -2787,6 +2979,7 @@ impl Supervisor {
                             events,
                         );
                     }
+                    AdapterEvent::Options { .. } | AdapterEvent::Config { .. } if refusing => {}
                     AdapterEvent::Options { options, .. } => {
                         let options = bounded_options(options);
                         if options != e.options {
@@ -2905,6 +3098,26 @@ impl Supervisor {
                     bytes: lost,
                 });
             }
+            if let Some(verdict) = refused.filter(|_| e.running) {
+                refuse_skipping(id, e, verdict, events);
+                ended.push(id.clone());
+            }
+        }
+        for id in ended {
+            self.notify_run(&id, "", None);
+        }
+        // The prompts due this tick, to agents still running; one whose agent was stopped or ended meanwhile is dropped (its entry
+        // leaves with a notice), never sent.
+        for (id, next) in sends {
+            match self.adapters.get(&id) {
+                Some(e) if e.running && e.adapter.is_some() => {
+                    begin_send(e, &id, next, &sent, events);
+                }
+                _ => events.push(SupervisorEvent::PromptsDropped {
+                    agent: id,
+                    tags: vec![next.0.tag],
+                }),
+            }
         }
     }
 
@@ -2941,6 +3154,7 @@ impl Supervisor {
         let holder = self.holder.clone();
         let kept_launch = self.kept_launch.contains(id);
         let enforceable = self.sandbox.enforceable();
+        let skip_policy = self.skip_permissions;
         self.notify_run(id, "", None);
         let Some(e) = self.adapters.get_mut(id) else {
             return;
@@ -2972,6 +3186,11 @@ impl Supervisor {
         });
         match launched {
             Ok((adapter, session_id, capabilities, git_config, confinement, replayed)) => {
+                // P2-16 (security review of #1244, F1): judged by its first reports, read by a later tick (never waited for here),
+                // before it can take a prompt.
+                e.awaiting = first_awaited(&capabilities, skip_policy, confinement);
+                e.verdict = None;
+                e.refusal = Arc::default();
                 e.run_id = process_run_id(adapter.pid(), adapter.is_held());
                 e.adapter = Some(adapter);
                 // Review of #1103 (B1): what a resumed session replayed before it answered, read before anything newer.
@@ -3020,6 +3239,7 @@ impl Supervisor {
             op,
             generation: e.rich.generation,
             epoch: e.rich.epoch,
+            refusal: Arc::clone(&e.refusal),
         })
     }
 
@@ -3038,6 +3258,57 @@ impl Supervisor {
         }
     }
 
+    /// P2-16: where the judgement of an adapter agent's first reports after its launch stands ([`await_first_reports`]).
+    pub fn first_report_state(&self, id: &AgentId) -> FirstReport {
+        let Some(e) = self.adapters.get(id) else {
+            return FirstReport::Done;
+        };
+        if let Some(v) = e.refusal.get() {
+            return FirstReport::Refused(e.agent.kind.clone(), v.clone());
+        }
+        if e.running && (e.awaiting.0 || e.awaiting.1 || e.verdict.is_some()) {
+            return FirstReport::Pending;
+        }
+        FirstReport::Done
+    }
+
+    /// P2-16 (security review of #1244, F1): under a policy that refuses skipping, no prompt reaches an agent whose mode, model or
+    /// config option in use skips (`agent.option_forbidden`), one the node is about to stop for it, or one whose first report after
+    /// its launch has not been judged (`adapter.no_answer`, call `session`). Any other policy: nothing to check.
+    fn prompt_gate(&self, e: &AdapterEntry) -> Result<(), SupervisorError> {
+        if policy_refusal(self.skip_permissions, e.confinement).is_none() {
+            return Ok(());
+        }
+        let verdict = e
+            .verdict
+            .clone()
+            .or_else(|| e.refusal.get().cloned())
+            .or_else(|| {
+                skip_in_use_refused(
+                    self.skip_permissions,
+                    e.confinement,
+                    &e.options,
+                    &e.rich.config,
+                )
+            });
+        if let Some(v) = verdict {
+            return Err(SupervisorError::OptionForbidden(
+                e.agent.kind.clone(),
+                v.option,
+                v.policy,
+            ));
+        }
+        if e.awaiting.0 || e.awaiting.1 {
+            return Err(SupervisorError::NoAnswer {
+                kind: e.agent.kind.clone(),
+                call: "session",
+                waited_ms: u64::try_from(FIRST_REPORT_WAIT.as_millis()).unwrap_or(u64::MAX),
+                given: false,
+            });
+        }
+        Ok(())
+    }
+
     /// A prompt to an adapter agent without the queue (mesh content uses `from_mesh`). The call is made by [`AdapterCall::run`],
     /// after the lock is let go.
     pub fn prepare_prompt(
@@ -3046,6 +3317,7 @@ impl Supervisor {
         text: &str,
         from_mesh: bool,
     ) -> Result<AdapterCall, SupervisorError> {
+        self.prompt_gate(self.adapter_of(id)?)?;
         self.call_of(
             id,
             CallOp::Prompt {
@@ -3074,7 +3346,8 @@ impl Supervisor {
         text: &str,
         tag: impl FnOnce(usize) -> u64,
     ) -> Result<Submit, SupervisorError> {
-        self.adapter_of(id)?;
+        // P2-16: nothing is sent or queued for an agent the policy refuses for what it has in use.
+        self.prompt_gate(self.adapter_of(id)?)?;
         let Some(e) = self.adapters.get_mut(id) else {
             return Err(SupervisorError::NotFound(id.clone()));
         };
@@ -4220,6 +4493,9 @@ impl Supervisor {
                     // ADR-0101: no process yet; the launch (or the take-up) that follows records how it runs.
                     confinement: Confinement::Unknown,
                     replayed: Vec::new(),
+                    awaiting: (false, false),
+                    verdict: None,
+                    refusal: Arc::default(),
                 },
             );
             return Ok(());
@@ -4391,6 +4667,9 @@ impl Supervisor {
                         return Err(e);
                     }
                 };
+            // P2-16 (security review of #1244, F1): judged by its first reports before it takes a prompt (by the tick; the caller
+            // waits for that off the lock). What the last run reported does not stand for this one.
+            let awaiting = first_awaited(&capabilities, self.skip_permissions, confinement);
             let entry = self
                 .adapters
                 .get_mut(id)
@@ -4398,6 +4677,11 @@ impl Supervisor {
             entry.run_id = process_run_id(adapter.pid(), adapter.is_held());
             entry.adapter = Some(adapter);
             entry.replayed = replayed;
+            entry.options = SessionOptions::default();
+            entry.rich.config.clear();
+            entry.awaiting = awaiting;
+            entry.verdict = None;
+            entry.refusal = Arc::default();
             entry.confinement = confinement;
             entry.git_config = git_config;
             entry.session_id = session_id;
@@ -4939,6 +5223,123 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
     }
 }
 
+/// P2-16: the longest a start or resume waits, off the supervisor's lock, for the judgement of the agent's first reports
+/// ([`await_first_reports`]). The ACP bridge sends them right after it answers the start. An agent whose reports come later stays
+/// being judged: it takes no prompt until they came and were judged.
+pub const FIRST_REPORT_WAIT: Duration = Duration::from_secs(2);
+
+/// P2-16 (security review of #1244, F1): which first reports a just-launched adapter is judged by before it can take a prompt, under a
+/// policy that refuses skipping for this launch (`policy`, `confinement`): its mode (it declared `set_mode` or `set_model`) and its
+/// config options (`config`). Any other policy, or an adapter that declares neither: none. Nothing is read or waited for here: the
+/// tick reads the reports as they come and judges them (`poll_adapters`).
+fn first_awaited(
+    capabilities: &[String],
+    policy: SkipPermissions,
+    confinement: Confinement,
+) -> (bool, bool) {
+    if policy_refusal(policy, confinement).is_none() {
+        return (false, false);
+    }
+    let has = |c: &str| capabilities.iter().any(|x| x == c);
+    (has("set_mode") || has("set_model"), has("config"))
+}
+
+/// P2-16: where the judgement of an adapter agent's first reports after its launch stands ([`Supervisor::first_report_state`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstReport {
+    /// Not judged yet: the agent takes no prompt.
+    Pending,
+    /// Judged and allowed, or nothing to judge (any other policy, an adapter that reports nothing, an agent that ended).
+    Done,
+    /// Refused: the node stopped the agent (its `kind`, and what it had in use).
+    Refused(String, SkipVerdict),
+}
+
+/// P2-16 (security review of #1244, F1): waits, never holding the supervisor's lock (`sup` is taken only for a look, every 20 ms),
+/// until the tick judged the first reports of the agent just started or resumed as `id`, at most [`FIRST_REPORT_WAIT`]. Refused:
+/// `agent.option_forbidden` (`kind`, the mode, model or config option id in use, the policy); the tick has already stopped the agent
+/// and killed its process. Allowed, nothing to judge, or the wait ran out: `Ok` (an agent still being judged then takes no prompt
+/// until it has been: `adapter.no_answer`, call `session`). The tick and every other agent go on meanwhile.
+pub fn await_first_reports(sup: &Mutex<Supervisor>, id: &AgentId) -> Result<(), SupervisorError> {
+    let end = Instant::now() + FIRST_REPORT_WAIT;
+    loop {
+        let state = sup
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .first_report_state(id);
+        match state {
+            FirstReport::Refused(kind, v) => {
+                return Err(SupervisorError::OptionForbidden(kind, v.option, v.policy));
+            }
+            FirstReport::Pending if Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => return Ok(()),
+        }
+    }
+}
+
+/// P2-16 (ADR-0090): stops an adapter agent whose mode, model or config option in use skips permissions under a policy that refuses
+/// it, as [`Supervisor::stop`] does (no restart, `done`, its waiting prompts dropped), and says why ([`SupervisorEvent::SkipRefused`],
+/// then [`SupervisorEvent::Stopped`]). It takes no more prompts from here on (`running` is false), and a prompt call already under
+/// way is answered with the refusal (`refusal` is set first). Its process is killed at once, without the graceful stop (security
+/// review of #1244), on a thread of its own: this runs in the tick, under the supervisor's lock, and a process the holder runs is
+/// waited for there. The launch's Git file goes with the process, once it is ended (#933). What it reported is forgotten, so it is
+/// not shown acting freely after its end.
+fn refuse_skipping(
+    id: &AgentId,
+    e: &mut AdapterEntry,
+    verdict: SkipVerdict,
+    events: &mut Vec<SupervisorEvent>,
+) {
+    // Operational log, not UI text.
+    eprintln!(
+        "agent.skip_refused: agent={} policy={} setting={}",
+        id.as_str(),
+        verdict.policy,
+        verdict.setting
+    );
+    let (policy, setting) = (verdict.policy, verdict.setting);
+    let _ = e.refusal.set(verdict);
+    e.verdict = None;
+    e.awaiting = (false, false);
+    e.restart_at = None;
+    e.running = false;
+    let adapter = e.adapter.take();
+    let git_config = e.git_config.take();
+    if let Some(adapter) = adapter {
+        // Dropping the adapter kills its process and collects it. A thread that cannot be made drops what it was given: the kill is
+        // then made here instead.
+        let _ = std::thread::Builder::new()
+            .name("agora-skip-refused".into())
+            .spawn(move || {
+                drop(adapter);
+                drop(git_config);
+            });
+    }
+    e.options = SessionOptions::default();
+    let dropped = e.rich.forget();
+    apply_state(
+        &mut e.agent,
+        &mut e.state_reported,
+        AgentState::Done,
+        Origin::Node,
+        events,
+    );
+    if !dropped.is_empty() {
+        events.push(SupervisorEvent::PromptsDropped {
+            agent: id.clone(),
+            tags: dropped,
+        });
+    }
+    events.push(SupervisorEvent::SkipRefused {
+        agent: id.clone(),
+        policy,
+        setting,
+    });
+    events.push(SupervisorEvent::Stopped { agent: id.clone() });
+}
+
 /// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
 /// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
 /// it (once) and, when it failed, goes on with the next prompt.
@@ -4981,6 +5382,7 @@ fn begin_send(
         },
         generation,
         epoch: e.rich.epoch,
+        refusal: Arc::clone(&e.refusal),
     };
     let (results, agent, tag) = (Arc::clone(sent), id.clone(), next.tag);
     let spawned = std::thread::Builder::new()
@@ -5996,6 +6398,162 @@ mod adapter_option_tests {
         // A mode no longer offered (the id does not match one of the list) does not count.
         options.current_mode = String::new();
         assert!(!skips_now(false, &options, &[]));
+    }
+
+    /// P2-16: what an adapter agent has in use is judged against the `skip_permissions` policy as a switch is: `forbid` refuses a
+    /// mode or a config option in use that skips (a boolean on, a select's choice), `confined_only` unless the launch was recorded
+    /// as confined (an unknown one is refused), `allow` never; nothing in use that skips is never refused, nor an option offered and
+    /// not in use. The judge takes the bounded report, so the node's own rule (`perm`) counts as well as the adapter's word.
+    #[test]
+    fn what_an_agent_has_in_use_is_refused_as_a_switch_to_it_would_be() {
+        fn judge(
+            p: SkipPermissions,
+            c: Confinement,
+            o: &SessionOptions,
+            cfg: &[ConfigOption],
+        ) -> Option<(&'static str, &'static str)> {
+            skip_in_use_refused(p, c, o, cfg).map(|v| (v.policy, v.setting))
+        }
+        use Confinement::{Confined, Unconfined, Unknown};
+        use SkipPermissions::{Allow, ConfinedOnly, Forbid};
+        let opt = |id: &str, skips: bool| SessionOption {
+            id: id.into(),
+            name: id.into(),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        };
+        let modes = |current: &str| SessionOptions {
+            modes: vec![opt("default", false), opt("bypassPermissions", true)],
+            current_mode: current.into(),
+            ..SessionOptions::default()
+        };
+        let boolean = |current: &str| ConfigOption {
+            id: "auto_approve".into(),
+            boolean: true,
+            current: current.into(),
+            skips_permissions: true,
+            ..ConfigOption::default()
+        };
+        let asks = modes("default");
+        let skips = modes("bypassPermissions");
+        for c in [Confined, Unconfined, Unknown] {
+            assert_eq!(judge(Forbid, c, &skips, &[]), Some(("forbid", "mode")));
+            assert_eq!(judge(Allow, c, &skips, &[]), None);
+            assert_eq!(judge(Forbid, c, &asks, &[]), None);
+        }
+        assert_eq!(judge(ConfinedOnly, Confined, &skips, &[]), None);
+        for c in [Unconfined, Unknown] {
+            assert_eq!(
+                judge(ConfinedOnly, c, &skips, &[]),
+                Some(("confined_only", "mode"))
+            );
+        }
+        // A config option in use: a boolean that is on, a select whose choice skips (flagged by the node's rule, not the adapter's).
+        assert_eq!(
+            judge(Forbid, Unknown, &asks, &[boolean("true")]),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(judge(Forbid, Unknown, &asks, &[boolean("false")]), None);
+        // A boolean whose protective value is ON (`ask_for_approval`): off skips, on does not, as a switch to either is judged; one
+        // whose words do not say which value protects counts as skipping at both, as a switch does.
+        let named = |id: &str, current: &str| {
+            bounded_config(vec![ConfigOption {
+                id: id.into(),
+                name: id.into(),
+                category: "mode".into(),
+                boolean: true,
+                current: current.into(),
+                ..ConfigOption::default()
+            }])
+        };
+        assert_eq!(
+            judge(Forbid, Unknown, &asks, &named("ask_for_approval", "false")),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(
+            judge(Forbid, Unknown, &asks, &named("ask_for_approval", "true")),
+            None
+        );
+        for v in ["true", "false"] {
+            assert_eq!(
+                judge(Forbid, Unknown, &asks, &named("permissions", v)),
+                Some(("forbid", "config")),
+                "{v}"
+            );
+        }
+        // A plain boolean that is not about permissions is never refused.
+        let plain = bounded_config(vec![ConfigOption {
+            id: "extended".into(),
+            name: "Extended thinking".into(),
+            category: "thought_level".into(),
+            boolean: true,
+            current: "true".into(),
+            ..ConfigOption::default()
+        }]);
+        assert_eq!(judge(Forbid, Unknown, &asks, &plain), None);
+        let select = |current: &str| {
+            bounded_config(vec![config("approvals", "mode", current, &["ask", "yolo"])])
+        };
+        assert_eq!(
+            judge(Forbid, Unknown, &asks, &select("yolo")),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(judge(Forbid, Unknown, &asks, &select("ask")), None);
+        // A mode the adapter did not flag, read by the node's own rule once bounded as a report is.
+        let reported = bounded_options(SessionOptions {
+            modes: vec![opt("default", false), opt("yolo", false)],
+            current_mode: "yolo".into(),
+            ..SessionOptions::default()
+        });
+        assert_eq!(
+            judge(Forbid, Unknown, &reported, &[]),
+            Some(("forbid", "mode"))
+        );
+        // The mode comes first when both skip.
+        assert_eq!(
+            judge(Forbid, Unknown, &skips, &[boolean("true")]),
+            Some(("forbid", "mode"))
+        );
+        // Security review of #1244, F2: an id in use that is not in the report's list is judged on the id alone (never dropped as
+        // unknown), as is a select's value that is not one of its choices; the model in use as a model switch is; the verdict names
+        // the id.
+        let unlisted = |current: &str| SessionOptions {
+            modes: vec![opt("default", false)],
+            current_mode: current.into(),
+            ..SessionOptions::default()
+        };
+        assert_eq!(
+            judge(Forbid, Unknown, &unlisted("yolo"), &[]),
+            Some(("forbid", "mode"))
+        );
+        assert_eq!(
+            judge(Forbid, Unknown, &unlisted("turbo"), &[]),
+            Some(("forbid", "mode"))
+        );
+        assert_eq!(judge(Forbid, Unknown, &unlisted("plan"), &[]), None);
+        let off_list = vec![config("approvals", "mode", "yolo", &["ask"])];
+        assert_eq!(
+            judge(Forbid, Unknown, &asks, &off_list),
+            Some(("forbid", "config"))
+        );
+        let model = SessionOptions {
+            models: vec![opt("claude-x", false), opt("yolo-fast", false)],
+            current_model: "yolo-fast".into(),
+            ..asks.clone()
+        };
+        assert_eq!(
+            judge(Forbid, Unknown, &model, &[]),
+            Some(("forbid", "model"))
+        );
+        let plain_model = SessionOptions {
+            current_model: "auto".into(),
+            ..model.clone()
+        };
+        assert_eq!(judge(Forbid, Unknown, &plain_model, &[]), None);
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &unlisted("yolo"), &[]).map(|v| v.option),
+            Some("yolo".to_string())
+        );
     }
 
     #[test]

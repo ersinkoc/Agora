@@ -527,6 +527,14 @@ notice-other = Ajan bu pencerenin gösteremediği bir şey bildirdi ({ $code }).
 notice-approval-always_only_forbidden = Ajan “{ $action }” için izin istedi ve yalnızca hatırlayacağı bir yanıt sundu. Bu makine yalnızca tek seferlik yanıtlara izin veriyor, bu yüzden reddedildi.
 notice-adapter-permission_unanswerable = Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi.
 notice-chat-history_not_saved = Bu konuşma çalıştığı makinede kaydedilemedi (diski dolu olabilir). Ajan çalışmaya devam ediyor, ancak bundan sonraki adımlar Agora yeniden başladıktan sonra eksik olabilir.
+notice-agent-skip_permissions_refused = { $setting ->
+    [config] Bu ajanın kendi ayarlarından biri, size sormadan komut çalıştırmasına ve dosyaları değiştirmesine izin veriyor.
+    [model] Bu ajanın kullandığı model, size sormadan komut çalıştırmasına ve dosyaları değiştirmesine izin veriyor.
+   *[mode] Bu ajanın modu, size sormadan komut çalıştırmasına ve dosyaları değiştirmesine izin veriyor.
+} { $policy ->
+    [confined_only] Bu makine buna yalnızca klasörüyle sınırlı ajanlar için izin veriyor, bu yüzden Agora onu durdurdu. Ajandaki bu ayarı soran bir ayarla değiştirip yeniden başlatın.
+   *[forbid] Bu makine buna izin vermiyor, bu yüzden Agora onu durdurdu. Ajandaki bu ayarı soran bir ayarla değiştirip yeniden başlatın.
+}
 session-header = Ajan ayarları
 session-elapsed-hint = Ne kadar süredir çalışıyor
 session-mode = Mod

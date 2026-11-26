@@ -2378,10 +2378,12 @@ impl Node {
                                 spawner.agent_ended(agent);
                             }
                             // ADR-0090 Amendment A: a card to switch an agent to a mode that skips permission questions names this agent's
-                            // session; when it ends, crashes or is stopped, no decision may apply it later.
+                            // session; when it ends, crashes or is stopped (P2-16: also for what it had in use), no decision may apply it
+                            // later.
                             if let SupervisorEvent::Exited { agent, .. }
                             | SupervisorEvent::GaveUp { agent, .. }
                             | SupervisorEvent::Stopped { agent }
+                            | SupervisorEvent::SkipRefused { agent, .. }
                             | SupervisorEvent::AdapterCrashed { agent } = e
                             {
                                 for id in approvals.withdraw_skips(agent, None) {
@@ -2545,6 +2547,26 @@ impl Node {
                                         chat.set_working(agent, false);
                                     }
                                     restart_notice(&chat, e, &views, now);
+                                }
+                                // P2-16: the node stopped an agent whose mode or config option in use skips permissions under a
+                                // policy that refuses it. As a stop asked for (`AgentStop`): it leaves the mesh and what its adapter
+                                // asked is withdrawn (the `Stopped` that follows does the rest); its conversation says why.
+                                SupervisorEvent::SkipRefused {
+                                    agent,
+                                    policy,
+                                    setting,
+                                } => {
+                                    mesh.unregister_because(agent, "stopped");
+                                    for approval in approvals.cancel_adapter_requests(agent) {
+                                        chat.set_permission(
+                                            agent,
+                                            &approval,
+                                            v1::PermissionOutcome::Cancelled,
+                                            now,
+                                        );
+                                        ev.approval_resolved(&approval, false, "");
+                                    }
+                                    chat.skip_refused(agent, policy, setting, now);
                                 }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {

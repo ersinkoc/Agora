@@ -1103,6 +1103,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let path = view.worktree.to_string_lossy().into_owned();
             let workspace_id = format!("directory:{path}");
             drop(sup);
+            // P2-16: under a policy that refuses skipping, the agent's first reports are judged by the tick before it is announced;
+            // waited for here, off the supervisor's lock (never in the tick), at most `FIRST_REPORT_WAIT`.
+            crate::supervisor::await_first_reports(&ctx.supervisor, &id).map_err(sup_err)?;
             if let Some(ev) = &ctx.events {
                 let git_root = if a.separate_worktree {
                     let root = req.worktree_root.join(&req.name);
@@ -1209,6 +1212,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let has_terminal = sup.terminal(&id).is_some();
             let session = sup.session_of(&id);
             drop(sup);
+            // P2-16: under a policy that refuses skipping, the agent's first reports are judged by the tick before it is announced;
+            // waited for here, off the supervisor's lock (never in the tick), at most `FIRST_REPORT_WAIT`.
+            crate::supervisor::await_first_reports(&ctx.supervisor, &id).map_err(sup_err)?;
             if let Some(ev) = &ctx.events {
                 ev.agent_launched_with(
                     &id,
@@ -1952,6 +1958,9 @@ pub(crate) fn resume_agent(
             }
         }
     };
+    // P2-16: under a policy that refuses skipping, the resumed agent's first reports are judged by the tick before it is announced;
+    // waited for here, off the supervisor's lock (never in the tick), at most `FIRST_REPORT_WAIT`.
+    crate::supervisor::await_first_reports(&ctx.supervisor, &id).map_err(sup_err)?;
     // Said once for this interruption: the ledger remembers it (so it is not sent again), and the node's log says it was sent.
     if carried {
         ledger.mark_continue_sent(agent_id, crate::daemon::now_ms());

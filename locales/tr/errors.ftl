@@ -108,6 +108,7 @@ adapter-option_refused = Ajan { $id } seçeneğine geçmedi.
 adapter-permission_unanswerable = Ajan “{ $action }” için izin istedi ama izin vermenin bir yolunu sunmadı, bu yüzden reddedildi.
 adapter-no_answer = { $call ->
         [approval] { $kind } yanıtınızı { $waited_ms } ms içinde almadı. İstek hâlâ açık: biraz bekleyip yeniden yanıtlayın.
+        [session] { $kind }, harekete geçmeden önce sorup sormadığını { $waited_ms } ms içinde bildirmedi ve bu makine yalnızca soran ajanlara izin veriyor; bu yüzden ona hiçbir şey gönderilmedi.
        *[prompt] { $kind } isteğinizi { $waited_ms } ms içinde onaylamadı. Biraz bekleyin; bir şey olmazsa yeniden gönderin.
     }
 pair-closed = Bu hub şu anda yeni makine kabul etmiyor.
