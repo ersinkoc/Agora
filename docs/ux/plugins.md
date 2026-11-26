@@ -192,8 +192,9 @@ the page (as it can in WebKit, the app's webview on macOS and Linux, below):
   menu bar, which has only that menu, so no menu shortcut takes a key from a terminal). The menu is drawn and run by the app, while the
   page runs in the webview's separate web process, so it answers while the page cannot. It starts the app again with `--safe`, and
   the hub opens again in safe mode at its start page; asking the frozen page to load `?safe` does nothing, as the web process handles
-  the load and never comes back to it (seen with WebKitGTK 2.52). WebKit ends the frozen web process about 10 s after the old app has
-  gone. On the connect screen the item makes the hub open in safe mode once connected.
+  the load and never comes back to it. With WebKitGTK 2.52 on Linux, with a frame looping for good, the item (activated through the
+  accessibility interface) started the app again in safe mode, and WebKit ended the frozen web process about 10 s after the old app
+  quit; macOS is not tested. On the connect screen the item makes the hub open in safe mode once connected.
 - **`--safe`** at start (`agora-desktop --safe`; on a Mac `open -a Agora --args --safe`) opens the hub in safe mode before any
   plugin runs.
 
