@@ -9,7 +9,11 @@ export const PHONE_QUERY = '(max-width: 699px), (max-height: 500px) and (pointer
 
 // The phone's screens: the list (what needs you, then the machines and their agents) and one agent. Anything else in the address is
 // a page the window already has (machines, this device, audit, the gallery).
-export type PhoneScreen = { kind: 'home' } | { kind: 'agent'; id: string } | { kind: 'approval'; id: string } | { kind: 'theme' } | { kind: 'page' };
+export type PhoneScreen = { kind: 'home' } | { kind: 'agent'; id: string } | { kind: 'approval'; id: string } | { kind: 'theme' } | { kind: 'details'; tab: PhoneDetailsTab } | { kind: 'page' };
+
+// The side panel's deep subjects (the board, Team chat, Usage) as screens of their own: a phone has no side panel (visual pass 2026-11).
+export type PhoneDetailsTab = 'board' | 'messages' | 'usage';
+export const PHONE_DETAILS: Readonly<Record<PhoneDetailsTab, string>> = { board: '#/board', messages: '#/messages', usage: '#/usage' };
 
 function decode(s: string): string | undefined {
   try { return decodeURIComponent(s); } catch { return undefined; }
@@ -22,11 +26,13 @@ export function phoneScreen(hash: string): PhoneScreen {
   if (hash.startsWith('#/approvals/')) { const id = decode(hash.slice('#/approvals/'.length)); return id ? { kind: 'approval', id } : { kind: 'home' }; }
   // The theme editor is a panel of the full window (ADR-0068); a phone shows it as a screen of its own.
   if (hash === '#/theme') return { kind: 'theme' };
+  const details = (Object.keys(PHONE_DETAILS) as PhoneDetailsTab[]).find((tab) => PHONE_DETAILS[tab] === hash);
+  if (details) return { kind: 'details', tab: details };
   if (/^#\/(machines|device|audit|gallery|demo)$/.test(hash)) return { kind: 'page' };
   return { kind: 'home' };
 }
 
-// Where Back goes: an agent, the theme editor and every page go back to the list.
+// Where Back goes: an agent, the theme editor, the board, Team chat, Usage and every page go back to the list.
 export function backOf(screen: PhoneScreen): string | undefined {
   return screen.kind === 'home' ? undefined : '#/';
 }

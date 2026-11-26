@@ -1319,6 +1319,7 @@ phone-nav = Go to
 phone-search = Search
 phone-start = Start
 phone-machines = Machines
+phone-more = More
 phone-back = Back to the list
 phone-offline = offline
 phone-no-agents = No agents on this machine.

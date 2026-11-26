@@ -200,6 +200,10 @@ const STATIC = [
       const file = page.locator('[data-pane="p1"]').getByText('auth.rs', { exact: false }).first();
       if (await file.count()) await file.click().catch(() => {});
     } },
+  // The phone's More menu (the board, Team chat and Usage), opened from the bottom bar. A phone only: a larger screen has the side panel.
+  { name: 'phone-more', widths: ['phone'], path: '/#/demo', ready: '.phone', setup: async (page) => { await page.getByRole('button', { name: 'More', exact: true }).click(); await page.waitForSelector('[role=menu]'); } },
+  // Usage as a phone screen of its own (from More), on the demo data.
+  { name: 'usage', widths: ['phone'], path: '/#/usage', ready: '.phone h1' },
   { name: 'palette', path: '/#/demo', ready: '.fleet-summary', setup: async (page, width) => { await openPalette(page, width); await page.waitForTimeout(300); } },
   { name: 'settings', path: '/#/gallery/settings', ready: '[data-settings]', context: { permissions: ['notifications'] } },
   { name: 'machines', path: '/#/machines', ready: '.page, main' },
@@ -348,18 +352,19 @@ async function livePart() {
     await a.tool('send_message', { to: helper, body: 'I am taking src/auth.rs. Please stay out of it until I push.' });
     await b.tool('send_message', { to: shell, body: 'Fine. The parser port touches src/parser.rs only; I will run the whole suite before I mark it done.' });
     const panes = (p1, p2) => page.evaluate((v) => localStorage.setItem('agora.workspace.v1', v), layout(split([0.55, 0.45], p1, p2), 'p2'));
-    // The phone has no panes and no way to the board or Team chat (a finding of this pass), so these two are desktop shots.
-    await each('board', async () => {
+    // On a desktop the board and Team chat are panes beside Home; on a phone each is a screen of its own, reached from More in the
+    // bottom bar (finding 15), shot here at its own address.
+    await each('board', async (width) => {
       await panes(pane('p1', 'fleet'), pane('p2', 'tasks'));
-      await page.goto(`${origin}/#/`); await page.reload();
+      await page.goto(`${origin}/#/${width === 'phone' ? 'board' : ''}`); await page.reload();
       await page.getByRole('button', { name: /^Open board/ }).locator('visible=true').first().click();
       await page.getByRole('dialog').getByText('Port the parser to the new token API').waitFor();
-    }, ['desktop']);
-    await each('team-chat', async () => {
+    });
+    await each('team-chat', async (width) => {
       await panes(pane('p1', 'fleet'), pane('p2', 'messages'));
-      await page.goto(`${origin}/#/`); await page.reload();
+      await page.goto(`${origin}/#/${width === 'phone' ? 'messages' : ''}`); await page.reload();
       await page.getByText('I am taking src/auth.rs', { exact: false }).first().waitFor({ timeout: 15000 });
-    }, ['desktop']);
+    });
     // A machine asking to join (ADR-0065): the owner allows new machines from My machines, `agora join` runs on the new machine (here a
     // second home on this one), and the card with its number shows on My machines. The join is stopped once shot; nothing joins.
     if (want('pairing')) {

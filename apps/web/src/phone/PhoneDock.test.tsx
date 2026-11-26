@@ -10,7 +10,7 @@ import type { AgentTileModel } from '../model';
 import { demoStartApproval } from '../fixtures';
 import type { ApprovalModel } from '../net/view';
 import type { PairingUi } from '../components/Pairing';
-import { DOCK_DWELL_MS, PhoneAgent, PhoneHome } from './Phone';
+import { DOCK_DWELL_MS, PhoneAgent, PhoneDetails, PhoneHome } from './Phone';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 // These tests are about request cards, not terminals: a real terminal (xterm, loaded lazily) needs browser APIs jsdom lacks
@@ -251,5 +251,30 @@ describe('the phone bar for what needs you', () => {
     home([ask('p1')], { link: 'offline', onRetry: () => undefined });
     expect(host.querySelectorAll('[role=status]:not(.phone-dock)').length).toBe(1);
     expect(host.textContent).not.toContain('Cannot reach your Agora');
+  });
+});
+
+// Visual pass 2026-11 (finding 15): a phone has no side panel, so its bottom bar's More reaches the board, Team chat and Usage, each a
+// screen of its own with Back.
+describe('the board, Team chat and Usage on a phone', () => {
+  it('are reached from More in the bottom bar', () => {
+    home([]);
+    const more = [...host.querySelectorAll('nav button')].find((b) => b.textContent === 'More') as HTMLButtonElement;
+    expect(more.getAttribute('aria-haspopup')).toBe('menu');
+    act(() => { more.click(); });
+    const items = [...document.querySelectorAll('[role=menu] [role=menuitem]')];
+    expect(items.map((x) => x.textContent)).toEqual(['Shared tasks and files', 'Team chat', 'Usage']);
+    act(() => { (items[1] as HTMLElement).click(); });
+    expect(window.location.hash).toBe('#/messages');
+    window.location.hash = '';
+  });
+
+  it('draw what the side panel draws, under a title and Back', () => {
+    const onBack = vi.fn();
+    act(() => root.render(<PhoneDetails tab="messages" agents={[agent]} boards={[]} messages={[]} onOpen={() => undefined} onBack={onBack} />));
+    expect(host.querySelector('h1')?.textContent).toBe('Team chat');
+    expect(host.textContent).toContain('No messages yet');
+    act(() => { (host.querySelector('button[aria-label="Back to the list"]') as HTMLButtonElement).click(); });
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 });

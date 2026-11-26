@@ -1274,6 +1274,7 @@ phone-nav = Git
 phone-search = Ara
 phone-start = Başlat
 phone-machines = Makineler
+phone-more = Diğer
 phone-back = Listeye dön
 phone-offline = çevrim dışı
 phone-no-agents = Bu makinede ajan yok.

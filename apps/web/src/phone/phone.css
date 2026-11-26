@@ -66,6 +66,10 @@ body {
 .phone__nav:hover, .phone__nav:active { background: var(--surface-2); color: var(--text); }
 .phone__nav:disabled { opacity: 0.4; }
 .phone__nav--primary { color: var(--accent); }
+/* More: a menu button in the bar, as wide as its neighbours; its rows take a finger (the menu is drawn over the page, outside .phone). */
+.phone__bottom > span { display: flex; }
+.phone__bottom > span > .phone__nav { flex: 1; min-width: 0; }
+.phone-details { padding: var(--space-3); }
 
 /* Every control in the phone window, and the ones it borrows (the theme switch, cards' buttons, the widget kit's), is big enough for a
    finger. A phone is a narrow window, not always a touch screen (`pointer: coarse` grows the kit only there), so the phone sets it here. */
@@ -234,6 +238,7 @@ body {
 
 /* The pages a phone shows in the window's own frame (machines, this device, audit): Back and the bar's buttons take a finger too. */
 @media (max-width: 699px), (max-height: 500px) and (pointer: coarse) {
+  [role='menu'] .ide-row { min-height: var(--tap); }
   header.ide-bar { height: auto; min-height: calc(var(--tap) + var(--space-1)); }
   header.ide-bar .ide-row { min-height: var(--tap); }
   header.ide-bar .ide-iconbtn { min-width: var(--tap); min-height: var(--tap); }

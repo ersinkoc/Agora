@@ -30,7 +30,10 @@ import { AnswerButtons, ApprovalRequest, ASK_ICON, askKind, askTitle } from '../
 import { AgentAvatar, Button, Callout, Pill, StatusPill, Tag } from '../components/kit';
 import { ATTENTION_DWELL_MS } from '../net/attention';
 import { requestShown, useAnswerGuard, type AnswerGuard } from '../components/useAnswerGuard';
-import { PHONE_QUERY, byMachine, dockOf, needsYou, type Dock, type NeedsItem } from './nav';
+import { PHONE_DETAILS, PHONE_QUERY, byMachine, dockOf, needsYou, type Dock, type NeedsItem, type PhoneDetailsTab } from './nav';
+import { Details } from '../components/Inspector';
+import { Menu, type MenuItem } from '../layout/Menu';
+import type { BoardModel, MessageModel } from '../net/view';
 import { type FleetFilter, askLine, emptyKind, fleetCounts, matchesFilter } from '../net/fleet';
 import { FleetEmpty, FleetSummary } from '../components/FleetConsole';
 import { PairCards, PairRecentList, PairWindowControl, type PairingUi } from '../components/Pairing';
@@ -307,6 +310,8 @@ export function PhoneHome({ agents, machines, approvals, onResolve, untrusted, n
         <NavButton icon="plus" label={t('phone-start')} onClick={onStart} primary />
         <NavButton icon="stack" label={t('phone-machines')} href="#/machines" />
         <NavButton icon="settings" label={t('device-link')} href="#/device" />
+        {/* The deep subjects the side panel holds on a larger screen, each a screen of its own here. */}
+        <Menu label={t('phone-more')} items={moreItems} className="phone__nav" align="end"><Icon name="more" className="size-5" /><span className="truncate">{t('phone-more')}</span></Menu>
       </>}>
       {notice && <div className="phone-notice"><Callout tone="danger" icon="warn" title={notice} alert /></div>}
       {/* The state of the link has a row of its own (in the title bar it pushed the buttons off a 390 px screen): one notice, what it means and Retry. */}
@@ -417,6 +422,34 @@ export function PhoneAgent({ agent, agents, approvals, machines, onResolve, untr
         {shown === 'changes' && loadDiff && <DiffDialog agent={agent} load={loadDiff} read={files?.read} onClose={() => setShown(undefined)} />}
         {shown === 'files' && files && <FilesDialog agent={agent} files={files} load={loadDiff} onClose={() => setShown(undefined)} />}
       </>}
+    </PhoneShell>
+  );
+}
+
+// The side panel's deep subjects, reached from More in the bottom bar: the board, Team chat and Usage.
+const DETAILS_LABEL: Record<PhoneDetailsTab, string> = { board: 'board-title', messages: 'ide-tab-messages', usage: 'ide-tab-usage' };
+const DETAILS_ICON: Record<PhoneDetailsTab, IconName> = { board: 'board', messages: 'chat', usage: 'gauge' };
+const moreItems = (): MenuItem[] => (Object.keys(PHONE_DETAILS) as PhoneDetailsTab[]).map((tab) => ({
+  label: t(DETAILS_LABEL[tab]), lead: <Icon name={DETAILS_ICON[tab]} className="size-4 text-muted" />, run: () => { window.location.hash = PHONE_DETAILS[tab]; },
+}));
+
+// One of them on a phone: a screen with Back, as the theme editor. It draws what the side panel draws for that subject.
+export function PhoneDetails({ tab, agents, boards, messages, onOpen, onBack }: {
+  tab: PhoneDetailsTab;
+  agents: readonly AgentTileModel[];
+  boards: readonly BoardModel[];
+  messages: readonly MessageModel[];
+  onOpen: (id: string) => void;
+  onBack: () => void;
+}) {
+  const title = t(DETAILS_LABEL[tab]);
+  return (
+    <PhoneShell label={title}
+      top={<>
+        <button type="button" className="phone-iconbtn" onClick={onBack} aria-label={t('phone-back')} title={t('phone-back')}><Icon name="chevron" className="size-5 rotate-180 rtl:rotate-0" /></button>
+        <h1 className="phone-title">{title}</h1>
+      </>}>
+      <div className="phone-details"><Details tab={tab} fleet={agents} attention={[]} approvals={[]} changed={[]} boards={boards} messages={messages} onOpen={onOpen} /></div>
     </PhoneShell>
   );
 }

@@ -51,7 +51,7 @@ import { useUsageReport } from './net/useUsage';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
-import { PhoneAgent, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
+import { PhoneAgent, PhoneDetails, PhoneHome, PhoneTheme, usePhone } from './phone/Phone';
 import { approvalRedirect, phoneScreen } from './phone/nav';
 import { AttentionLayer } from './components/AttentionLayer';
 import { AgentAlerts } from './components/AgentAlerts';
@@ -542,8 +542,11 @@ export function App() {
   // A phone has no panels: there the editor is a screen of its own (ADR-0067 rung 2).
   const editTheme = useCallback(() => { if (phone) { go('#/theme'); return; } if (!['', '#/', '#/demo'].includes(hash)) go('#/'); requestPanel('theme'); }, [go, hash, phone]);
   // Home is what Console / PhoneHome draw (the chain below); any other page gets the first request as a floating card.
+  // The board, Team chat and Usage: screens of their own on a phone (the side panel holds them on a larger screen).
+  const screenNow = phoneScreen(hash);
+  const phoneDetails = phone && screenNow.kind === 'details' ? screenNow.tab : undefined;
   const settingsDemo = hash === '#/gallery/settings' || hash.startsWith('#/gallery/settings/');
-  const showsHome = current === undefined && hash !== '#/gallery' && !settingsDemo && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone);
+  const showsHome = current === undefined && hash !== '#/gallery' && !settingsDemo && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone) && !phoneDetails;
   // "Allow a new machine to join": back to Home, where the window for new machines is; its own button asks, this only brings it into view.
   const showPairing = useCallback(() => {
     go('#/');
@@ -639,6 +642,7 @@ export function App() {
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
+        : phoneDetails ? <PhoneDetails tab={phoneDetails} agents={agents} boards={boardList} messages={live ? recentMessages(live) : []} onOpen={open} onBack={() => go('#/')} />
         : current !== undefined && phone
         ? <PhoneAgent agent={selectedAgent} agents={agents} approvals={approvalsNow} loadDiff={hub && api ? loadDiff : !hub ? demoLoadDiff : undefined} filesOf={hub && api ? filesOf : !hub ? demoFilesOf : undefined} machines={live ? machines(live) : hub ? [] : demoMachines} onResolve={answerRequest} untrusted={untrustedOn} notice={notice ? t(notice) : undefined}
           source={terminal} chatSource={selectedAgent?.terminal === false ? chatOf(selectedAgent) : undefined} sendPrompt={hub && api && changes ? sendPrompt : undefined} chooseOption={hub && api && changes ? chooseOption : undefined} link={hub ? link : 'live'} onOpen={open} onBack={() => go('#/')} />
