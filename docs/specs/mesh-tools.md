@@ -288,7 +288,7 @@ by their id and agents on other machines `<node>/<agent>`, which is how `send_me
 The node's broker answers for its own agents. The node then asks the hub with `BoardCall{tool: "workspace_status",
 arguments_json: "{}"}` (the read-only counterpart of the board tools, ADR-0039; no new message): when the project is shared the
 hub answers with the running agents of the project on online nodes (kind, machine, state, the board task each claimed, the paths
-each holds, its parent, its worktree path), the board's open tasks and live leases and how many machines are online; the node keeps
+each holds, its parent, its folder: its worktree, or the folder it was started in), the board's open tasks and live leases and how many machines are online; the node keeps
 its own rows (they know more), puts the board's task and leases into them and adds the others (`since` and `files_changed` are
 `null` for those). When the hub says the project is not shared the node's answer is complete. When the hub cannot be asked (no hub,
 `mesh.remote = false`, an older hub that refuses the tool, or 3 s without an answer) the answer is the node's alone with
@@ -302,7 +302,7 @@ pick a machine for a helper. The node asks the hub once with `BoardCall{tool: "f
 `{ machines: [{ id, online, os, build, agents_running, last_seen_ms }], agents: [{ agent_id, kind, machine, project, state, workspace,
 parent }], partial }`: every machine it knows whose latest link agreed on `mesh.fleet_status.v1` (offline ones too, by their last link;
 a machine the owner forgot is left out), every running agent on such a machine while it is online (`agent_id` is `<node>/<agent>`, what `send_message` takes; `state` is the window's word: `working`, `blocked`, `idle`,
-`done`, `unknown`; `workspace` is the folder on its machine), at most 64 machines and 200 agents, `partial: true` when either cap cut
+`done`, `unknown`; `workspace` is the folder on its machine, its worktree or the folder it was started in), at most 64 machines and 200 agents, `partial: true` when either cap cut
 the list. Never `doing`, a label, a task, a message or a file name.
 
 - **`machines_list {}`** answers `{ machines, partial }` with the hub's machines (text cleaned and cut like the rest of this section).

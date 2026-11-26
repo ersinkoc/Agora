@@ -2563,6 +2563,55 @@ mod tests {
         remove_db(&path);
     }
 
+    /// F1821 (ADR-0115): an older hub stored a board under each spelling it saw, and recorded each with its own `TaskChanged`. Every
+    /// one is merged, not only the spelling it named last: a spelling no node reports any more is found by the hub's own records.
+    #[test]
+    fn every_spelling_the_older_hub_recorded_is_merged() {
+        use crate::store::EventStore;
+        let (hub, path) = hub_on_file("f1821-hub-spellings");
+        let (_, folded) = two_spellings(&hub);
+        // Spellings no node reports now: only the older hub's own board facts name them, the second one last.
+        let first = format!("github.com/Ersinkoc/agora#{ROOT_0115}");
+        let last = format!("github.com/ERSINKOC/AGORA#{ROOT_0115}");
+        let mut seq = hub.store().acked(RESERVED_HUB_ID).unwrap();
+        for (project, task) in [(&first, "t-first"), (&last, "t-last")] {
+            seq += 1;
+            let e = Event {
+                producer_id: RESERVED_HUB_ID.into(),
+                seq,
+                at_ms: seq,
+                body: Some(Body::TaskChanged(agora_protocol::v1::TaskChanged {
+                    task_id: task.into(),
+                    project_id: project.clone(),
+                    title: task.into(),
+                    ..Default::default()
+                })),
+            };
+            hub.store()
+                .append(RESERVED_HUB_ID, seq, seq, &e.encode_to_vec())
+                .unwrap();
+        }
+        for (project, title) in [(&first, "first one"), (&last, "last one")] {
+            hub.store()
+                .set_setting(
+                    &format!("board.{project}"),
+                    board_text(&[("t-1", title, None)]).as_bytes(),
+                )
+                .unwrap();
+        }
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let mut links = Vec::new();
+        for n in ["old", "new"] {
+            links.push(hub.node_link_opened(n, Vec::new(), 7).unwrap());
+            hub.board_join_settled(n, &folded);
+        }
+        assert_eq!(listed_titles(&hub, &folded), ["first one", "last one"]);
+        drop(links);
+        drop(hub);
+        remove_db(&path);
+    }
+
     /// ADR-0115 board, as an older hub stored it.
     fn board_text(tasks: &[(&str, &str, Option<&str>)]) -> String {
         let tasks: Vec<serde_json::Value> = tasks
