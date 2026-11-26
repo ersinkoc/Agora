@@ -213,7 +213,13 @@ pub(crate) fn ruleset(
                         .open(p)
                 }
                 Some((held, rel)) => open_below(held, rel),
-                None => std::fs::File::open(p),
+                None => {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_PATH)
+                        .open(p)
+                }
             };
             // A path that does not exist on this machine confines nothing; skip it.
             let Ok(f) = opened else {
@@ -2146,6 +2152,31 @@ mod closed_grant_tests {
             Some(git)
         );
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ruleset_does_not_block_on_fifo_in_read_or_write() {
+        let dir = std::env::temp_dir().join(format!("agora-linux-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("myfifo");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let sb = crate::Sandbox::new(vec![fifo.clone()], vec![fifo]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = super::ruleset(&sb, None, None);
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(500))
+                .is_ok(),
+            "ruleset blocked on FIFO"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

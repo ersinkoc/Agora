@@ -404,6 +404,9 @@ fn convert_binary(d: &Value, id: &str) -> Result<Dist, Reason> {
             .or_else(|| file.strip_suffix(".cmd"))
             .unwrap_or(file)
             .to_string();
+        if exe.is_empty() {
+            return Err(Reason::BadToken);
+        }
         if forbidden_executable(&exe) {
             return Err(Reason::ForbiddenExecutable);
         }

@@ -30,7 +30,7 @@ pub struct DeviceLimits {
 
 type Inherited = (
     std::path::PathBuf,
-    Option<Vec<u8>>,
+    Option<String>,
     Vec<crate::device_trust::Entry>,
 );
 
@@ -50,16 +50,21 @@ impl DeviceLimits {
     }
 
     /// What `device` may act in: its policy line, what it inherited through an endorsement, and what its endorser may act in now, up
-    /// the chain ([`crate::device_trust::effective_limit`]); `None`: not limited.
+    /// the chain ([`crate::device_trust::effective_limit`]); `None`: not limited. The trusted-devices file is read again whenever its
+    /// text changed; one that cannot be read leaves the last list read in place: an empty one would be the same as nobody being
+    /// endorsed, and every device limited only through an endorsement would be unlimited for as long as the file cannot be read.
     fn limit(&self, device: &str) -> Option<BTreeSet<String>> {
         let mut guard = self.inherited.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_mut() {
             None => self.map.get(device).cloned(),
             Some((path, seen, entries)) => {
-                let now = std::fs::read(&*path).ok();
-                if now != *seen {
-                    *entries = crate::device_trust::read_entries(path).0;
-                    *seen = now;
+                match std::fs::read_to_string(&*path) {
+                    Ok(text) if seen.as_deref() == Some(text.as_str()) => {}
+                    Ok(text) => {
+                        *entries = crate::device_trust::parse_entries(&text).0;
+                        *seen = Some(text);
+                    }
+                    Err(_) => {}
                 }
                 crate::device_trust::effective_limit(entries, &self.map, device)
             }
@@ -232,6 +237,94 @@ mod tests {
             p["empty"].is_empty(),
             "a named device with no projects acts in none"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A trusted-devices file where `phone` is endorsed by `owner`; `projects` is what it inherited (`None`: none of its own).
+    fn trust_text(projects: Option<&str>) -> String {
+        let key = format!("04{}", "0".repeat(128));
+        let inherited = projects
+            .map(|p| format!(" projects={p}"))
+            .unwrap_or_default();
+        format!(
+            "owner {key} since=1\nphone {key} since=2 expires=4102444800000 via=owner{inherited}\n"
+        )
+    }
+
+    fn trust_file(dir: &std::path::Path, projects: Option<&str>) -> std::path::PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let file = dir.join("trusted-devices");
+        std::fs::write(&file, trust_text(projects)).unwrap();
+        file
+    }
+
+    /// `phone` is limited to `web` exactly: what it may do has not grown.
+    fn still_limited_to_web(l: &DeviceLimits) -> bool {
+        l.is_limited("phone")
+            && l.allows_project("phone", "web")
+            && !l.allows_project("phone", "api")
+            && !l.allows_scope("phone", "project:api")
+            && !l.allows_agent("phone", "an-agent")
+    }
+
+    /// ADR-0061: a device limited only through its endorsement (the `projects=` it inherited) keeps that limit while the
+    /// trusted-devices file cannot be read. A file that is not text, cannot be opened or is gone never acts as if nobody were
+    /// endorsed: that would make the device unlimited for as long as the file cannot be read. Readable again, the new list applies.
+    #[test]
+    fn an_endorsed_device_keeps_its_inherited_limit_while_the_trust_file_cannot_be_read() {
+        let dir = std::env::temp_dir().join(format!("agora-limits-trust-{}", std::process::id()));
+        let file = trust_file(&dir, Some("web"));
+        let l = DeviceLimits::new(BTreeMap::new());
+        l.follow_trust_file(&file);
+        assert!(
+            still_limited_to_web(&l),
+            "the control: readable, the device is limited to web"
+        );
+        // Not text (damaged, or saved in another encoding).
+        std::fs::write(&file, [0xff, 0xfe, 0x00, b'\n']).unwrap();
+        assert!(still_limited_to_web(&l), "not text");
+        // Gone.
+        std::fs::remove_file(&file).unwrap();
+        assert!(still_limited_to_web(&l), "gone");
+        // Readable again, and widened on the machine: the new list applies.
+        std::fs::write(&file, trust_text(Some("web,api"))).unwrap();
+        assert!(l.allows_project("phone", "api"), "widened by the file");
+        assert!(l.is_limited("phone"));
+        // A folder where the file was: every platform refuses to read it, and the last list read stands (still `web,api`).
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(
+            std::fs::read_to_string(&file).is_err(),
+            "the trigger is in place"
+        );
+        assert!(l.is_limited("phone"), "cannot be opened: not unlimited");
+        assert!(
+            l.allows_project("phone", "api") && !l.allows_project("phone", "docs"),
+            "exactly the last list read"
+        );
+        assert!(!l.allows_scope("phone", "node"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ADR-0061: what narrows a device may be its endorser's policy line, read through the chain; that limit too stays while the
+    /// trusted-devices file cannot be read.
+    #[test]
+    fn a_device_narrowed_by_its_endorsers_policy_keeps_that_limit_while_the_file_cannot_be_read() {
+        let dir = std::env::temp_dir().join(format!("agora-limits-chain-{}", std::process::id()));
+        let file = trust_file(&dir, None);
+        let l = DeviceLimits::new(BTreeMap::from([(
+            "owner".to_string(),
+            BTreeSet::from(["web".to_string()]),
+        )]));
+        l.follow_trust_file(&file);
+        assert!(
+            still_limited_to_web(&l),
+            "the control: narrowed through its endorser"
+        );
+        std::fs::write(&file, [0xff, 0xfe]).unwrap();
+        assert!(still_limited_to_web(&l), "not text");
+        // The owner's own limit is the policy file's: unchanged.
+        assert!(l.allows_project("owner", "web") && !l.allows_project("owner", "api"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

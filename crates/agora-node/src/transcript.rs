@@ -1485,7 +1485,7 @@ impl Store {
     /// all, the oldest files of agents that are not kept. `status` tells, for the agents whose files are there, which the node keeps
     /// whatever their age (running, or interrupted and offered for Resume) and when the others ended; an agent it does not know ages
     /// from its file's last write (review of #1103, N6). An earlier session's file (`.earlier`) follows its agent. Leftovers of a
-    /// rewrite another process left (`.tmp-<pid>`) go. Returns how many files went.
+    /// rewrite another process left (`.tmp-<pid>-<seq>`, or `.tmp-<pid>` from earlier versions) go. Returns how many files went.
     pub fn sweep(
         &self,
         status: &dyn Fn(&[String]) -> HashMap<String, Kept>,
@@ -1496,7 +1496,7 @@ impl Store {
         };
         let mut removed = 0;
         let mut found: Vec<(String, std::fs::Metadata, PathBuf)> = Vec::new();
-        let ours = format!(".tmp-{}", std::process::id());
+        let me = std::process::id();
         for item in dir.flatten() {
             let name = item.file_name().to_string_lossy().into_owned();
             let Ok(meta) = item.metadata() else {
@@ -1506,7 +1506,9 @@ impl Store {
                 continue;
             }
             if name.contains(".jsonl.tmp-") {
-                if !name.ends_with(&ours) && std::fs::remove_file(item.path()).is_ok() {
+                // A write of this process may be in the middle of one: only another process's leftover goes.
+                let ours = agora_platform::split_temporary(&name).is_some_and(|(_, pid)| pid == me);
+                if !ours && std::fs::remove_file(item.path()).is_ok() {
                     removed += 1;
                 }
                 continue;
@@ -2524,6 +2526,12 @@ mod tests {
         assert!(store.read("fresh").entries.is_empty());
         // A leftover of a rewrite another process did not finish.
         std::fs::write(store.dir().join("old.jsonl.tmp-1"), "x").unwrap();
+        // The same in write_private's name from 0.3.41 on; a rewrite of this process in the middle of one is left alone.
+        std::fs::write(store.dir().join("old.jsonl.tmp-1-5"), "x").unwrap();
+        let in_flight = store
+            .dir()
+            .join(format!("fresh.jsonl.tmp-{}-3", std::process::id()));
+        std::fs::write(&in_flight, "x").unwrap();
         let ms = |t: SystemTime| {
             t.duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
@@ -2545,7 +2553,9 @@ mod tests {
                 .collect()
         };
         // Nothing is old yet; the leftover goes.
-        assert_eq!(store.sweep(&status, SystemTime::now()), 1);
+        assert_eq!(store.sweep(&status, SystemTime::now()), 2);
+        assert!(in_flight.exists(), "this process's own write is not swept");
+        std::fs::remove_file(&in_flight).unwrap();
         // The idle agent's file now carries its end time, so it keeps it once the ledger forgot the agent.
         let stamped = std::fs::metadata(store.path("idle-long").unwrap())
             .unwrap()

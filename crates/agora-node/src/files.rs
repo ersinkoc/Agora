@@ -202,14 +202,14 @@ enum Inside {
 fn visit_inside(
     root: &Path,
     dir: &Path,
-    visitor: impl FnMut(agora_platform::DirItem) -> ControlFlow<()>,
+    mut visitor: impl FnMut(&Path, agora_platform::DirItem) -> ControlFlow<()>,
 ) -> Result<(), Inside> {
     let handle = agora_platform::open_dir(dir).map_err(Inside::Io)?;
     let real = agora_platform::opened_path(&handle).map_err(Inside::Io)?;
     if !real.starts_with(root) {
         return Err(Inside::Outside);
     }
-    agora_platform::visit_dir(&handle, visitor).map_err(Inside::Io)
+    agora_platform::visit_dir(&handle, |item| visitor(&real, item)).map_err(Inside::Io)
 }
 
 impl Files {
@@ -315,11 +315,11 @@ impl Files {
     pub fn list(&self, rel: &str) -> Result<Vec<Entry>, FilesError> {
         let dir = self.resolve(rel)?;
         let mut out = Vec::new();
-        visit_inside(&self.root, &dir, |i| {
+        visit_inside(&self.root, &dir, |real, i| {
             let name = i.name.to_string_lossy().into_owned();
             out.push(Entry {
                 // By the path asked for and by where a link leads (a folder `.ssh` makes what is in it secret).
-                secret: self.is_secret(&format!("{rel}/{name}"), &dir.join(&name)),
+                secret: self.is_secret(&format!("{rel}/{name}"), &real.join(&name)),
                 name,
                 is_dir: i.is_dir,
                 size: if i.is_dir { 0 } else { i.len },
@@ -607,7 +607,7 @@ impl Watcher {
             // is opened, and the walk would go on wherever it leads.
             // Stop the handle's enumeration at the budget; collecting a directory first defeats this bound.
             // As before, a failed directory scan does not stop watching other directories.
-            let _ = visit_inside(&self.root, &dir, |item| {
+            let _ = visit_inside(&self.root, &dir, |_, item| {
                 let path = dir.join(&item.name);
                 if item.is_dir {
                     if !SKIP_DIRS.iter().any(|s| item.name == *s) {
@@ -1579,5 +1579,49 @@ mod tests {
             f.with_secret_shown(true).read("notes.txt").unwrap(),
             b"TOKEN=abc\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_checks_secret_against_opened_real_dir_under_toctou_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("agora-files-toctou-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ssh")).unwrap();
+        std::fs::create_dir_all(dir.join("pub_plain")).unwrap();
+        std::fs::write(dir.join(".ssh/custom_key"), b"SECRET").unwrap();
+        std::fs::write(dir.join("pub_plain/readme.txt"), b"hello").unwrap();
+        let pub_path = dir.join("pub");
+        std::fs::create_dir_all(&pub_path).unwrap();
+
+        let files = Files::open(&dir, 1024).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_w = Arc::clone(&stop);
+        let pub_w = pub_path.clone();
+        let ssh_dir = dir.join(".ssh");
+        let plain_dir = dir.join("pub_plain");
+        let swapper = std::thread::spawn(move || {
+            let mut toggle = false;
+            while !stop_w.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_dir(&pub_w);
+                let _ = std::fs::remove_file(&pub_w);
+                let target = if toggle { &ssh_dir } else { &plain_dir };
+                let _ = std::os::unix::fs::symlink(target, &pub_w);
+                toggle = !toggle;
+            }
+        });
+
+        for _ in 0..2000 {
+            if let Ok(entries) = files.list("pub") {
+                assert!(
+                    !entries.iter().any(|e| e.name == "custom_key" && !e.secret),
+                    "leaked secret=false entry: {entries:?}"
+                );
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

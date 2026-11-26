@@ -41,7 +41,15 @@ pub fn clean(text: &str, max: usize) -> String {
         return out;
     }
     let ellipsis = '…';
-    let mut end = max.saturating_sub(ellipsis.len_utf8());
+    if max < ellipsis.len_utf8() {
+        let mut end = max;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        return out;
+    }
+    let mut end = max - ellipsis.len_utf8();
     while !out.is_char_boundary(end) {
         end -= 1;
     }
@@ -693,5 +701,14 @@ mod tests {
         assert_eq!(machines.len(), 2);
         assert_eq!(machines[1]["id"], "be ta");
         assert_eq!(machines[1]["online"], false);
+    }
+
+    #[test]
+    fn clean_respects_byte_limit_below_three() {
+        assert_eq!(clean("abcdef", 0), "");
+        assert_eq!(clean("abcdef", 1), "a");
+        assert_eq!(clean("abcdef", 2), "ab");
+        assert_eq!(clean("éé", 1), "");
+        assert_eq!(clean("abcdef", 4), "a…");
     }
 }

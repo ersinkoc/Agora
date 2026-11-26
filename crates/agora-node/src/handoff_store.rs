@@ -100,14 +100,15 @@ fn filename(id: Id) -> String {
     name
 }
 
+/// A temporary file [`agora_platform::write_private`] left for a record: `<32 hex>.handoff.tmp-<pid>-<seq>` (or `.tmp-<pid>`).
 fn stale_temporary(name: &str) -> bool {
-    let Some((id, pid)) = name.split_once(".handoff.tmp-") else {
+    let Some((base, _pid)) = agora_platform::split_temporary(name) else {
         return false;
     };
-    id.len() == 32
-        && id.bytes().all(|b| b.is_ascii_hexdigit())
-        && !pid.is_empty()
-        && pid.bytes().all(|b| b.is_ascii_digit())
+    let Some(id) = base.strip_suffix(".handoff") else {
+        return false;
+    };
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The inbox number in a record's header: `Ok(None)` when the file does not start like one (too
@@ -549,6 +550,17 @@ mod tests {
             b"partial",
         )
         .unwrap();
+        // write_private's name from 0.3.41 on (`.tmp-<pid>-<seq>`) is removed too; a name with letters after `.tmp-` is not ours.
+        std::fs::write(
+            root.join(format!("{}.tmp-123-4", filename(id_of(14)))),
+            b"partial",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(format!("{}.tmp-12x", filename(id_of(15)))),
+            b"left",
+        )
+        .unwrap();
         std::fs::write(root.join("notes.txt"), b"left").unwrap();
 
         let store = Store::open(&root).unwrap();
@@ -558,6 +570,8 @@ mod tests {
         assert_eq!(names(&root, ".handoff"), [filename(id_of(1))]);
         assert_eq!(names(&root, ".rejected").len(), 5);
         assert!(names(&root, "-123").is_empty());
+        assert!(names(&root, "-123-4").is_empty());
+        assert_eq!(names(&root, ".tmp-12x").len(), 1);
         assert!(root.join("notes.txt").exists());
     }
 

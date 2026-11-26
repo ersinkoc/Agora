@@ -171,9 +171,10 @@ fn install_named(say: &Say, o: &Opts, name: &str, only_newer: bool) -> ExitCode 
         return fail(say, key!("cli-adapter-no-key"), String::new());
     };
     let base = base.trim_end_matches('/').to_string();
-    let seen: u64 = read_trim(&h.join("registry-version"))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    let seen: u64 = match read_seen_registry_version(&h.join("registry-version")) {
+        Ok(v) => v,
+        Err(reason) => return fail(say, key!("cli-adapter-failed"), reason),
+    };
     let index_text = match curl(&format!("{base}/index.json")) {
         Ok(b) => String::from_utf8_lossy(&b).into_owned(),
         Err(e) => return fail(say, key!("cli-adapter-failed"), e),
@@ -189,13 +190,7 @@ fn install_named(say: &Say, o: &Opts, name: &str, only_newer: bool) -> ExitCode 
             registry_error(&RegistryError::UnknownPackage(name)),
         );
     };
-    if !package::valid_name(&entry.name)
-        || !entry
-            .version
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-        || entry.version.is_empty()
-    {
+    if !package::valid_name(&entry.name) || !valid_entry_version(&entry.version) {
         return fail(
             say,
             key!("cli-adapter-failed"),
@@ -387,5 +382,61 @@ pub fn remove(say: &Say, o: &Opts) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => fail(say, key!("cli-adapter-failed"), e.to_string()),
+    }
+}
+
+fn read_seen_registry_version(path: &Path) -> Result<u64, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => s
+            .trim()
+            .parse()
+            .map_err(|_| "the registry version state is unreadable".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn valid_entry_version(version: &str) -> bool {
+    !version.is_empty()
+        && version != "."
+        && version != ".."
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_seen_registry_version_fails_closed_on_corrupt_or_unreadable() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-adaptercmd-f102-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(read_seen_registry_version(&dir.join("missing")), Ok(0));
+
+        let corrupt = dir.join("corrupt");
+        std::fs::write(&corrupt, "not-a-number\n").unwrap();
+        assert!(read_seen_registry_version(&corrupt).is_err());
+
+        let valid = dir.join("valid");
+        std::fs::write(&valid, "42\n").unwrap();
+        assert_eq!(read_seen_registry_version(&valid), Ok(42));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_entry_version_rejects_dot_and_dot_dot() {
+        assert!(!valid_entry_version(""));
+        assert!(!valid_entry_version("."));
+        assert!(!valid_entry_version(".."));
+        assert!(!valid_entry_version("../1.0"));
+        assert!(valid_entry_version("1.0.0"));
+        assert!(valid_entry_version("2.1.0-rc1"));
     }
 }

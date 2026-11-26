@@ -239,3 +239,29 @@ fn the_committed_registry_folder_is_consistent() {
     let icons = fs::read_dir(dir.join("icons")).unwrap().count();
     assert_eq!(icons, lines.iter().filter(|l| l["icon"] == true).count());
 }
+
+#[test]
+fn convert_binary_rejects_empty_executable_name() {
+    for cmd in ["./", "bin/", "bin\\\\.exe"] {
+        let json = format!(
+            r#"{{
+                "id": "demo",
+                "name": "Demo",
+                "version": "1.0.0",
+                "distribution": {{
+                    "binary": {{
+                        "linux-x86_64": {{
+                            "archive": "https://example.com/a.tar.gz",
+                            "cmd": "{cmd}"
+                        }}
+                    }}
+                }}
+            }}"#
+        );
+        assert_eq!(
+            convert(&json).unwrap_err(),
+            agora_adapters::registry_convert::Reason::BadToken,
+            "cmd={cmd}"
+        );
+    }
+}

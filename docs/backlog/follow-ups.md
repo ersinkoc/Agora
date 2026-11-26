@@ -46,6 +46,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   writing to a closed stderr; the terminal client's `load_file` checks a theme's size, then reads the whole file.
 - **Title rules** (#1204): the stale title after a denied or escaped approval and after Esc mid-turn is not captured (**human**: real
   captures).
+- **`ask` to an agent on another machine** answers `mesh.recipient_unknown` (mesh-tools.md: `ask` stays node-local), although
+  `agents_list` shows that id; a code that says the target is on another machine would explain it (seen from mac, 2026-11-26).
 
 ## Windows (**win**)
 
@@ -76,3 +78,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - `doctor::tests::a_version_probe_that_does_not_end_is_killed_and_counts_as_not_working` on Ubuntu (doctor.rs:1338): timing.
 - Windows `control.rs` timing: one more test seen on 0.3.40's main runs, name not recorded (the stuck-write test's 5 s budget is
   now 20 s).
+- `unix::exclusive_bind_tests::the_panel_port_cannot_be_shared_while_it_is_open_and_is_free_again_after` on Linux (unix.rs:1395,
+  the negative control `squat(port)` after the drop): 2 in 4 full `agora-platform` runs, never alone; likely another test of the run
+  takes the freed port.
+- `linux::held_output_tests::output_left_by_a_collected_agent_is_read_in_every_order` (linux.rs:2220): 1 in 7 full `agora-platform`
+  runs on blackview, never alone; the panic line was not kept.

@@ -285,6 +285,7 @@ instructions. The words are data for agents, in English like the MCP `instructio
 **`agents_list`** rows keep their fields and add: `workspace` (the agent's folder or worktree on its machine), `project`, `since`
 (seconds it has run, `null` when unknown), `doing`, `files_changed` (changed files in its workspace from the node's own git status,
 `null` until the node looked), `holds` (paths it holds a lease on) and `parent` (the agent that started it, ADR-0057, or `null`).
+A caller the node has not registered as an agent gets `agent.not_found` and no rows.
 The list spans machines like `workspace_status`: for each project in it (the one asked for, or every project of the agents this
 node lists, at most 16) the node asks the hub the same `BoardCall{tool: "workspace_status"}` (no new message), and when the project
 is shared it adds the project's running agents on other online machines (`agent_id` `<node>/<agent>`, which is what `send_message`

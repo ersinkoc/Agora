@@ -1028,4 +1028,28 @@ mod tests {
             assert_eq!(micro(&value), Some(expected), "{raw}");
         }
     }
+
+    #[test]
+    fn cost_saturates_without_overflow_on_extreme_usage_and_prices() {
+        let mut c = Catalog::from_models_dev("{}").unwrap();
+        c.set_override(
+            "big",
+            Price {
+                input: u64::MAX,
+                output: u64::MAX,
+                ..Price::default()
+            },
+        );
+        let cost = c.cost(
+            "big",
+            &Usage {
+                input_tokens: u64::MAX,
+                output_tokens: u64::MAX,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            None,
+        );
+        assert_eq!(cost, Some(Cost::Estimated(u64::MAX)));
+    }
 }

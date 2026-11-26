@@ -704,6 +704,9 @@ impl McpConnection {
         };
         match name {
             "agents_list" => {
+                if mesh.agent_info(me).is_none() {
+                    return done(Err(MeshError::UnknownAgent(me.as_str().to_string())));
+                }
                 let Ok(project) = optional_str_arg(&args, "project") else {
                     return bad();
                 };
@@ -2024,5 +2027,32 @@ mod tests {
         assert!(b.complete());
         assert_eq!(b.line(), None);
         assert_eq!(BatchReply::default().line(), None);
+    }
+
+    #[test]
+    fn unregistered_caller_cannot_call_agents_list() {
+        let mut m = Mesh::new(Limits::default());
+        m.register(crate::broker::AgentInfo {
+            id: AgentId::new("a1"),
+            kind: "k".into(),
+            node: "n1".into(),
+            project: "p1".into(),
+            label: "a1".into(),
+            worktree: "/w".into(),
+            state: "idle".into(),
+        });
+        let mut ghost = McpConnection::new(AgentId::new("ghost"));
+        ghost.handle(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            &mut m,
+            0,
+        );
+        let out = ghost.handle(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agents_list","arguments":{}}}"#,
+            &mut m,
+            0,
+        );
+        let dbg = format!("{out:?}");
+        assert!(dbg.contains("agent.not_found"), "{dbg}");
     }
 }

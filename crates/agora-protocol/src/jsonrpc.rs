@@ -149,6 +149,9 @@ pub fn parse_line(line: &str) -> Result<Message, Error> {
     }
     let id = id.ok_or_else(|| invalid("id"))?;
     if let Some(err) = obj.get("error") {
+        if !(id.is_string() || id.is_number() || id.is_null()) {
+            return Err(invalid("id"));
+        }
         let code = err
             .get("code")
             .and_then(Value::as_i64)
@@ -158,6 +161,9 @@ pub fn parse_line(line: &str) -> Result<Message, Error> {
             code,
             data: err.get("data").cloned(),
         });
+    }
+    if !(id.is_string() || id.is_number()) {
+        return Err(invalid("id"));
     }
     let result = obj
         .get("result")
@@ -310,6 +316,20 @@ mod tests {
             data,
             Some(json!({"code": "files.too_large", "params": {"limit": 5, "path": "a"}}))
         );
+    }
+
+    #[test]
+    fn rejects_invalid_response_and_error_id_types() {
+        assert!(parse_line(r#"{"jsonrpc":"2.0","id":{"bad":1},"result":{}}"#).is_err());
+        assert!(parse_line(r#"{"jsonrpc":"2.0","id":null,"result":{}}"#).is_err());
+        assert!(parse_line(
+            r#"{"jsonrpc":"2.0","id":[1],"error":{"code":-32600,"message":"bad"}}"#
+        )
+        .is_err());
+        assert!(parse_line(
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"bad"}}"#
+        )
+        .is_ok());
     }
 
     #[test]

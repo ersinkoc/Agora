@@ -621,7 +621,7 @@ fn status(say: &Say, dir: &Path) -> ExitCode {
 fn off(say: &Say, dir: &Path) -> ExitCode {
     let mut did = false;
     let mut code = ExitCode::SUCCESS;
-    if dir.join(NAMES_FILE).exists() {
+    if std::fs::symlink_metadata(dir.join(NAMES_FILE)).is_ok() {
         did = true;
         match std::fs::remove_file(dir.join(NAMES_FILE)) {
             Ok(()) => say.out(key!("remote-off-names"), &[]),
@@ -666,6 +666,16 @@ fn off(say: &Say, dir: &Path) -> ExitCode {
             Err(p) => {
                 // The record stays, so the next `remote off` can finish.
                 problem_refusal(say, p);
+                code = ExitCode::from(1);
+            }
+        }
+    } else if std::fs::symlink_metadata(dir.join(SERVE_FILE)).is_ok() {
+        did = true;
+        match std::fs::remove_file(dir.join(SERVE_FILE)) {
+            // The record could not be read, so which port Agora served is unknown: the rule may still be there.
+            Ok(()) => say.err(key!("remote-off-serve-damaged"), &[]),
+            Err(e) => {
+                say.err(key!("cli-hub-failed"), &[("reason", e.to_string().into())]);
                 code = ExitCode::from(1);
             }
         }

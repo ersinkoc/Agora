@@ -54,7 +54,7 @@ pub const MAX_REJECTED: u32 = 5;
 /// The longest a state may hold a retry back, whatever the file says (a damaged or hostile file must not wedge a machine).
 const MAX_HOLD_SECS: i64 = 2 * 86_400;
 
-/// The files the link folder's writers make; a temporary file of theirs is `<name>.tmp-<pid>`.
+/// The files the link folder's writers make; a temporary file of theirs is `<name>.tmp-<pid>-<seq>` (`<name>.tmp-<pid>` before 0.3.41).
 const NAMES: [&str; 8] = [
     "node-id", "url", "ca.pem", "cert.pem", "key.pem", PENDING, PREVIOUS, STATE,
 ];
@@ -202,7 +202,7 @@ fn previous_pair(dir: &Path) -> Option<(String, String)> {
 }
 
 /// Removes what a writer of this folder left behind when it stopped between creating its temporary file and renaming it: a file named
-/// `<one of our files>.tmp-<digits>`, nothing else. It may hold a private key. The caller holds the folder's guard, so no writer is
+/// `<one of our files>.tmp-<pid>-<seq>` or `.tmp-<pid>` ([`agora_platform::split_temporary`]), nothing else. It may hold a private key. The caller holds the folder's guard, so no writer is
 /// in the middle of one.
 fn sweep_temporaries(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -210,10 +210,10 @@ fn sweep_temporaries(dir: &Path) {
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some((base, pid)) = name.split_once(".tmp-") else {
+        let Some((base, _pid)) = agora_platform::split_temporary(&name) else {
             continue;
         };
-        if NAMES.contains(&base) && !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) {
+        if NAMES.contains(&base) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -2021,12 +2021,17 @@ mod tests {
             "renew-pending.pem.tmp-4242",
             "previous.pem.tmp-1",
             "renew-state.tmp-7",
+            // write_private's name from 0.3.41 on.
+            "key.pem.tmp-9-0",
+            "renew-pending.pem.tmp-4242-17",
         ] {
             std::fs::write(j.dir.join(f), "KEY").unwrap();
         }
         for f in [
             "cert.pem.tmp-",
             "cert.pem.tmp-x1",
+            "cert.pem.tmp-12x",
+            "key.pem.tmp-9-",
             "notes.tmp-1",
             "mine.pem",
             "lock",
@@ -2050,8 +2055,10 @@ mod tests {
                 "ca.pem",
                 "cert.pem",
                 "cert.pem.tmp-",
+                "cert.pem.tmp-12x",
                 "cert.pem.tmp-x1",
                 "key.pem",
+                "key.pem.tmp-9-",
                 "lock",
                 "mine.pem",
                 "node-id",

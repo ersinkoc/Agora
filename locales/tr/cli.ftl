@@ -834,6 +834,7 @@ remote-public-warning = { $cause ->
 remote-off-names = Tailnet adları hub'ın listesinden çıktı; sertifika hub'ın bir sonraki başlangıcında bunları bırakır.
 remote-off-serve = { $port } numaralı HTTPS bağlantı noktasındaki Tailscale serve kuralı kaldırıldı. Diğer serve kurallarınıza dokunulmadı.
 remote-off-serve-gone = Agora'nın eklediği Tailscale serve kuralı zaten yok.
+remote-off-serve-damaged = Agora'nın eklediği Tailscale serve kuralının kaydı okunamadı, bu yüzden kayıt silindi. `tailscale serve status` çalıştırın; kural hâlâ duruyorsa kendiniz kaldırın.
 remote-off-serve-foreign = { $port } numaralı HTTPS bağlantı noktasındaki kural artık Agora'nın eklediği değil, bu yüzden olduğu gibi bırakıldı.
 remote-off-nothing = Agora bu makinenin dışından hiçbir erişimi açmadı.
 frontdoor-listen-saved = Hub bir sonraki başlangıcından itibaren { $addr } adresinde dinleyecek (`agora down`, sonra `agora`).

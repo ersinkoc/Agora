@@ -851,6 +851,7 @@ remote-public-warning = { $cause ->
 remote-off-names = The tailnet names are out of the hub's list; the certificate drops them the next time the hub starts.
 remote-off-serve = The Tailscale serve rule on HTTPS port { $port } is removed. Your other serve rules were not touched.
 remote-off-serve-gone = The Tailscale serve rule Agora added is already gone.
+remote-off-serve-damaged = Agora's record of the Tailscale serve rule it added could not be read, so it is removed. Run `tailscale serve status` and remove that rule yourself if it is still there.
 remote-off-serve-foreign = The rule on HTTPS port { $port } is no longer the one Agora added, so it was left exactly as it is.
 remote-off-nothing = Agora has not turned on any way in from outside this machine.
 frontdoor-listen-saved = The hub will listen on { $addr } from its next start (`agora down`, then `agora`).

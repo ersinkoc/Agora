@@ -198,11 +198,16 @@ pub fn parse_line(line: &str) -> Option<Option<Entry>> {
     Some(Some(entry))
 }
 
-/// Every device the file lists (the last line wins for an id written twice) and how many lines were skipped.
+/// Every device the file lists (the last line wins for an id written twice) and how many lines were skipped. A file that is not
+/// there or cannot be read as text lists nothing here; which of the two it is, only the caller who reads the file can tell.
 pub fn read_entries(path: &Path) -> (Vec<Entry>, usize) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (Vec::new(), 0);
-    };
+    std::fs::read_to_string(path)
+        .map(|text| parse_entries(&text))
+        .unwrap_or_default()
+}
+
+/// [`read_entries`] for the text of a file that was read.
+pub(crate) fn parse_entries(text: &str) -> (Vec<Entry>, usize) {
     let mut out: Vec<Entry> = Vec::new();
     let mut skipped = 0;
     for line in text.lines() {

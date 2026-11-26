@@ -1126,19 +1126,25 @@ pub(crate) fn end_as_stopped() -> ! {
 
 /// `SIGTERM` to one process (not its group): see [`crate::terminate_process`].
 pub(crate) fn terminate(pid: u32) -> io::Result<()> {
+    if pid == 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     let pid =
         libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: plain system call on a pid number.
+    // SAFETY: plain system call on a positive pid number.
     cvt(unsafe { libc::kill(pid, libc::SIGTERM) }).map(|_| ())
 }
 
 /// Whether a process with this pid exists (one owned by another user counts).
 #[allow(dead_code)] // used only on the Unix systems without a start-time reader
 pub(crate) fn alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
     };
-    // SAFETY: signal 0 checks existence and permission only.
+    // SAFETY: signal 0 checks existence and permission only on a positive pid.
     let r = unsafe { libc::kill(pid, 0) };
     r == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }

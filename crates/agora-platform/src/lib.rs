@@ -372,6 +372,29 @@ pub fn platform_key() -> Option<String> {
     Some(format!("{os}-{arch}{musl}"))
 }
 
+/// The number of the next temporary name this process takes beside a file it replaces.
+static NEXT_TMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A temporary name no other write of this process uses at the same time. A process killed half-way leaves its name behind,
+/// and a later process may get the same pid (a container's first process always does), so the caller clears that name first.
+fn unique_tmp_suffix() -> String {
+    let seq = NEXT_TMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!(".tmp-{}-{seq}", std::process::id())
+}
+
+/// The file a temporary name of [`write_private`] stands for and the pid of the process that made it: `<base>.tmp-<pid>-<seq>`, or
+/// `<base>.tmp-<pid>` as earlier versions named it (digits only). Anything else is `None`, so a sweeper never takes a stranger's file.
+pub fn split_temporary(name: &str) -> Option<(&str, u32)> {
+    let (base, tail) = name.rsplit_once(".tmp-")?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let pid = match tail.split_once('-') {
+        Some((pid, seq)) if digits(pid) && digits(seq) => pid,
+        None if digits(tail) => tail,
+        _ => return None,
+    };
+    Some((base, pid.parse().ok()?))
+}
+
 /// Puts a launcher for the program `real` at `link`, replacing what is there in one step, never by editing in place: a symbolic
 /// link on Unix (pointing at `relative`, the path from the link's folder, so the folder can move), a copy of the program on Windows
 /// (a symbolic link needs a privilege there). The new launcher is made beside `link` under a temporary name and renamed over it.
@@ -381,7 +404,7 @@ pub fn install_launcher(
     link: &std::path::Path,
 ) -> io::Result<()> {
     let mut tmp = link.as_os_str().to_owned();
-    tmp.push(format!(".tmp-{}", std::process::id()));
+    tmp.push(unique_tmp_suffix());
     let tmp = PathBuf::from(tmp);
     let _ = std::fs::remove_file(&tmp);
     let made = {
@@ -597,7 +620,7 @@ pub fn write_private(path: &std::path::Path, contents: &[u8]) -> io::Result<()> 
         // Written beside the target and renamed over it: a full disk or an interruption leaves the old file whole, never
         // a half-written key or token. The temporary name is exclusive (`create_new`), so a planted link is never followed.
         let mut tmp = path.as_os_str().to_owned();
-        tmp.push(format!(".tmp-{}", std::process::id()));
+        tmp.push(unique_tmp_suffix());
         let tmp = std::path::PathBuf::from(tmp);
         let _ = std::fs::remove_file(&tmp);
         let result = (|| {
@@ -2239,6 +2262,10 @@ pub fn process_start_time(pid: u32) -> Option<u64> {
 
 /// Asks process `pid` to end: `SIGTERM` on Unix, `TerminateProcess` on Windows.
 pub fn terminate_process(pid: u32) -> io::Result<()> {
+    // Pid 0 is no process of ours on any platform (on Unix it would signal the caller's whole process group).
+    if pid == 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     #[cfg(unix)]
     {
         unix::terminate(pid)
@@ -3812,13 +3839,24 @@ mod atomic_replace_tests {
         let d = dir("killed");
         let ledger = d.join("ledger.json");
         write_private(&ledger, b"{\"entries\":[1,2,3]}").unwrap();
-        let mut left = ledger.as_os_str().to_owned();
-        left.push(format!(".tmp-{}", std::process::id()));
-        std::fs::write(&left, b"{\"entries\":[1,2").unwrap();
+        // What an earlier process with this pid left under the names this process takes next (a restarted container's first
+        // process has the same pid and counts from 0 again). The margin covers other tests of this run taking names meanwhile.
+        let next = super::NEXT_TMP.load(std::sync::atomic::Ordering::Relaxed);
+        let left: Vec<std::path::PathBuf> = (next..next + 1024)
+            .map(|seq| {
+                let mut name = ledger.as_os_str().to_owned();
+                name.push(format!(".tmp-{}-{seq}", std::process::id()));
+                std::path::PathBuf::from(name)
+            })
+            .collect();
+        for l in &left {
+            std::fs::write(l, b"{\"entries\":[1,2").unwrap();
+        }
         assert_eq!(std::fs::read(&ledger).unwrap(), b"{\"entries\":[1,2,3]}");
         write_private(&ledger, b"{\"entries\":[4]}").unwrap();
         assert_eq!(std::fs::read(&ledger).unwrap(), b"{\"entries\":[4]}");
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1);
+        // The name the replace took was cleared and renamed over the file; the others are still there.
+        assert_eq!(left.iter().filter(|l| l.exists()).count(), left.len() - 1);
         sync_parent_dir(&ledger);
         sync_parent_dir(std::path::Path::new("relative-name-in-the-current-folder"));
         let _ = std::fs::remove_dir_all(&d);
@@ -3960,6 +3998,53 @@ mod accept_timeout_tests {
             slowest < Duration::from_secs(1),
             "slowest accept {slowest:?}"
         );
+    }
+
+    #[test]
+    fn a_temporary_name_is_split_only_in_the_forms_write_private_makes() {
+        assert_eq!(split_temporary("key.pem.tmp-12-3"), Some(("key.pem", 12)));
+        assert_eq!(split_temporary("key.pem.tmp-12"), Some(("key.pem", 12)));
+        for other in [
+            "key.pem.tmp-",
+            "key.pem.tmp-12x",
+            "key.pem.tmp-12-",
+            "key.pem.tmp--3",
+            "key.pem.tmp-1-2-3",
+            "key.pem",
+        ] {
+            assert_eq!(split_temporary(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn terminate_rejects_pid_zero() {
+        let err = terminate_process(0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        #[cfg(unix)]
+        assert!(!unix::alive(0));
+    }
+
+    #[test]
+    fn write_private_concurrent_threads_do_not_race() {
+        let dir = std::env::temp_dir().join(format!("agora-wp-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("shared.txt");
+        std::thread::scope(|s| {
+            let mut handles = Vec::new();
+            for i in 0..4 {
+                let p = target.clone();
+                handles.push(s.spawn(move || {
+                    for j in 0..20 {
+                        write_private(&p, format!("{i}-{j}").as_bytes()).unwrap();
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

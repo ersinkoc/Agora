@@ -1,0 +1,2 @@
+- Messages from a machine you removed from the hub no longer show in the recent messages of a new window (audit)
+- An agent the machine has not registered can no longer list the other agents through the mesh (audit)

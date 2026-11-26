@@ -2610,7 +2610,7 @@ fn clip_to(s: &str, most: usize) -> String {
 
 /// The box of a long notice: the body's width less a margin, as tall as its wrapped lines (at most half the body), at its bottom.
 pub fn note_area(body: Rect, lines: &[String]) -> Rect {
-    let width = body.width.saturating_sub(2).max(1);
+    let width = body.width.saturating_sub(2).max(1).min(body.width);
     let inner = usize::from(width.saturating_sub(4)).max(1);
     let rows: usize = lines.iter().map(|l| wrap(l, inner).len()).sum();
     let height = u16::try_from(rows + 2)
@@ -2628,7 +2628,7 @@ pub fn note_area(body: Rect, lines: &[String]) -> Rect {
 /// The box a question is asked in, in the middle of `area`, and its lines wrapped to the box: as wide as its longest line (up to the
 /// screen less a margin), as tall as the wrapped lines. Lines that do not fit the screen's height are cut at the bottom.
 pub fn dialog_layout(area: Rect, lines: &[String]) -> (Rect, Vec<String>) {
-    let most = area.width.saturating_sub(4).max(1);
+    let most = area.width.saturating_sub(4).max(1).min(area.width);
     let longest = lines.iter().map(|l| text_width(l)).max().unwrap_or(0);
     let width = u16::try_from(longest + 4)
         .unwrap_or(u16::MAX)
@@ -2637,7 +2637,7 @@ pub fn dialog_layout(area: Rect, lines: &[String]) -> (Rect, Vec<String>) {
     let wrapped: Vec<String> = lines.iter().flat_map(|l| wrap(l, inner)).collect();
     let height = u16::try_from(wrapped.len() + 2)
         .unwrap_or(u16::MAX)
-        .min(area.height.saturating_sub(2).max(1));
+        .min(area.height.saturating_sub(2).max(1).min(area.height));
     let r = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
@@ -6523,5 +6523,13 @@ mod layout_tests {
             "{:?}",
             line(29)
         );
+    }
+
+    #[test]
+    fn dialog_layout_and_note_area_handle_zero_sized_rect() {
+        let (r, _) = dialog_layout(Rect::ZERO, &["hi".into()]);
+        assert_eq!(r, Rect::ZERO);
+        let n = note_area(Rect::ZERO, &["notice".into()]);
+        assert_eq!(n, Rect::ZERO);
     }
 }

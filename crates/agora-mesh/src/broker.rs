@@ -364,7 +364,7 @@ impl Mesh {
     /// task and lease ids across a restart as it holds its cursor.
     fn ids_open(&self, n: u64) -> bool {
         self.id_ceiling
-            .is_none_or(|c| self.next.saturating_add(n) <= c)
+            .is_none_or(|c| self.next.checked_add(n).is_some_and(|end| end <= c))
     }
 
     fn message_ids_open(&self) -> bool {
@@ -2905,6 +2905,20 @@ mod tests {
             let a1 = AgentId::new("a1");
             assert!(m.handoff(&a1, "n1/a2", None, "s", &[], 100).is_ok());
             assert_eq!(m.inbox(&AgentId::new("a2"), None, 10).unwrap().len(), 1);
+        }
+
+        #[test]
+        fn ids_open_rejects_overflow_at_u64_max_ceiling() {
+            let mut m = mesh();
+            m.reserve_ids(u64::MAX, u64::MAX);
+            assert_eq!(
+                m.send_message(&AgentId::new("a1"), "a2", "hi", &[], None, 100),
+                Err(MeshError::IdsUnreserved)
+            );
+            assert_eq!(
+                m.next_handoff_number(&AgentId::new("a1"), 100),
+                Err(MeshError::IdsUnreserved)
+            );
         }
     }
 }

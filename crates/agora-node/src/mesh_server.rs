@@ -3873,9 +3873,26 @@ mod tests {
         assert!(number(&cursor) >= started * 1000, "{cursor} {started}");
         drop(first);
 
-        // A run that cannot write its reservation (a directory where its temporary file goes) numbers no message, and says so.
-        let blocker = PathBuf::from(format!("{}.tmp-{}", file.display(), std::process::id()));
-        std::fs::create_dir_all(&blocker).unwrap();
+        // A run that cannot write its reservation numbers no message, and says so. Both the folder and the file are made
+        // read-only: a read-only folder stops the replace on Unix, a read-only file stops it on Windows.
+        // The permissions come back when the guards drop, also when an assertion below fails.
+        struct ReadOnly(PathBuf, std::fs::Permissions);
+        impl ReadOnly {
+            fn new(p: &std::path::Path) -> Self {
+                let before = std::fs::metadata(p).unwrap().permissions();
+                let mut ro = before.clone();
+                ro.set_readonly(true);
+                std::fs::set_permissions(p, ro).unwrap();
+                ReadOnly(p.to_path_buf(), before)
+            }
+        }
+        impl Drop for ReadOnly {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, self.1.clone());
+            }
+        }
+        let file_ro = ReadOnly::new(&file);
+        let folder_ro = ReadOnly::new(file.parent().unwrap());
         let (second, ok) = run(&data, &sockets);
         assert!(!ok);
         let refused = send(&second, "two").unwrap_err();
@@ -3884,7 +3901,8 @@ mod tests {
             agora_protocol::ErrorCode::MeshUnavailable
         );
         // Once it can, the ticker reserves and the run numbers messages above the earlier run's.
-        std::fs::remove_dir_all(&blocker).unwrap();
+        drop(folder_ro);
+        drop(file_ro);
         let end = Instant::now() + Duration::from_secs(10);
         let two = loop {
             if let Ok(id) = send(&second, "two") {

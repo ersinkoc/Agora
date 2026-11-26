@@ -358,6 +358,40 @@ impl MessageRings {
         }
     }
 
+    /// The positions of kept messages sent from a node in `hidden`.
+    fn sent_from(&self, hidden: &BTreeSet<&str>) -> Vec<u64> {
+        self.projects
+            .values()
+            .chain(std::iter::once(&self.unplaced))
+            .flat_map(|ring| ring.entries.iter())
+            .filter(|m| {
+                hidden.contains(m.event.producer_id.as_str())
+                    || split_key(&m.sender).is_some_and(|(n, _)| hidden.contains(n))
+            })
+            .map(|m| m.pos)
+            .collect()
+    }
+
+    fn drop_positions(&mut self, drop_pos: Vec<u64>) {
+        for pos in drop_pos {
+            if let Some(key) = self.index.remove(&pos) {
+                if let Some(ring) = self.ring_mut(key.as_ref()) {
+                    if let Some(i) = ring.entries.iter().position(|m| m.pos == pos) {
+                        if let Some(old) = ring.entries.remove(i) {
+                            ring.bytes -= old.size;
+                            self.bytes -= old.size;
+                        }
+                    }
+                }
+                if let Some(k) = key {
+                    if self.projects.get(&k).is_some_and(|r| r.entries.is_empty()) {
+                        self.projects.remove(&k);
+                    }
+                }
+            }
+        }
+    }
+
     fn keep(&mut self, key: Option<String>, m: KeptMessage) {
         if m.size > RING_BYTES || self.index.contains_key(&m.pos) {
             return;
@@ -644,6 +678,11 @@ impl View {
             .retain(|id, _| !hidden.contains(id.as_str()));
         v.quota
             .retain(|(node, _, _), _| !hidden.contains(node.as_str()));
+        // The rings are shared with the view; they are copied only when a forgotten node's message must go.
+        let gone = v.messages.sent_from(&hidden);
+        if !gone.is_empty() {
+            Arc::make_mut(&mut v.messages).drop_positions(gone);
+        }
         std::borrow::Cow::Owned(v)
     }
 
@@ -3189,5 +3228,64 @@ mod tests {
         // The last event is a message: its position is the snapshot's own, and it is sent.
         let last = crate::server::snapshot_of(&rebuilt, pos);
         assert_eq!(last.recent_messages.last().map(|p| p.pos), Some(pos));
+    }
+
+    #[test]
+    fn shown_view_recent_messages_excludes_forgotten_nodes() {
+        let mut v = View::default();
+        v.apply_at(
+            1,
+            &ev(
+                RESERVED_HUB_ID,
+                1,
+                Body::NodeLink(NodeLink {
+                    node_id: "n2".into(),
+                    up: true,
+                    generation: 1,
+                    ..NodeLink::default()
+                }),
+            ),
+        );
+        v.apply_at(2, &message("n2", "a2", "all", "ok"));
+        v.apply_at(
+            3,
+            &ev(
+                RESERVED_HUB_ID,
+                1,
+                Body::NodeLink(NodeLink {
+                    node_id: "n1".into(),
+                    up: true,
+                    generation: 1,
+                    ..NodeLink::default()
+                }),
+            ),
+        );
+        v.apply_at(4, &message("n1", "a1", "all", "hidden"));
+        v.apply_at(
+            5,
+            &ev(
+                RESERVED_HUB_ID,
+                2,
+                Body::NodeOffline(NodeOffline {
+                    node_id: "n1".into(),
+                }),
+            ),
+        );
+        v.apply_at(
+            6,
+            &ev(
+                RESERVED_HUB_ID,
+                3,
+                Body::NodeForgotten(NodeForgotten {
+                    node_id: "n1".into(),
+                    ..NodeForgotten::default()
+                }),
+            ),
+        );
+
+        let shown = v.shown();
+        let msgs = shown.recent_messages();
+        assert!(msgs.iter().any(|m| m.event.producer_id == "n2"));
+        assert!(!msgs.iter().any(|m| m.event.producer_id == "n1"));
     }
 }

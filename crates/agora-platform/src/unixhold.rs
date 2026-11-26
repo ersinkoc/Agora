@@ -386,16 +386,22 @@ impl ProcessWatch {
 
     /// Waits up to `timeout` for the process to end.
     pub fn wait(&self, timeout: Duration) -> bool {
-        let end = std::time::Instant::now() + timeout;
+        let end = std::time::Instant::now().checked_add(timeout);
         loop {
             if self.ended() {
                 return true;
             }
-            let left = end.saturating_duration_since(std::time::Instant::now());
-            if left.is_zero() {
-                return false;
-            }
-            std::thread::sleep(left.min(Duration::from_millis(10)));
+            let sleep = match end {
+                Some(end) => {
+                    let left = end.saturating_duration_since(std::time::Instant::now());
+                    if left.is_zero() {
+                        return false;
+                    }
+                    left.min(Duration::from_millis(10))
+                }
+                None => Duration::from_millis(10),
+            };
+            std::thread::sleep(sleep);
         }
     }
 }
@@ -1072,6 +1078,19 @@ mod tests {
         let _ = child.wait();
         assert!(w.ended());
         assert!(ProcessWatch::open(child.id(), started).is_err());
+    }
+
+    #[test]
+    fn process_watch_wait_does_not_panic_on_duration_max() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.05")
+            .spawn()
+            .unwrap();
+        let started = crate::process_start_time(child.id()).unwrap();
+        let w = ProcessWatch::open(child.id(), started).unwrap();
+        assert!(w.wait(Duration::MAX));
+        let _ = child.wait();
     }
 
     #[test]

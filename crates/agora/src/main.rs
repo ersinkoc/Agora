@@ -434,7 +434,7 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--check" => o.check = true,
             "--registry" => o.registry = Some(it.next()?.clone()),
             "--minutes" => o.minutes = Some(it.next()?.parse().ok()?),
-            "--since" => o.since = it.next()?.parse().ok(),
+            "--since" => o.since = Some(it.next()?.parse().ok()?),
             "--who" => o.who = Some(it.next()?.clone()),
             "--role" => o.role = Some(it.next()?.clone()),
             "--root-key" => o.root_key = Some(it.next()?.into()),

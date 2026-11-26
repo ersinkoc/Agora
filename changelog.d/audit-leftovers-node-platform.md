@@ -1,0 +1,4 @@
+- A folder listing in the window marks secret files correctly even when the folder is swapped for a link while it is read (audit)
+- A sandboxed agent started as a program at the top of the disk no longer gets read access to the whole disk (audit)
+- Saving a private file from two places at once in the same process no longer fails or mixes the two (audit)
+- Starting a sandboxed agent whose allowed paths include a named pipe no longer hangs (audit)

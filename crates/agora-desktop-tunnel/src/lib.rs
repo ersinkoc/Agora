@@ -71,10 +71,19 @@ async fn read_head(s: &mut TcpStream) -> Option<(Vec<u8>, usize)> {
 /// Only the first request on a connection is checked. A browser keeps a connection for the origin it opened it for, and does not
 /// pipeline, so a page on another name never shares the webview's connection; a local program could send another request with
 /// another `Host` after the first, but such a program can send the right one anyway, so this check is about browsers only.
+fn parse_port(s: &str) -> Option<u16> {
+    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| s.parse::<u16>().ok())
+        .flatten()
+}
+
 fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
     let Ok(text) = std::str::from_utf8(head) else {
         return false;
     };
+    if text.split("\r\n").any(|l| l.contains(['\r', '\n'])) {
+        return false;
+    }
     let target = text
         .split("\r\n")
         .next()
@@ -98,7 +107,7 @@ fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
         return false;
     };
     let (name, given_port) = match host.rsplit_once(':') {
-        Some((name, p)) => (name, p.parse::<u16>().ok()),
+        Some((name, p)) => (name, parse_port(p)),
         None => (host, Some(80)),
     };
     if !(given_port == Some(port) && is_own_name(name)) {
@@ -113,7 +122,7 @@ fn addressed_to_tunnel(head: &[u8], port: u16) -> bool {
         (None, _) => true,
         (Some(o), None) => o.strip_prefix("http://").is_some_and(|h| {
             h.rsplit_once(':')
-                .is_some_and(|(n, p)| p.parse::<u16>().ok() == Some(port) && is_own_name(n))
+                .is_some_and(|(n, p)| parse_port(p) == Some(port) && is_own_name(n))
                 || (port == 80 && is_own_name(h))
         }),
         (Some(_), Some(_)) => false,
@@ -850,6 +859,34 @@ mod tests {
         assert!(
             server_name("hub.example.com:7443").is_ok() && server_name("127.0.0.1:7443").is_ok()
         );
+        assert_eq!(
+            server_name("127.0.0.1:+7443").err(),
+            Some(TunnelError::BadAddress)
+        );
+    }
+
+    #[test]
+    fn addressed_to_tunnel_rejects_bare_lf_smuggling_and_plus_ports() {
+        assert!(!addressed_to_tunnel(
+            b"GET / HTTP/1.1\r\nX-A: 1\nOrigin: http://evil.example\r\nHost: 127.0.0.1:7000\r\n\r\n",
+            7000
+        ));
+        assert!(!addressed_to_tunnel(
+            b"GET / HTTP/1.1\nHost: evil.example:7000\r\nHost: 127.0.0.1:7000\r\n\r\n",
+            7000
+        ));
+        assert!(!addressed_to_tunnel(
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1:+7000\r\n\r\n",
+            7000
+        ));
+        assert!(!addressed_to_tunnel(
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1:7000\r\nOrigin: http://127.0.0.1:+7000\r\n\r\n",
+            7000
+        ));
+        assert!(addressed_to_tunnel(
+            b"GET / HTTP/1.1\r\nHost: 127.0.0.1:7000\r\nOrigin: http://127.0.0.1:7000\r\n\r\n",
+            7000
+        ));
     }
 
     #[test]

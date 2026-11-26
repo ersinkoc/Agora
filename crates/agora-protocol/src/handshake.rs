@@ -81,9 +81,11 @@ pub enum ResumeAnswer {
 /// Decide resume vs snapshot. `oldest_retained` is the lowest sequence number still stored and `next_seq`
 /// the number the next new event will get. A peer that has acked `n` needs `n + 1` onward.
 pub fn resume(request: &Resume, oldest_retained: u64, next_seq: u64) -> ResumeAnswer {
-    let from = match request.last_acked_seq {
-        Some(n) => n.saturating_add(1),
+    let Some(from) = (match request.last_acked_seq {
+        Some(n) => n.checked_add(1),
         None => return ResumeAnswer::SnapshotRequired,
+    }) else {
+        return ResumeAnswer::SnapshotRequired;
     };
     if from > next_seq || from < oldest_retained {
         // Peer is ahead of us (we lost state) or behind what we kept: replay would be wrong or incomplete.
@@ -182,6 +184,16 @@ mod tests {
         assert_eq!(r(Some(3)), ResumeAnswer::SnapshotRequired); // older than retained
         assert_eq!(r(Some(25)), ResumeAnswer::SnapshotRequired); // ahead of us
         assert_eq!(r(Some(u64::MAX)), ResumeAnswer::SnapshotRequired);
+        assert_eq!(
+            resume(
+                &Resume {
+                    last_acked_seq: Some(u64::MAX)
+                },
+                0,
+                u64::MAX
+            ),
+            ResumeAnswer::SnapshotRequired
+        );
     }
 
     #[test]

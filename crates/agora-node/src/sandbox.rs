@@ -415,10 +415,12 @@ impl SandboxPolicy {
         program: &str,
     ) -> agora_platform::Sandbox {
         let mut read: Vec<PathBuf> = SYSTEM_READ.iter().map(PathBuf::from).collect();
-        // The agent's own program folder, when it is named by path.
+        // The agent's own program folder, when it is named by path (never a filesystem root).
         if program.contains(['/', std::path::MAIN_SEPARATOR]) {
             if let Some(dir) = Path::new(program).parent() {
-                read.push(dir.to_path_buf());
+                if !dir.as_os_str().is_empty() && dir.parent().is_some() {
+                    read.push(dir.to_path_buf());
+                }
             }
         }
         read.extend(self.read.iter().cloned());
@@ -1049,5 +1051,20 @@ mod tests {
             sb.sockets
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn root_program_parent_is_not_added_to_sandbox_read() {
+        let wt = std::env::temp_dir().join(format!("agora-sb-root-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&wt);
+        let p = SandboxPolicy {
+            level: Level::Worktree,
+            ..Default::default()
+        };
+        let sb = p.profile("k", None, &wt, "/agent").unwrap();
+        assert!(!sb.read.contains(&PathBuf::from("/")));
+        let ctrl = p.profile("k", None, &wt, "/usr/local/bin/agent").unwrap();
+        assert!(ctrl.read.contains(&PathBuf::from("/usr/local/bin")));
+        let _ = std::fs::remove_dir_all(&wt);
     }
 }
