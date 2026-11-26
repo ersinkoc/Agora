@@ -572,7 +572,7 @@ export function App() {
     'go.settings': extra('settings'),
     'go.keyboard': { run: () => go('#/device/keyboard') },
     'go.audit': hub ? { run: () => go('#/audit') } : false,
-    // The language, here too: on a phone the title bar has no room for its picker.
+    // The language, here as in Settings (the title bar has no picker of its own: visual pass 2026-11, finding 13).
     ...Object.fromEntries((['system', 'en', 'tr'] as const).map((l) => [`language.${l}`, { run: () => { chooseLanguage(l); } }])),
     'theme.editor': { run: editTheme },
     // Plugins loaded from a local file, and safe mode (ADR-0114): the safe-mode key itself is heard before anything else (plugins/safe.ts),

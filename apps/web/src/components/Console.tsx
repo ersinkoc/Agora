@@ -23,7 +23,6 @@ import { Inspector } from './Inspector';
 import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
 import { projectSpread } from '../net/fleet';
 import { loadRailTab, saveRailTab, type RailTab } from './rail';
-import { LanguagePicker } from './LanguagePicker';
 import { ThemePicker } from './ThemePicker';
 import { dismiss, dismissedIds, subscribeDismissed } from '../net/dismissed';
 import { loadLayout, saveLayout } from '../net/layout';
@@ -355,7 +354,6 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
         {link !== 'live' && <span role="status" className="ide-chip">{t(link === 'offline' ? 'link-offline' : 'link-connecting')}</span>}
         {link === 'offline' && onRetry && <button type="button" className="ide-chip whitespace-nowrap hover:border-accent hover:text-ink" onClick={onRetry}>{t('link-retry')}</button>}
         <LayoutMenu ws={ws} dispatch={dispatch} agents={presetAgents} onReset={resetLayout} narrow={narrow} />
-        <span className="hidden sm:block"><LanguagePicker compact /></span>
         <ThemePicker />
         <HeaderLinks />
         {onLock && <button type="button" className="ide-chip whitespace-nowrap hover:text-ink" onClick={onLock} title={t('lock-now-hint')}><Icon name="lock" className="size-3.5" />{t('lock-now')}</button>}
