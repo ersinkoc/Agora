@@ -403,6 +403,8 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
             | C::AgentList(_)
             | C::AgentKinds(_)
             | C::UsageReport(_)
+            | C::ThemeCatalogList(_)
+            | C::ThemeCatalogGet(_)
             | C::FilesList(_)
             | C::FilesRead(_)
             | C::FilesWatch(_)

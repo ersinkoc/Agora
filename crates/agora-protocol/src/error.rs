@@ -125,6 +125,10 @@ pub enum ErrorCode {
     /// RM-19 (#903): the kind's program could not be started because this machine cannot find it (not in the node's `PATH`, not
     /// installed by `agora agent install`, or a path that does not exist).
     AgentProgramMissing,
+    /// ADR-0113 decision 6: the hub's owner has not turned the community theme catalog on (`agora hub themes on`).
+    ThemeCatalogOff,
+    /// ADR-0113 decision 6: the community theme catalog has no theme with this id.
+    ThemeNotFound,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -235,6 +239,8 @@ impl ErrorCode {
         ErrorCode::EnrollRenewRefused,
         ErrorCode::TaskDispatchLimited,
         ErrorCode::AgentProgramMissing,
+        ErrorCode::ThemeCatalogOff,
+        ErrorCode::ThemeNotFound,
         ErrorCode::Internal,
     ];
 
@@ -342,6 +348,8 @@ impl ErrorCode {
             ErrorCode::EnrollRenewRefused => "enroll.renew_refused",
             ErrorCode::TaskDispatchLimited => "task.dispatch_limited",
             ErrorCode::AgentProgramMissing => "agent.program_missing",
+            ErrorCode::ThemeCatalogOff => "theme.catalog_off",
+            ErrorCode::ThemeNotFound => "theme.not_found",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -461,6 +469,8 @@ impl ErrorCode {
             ErrorCode::EnrollRenewRefused => &["reason"],
             ErrorCode::TaskDispatchLimited => &["limit"],
             ErrorCode::AgentProgramMissing => &["kind", "program"],
+            ErrorCode::ThemeCatalogOff => &[],
+            ErrorCode::ThemeNotFound => &["id"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

@@ -133,4 +133,6 @@ agent-approval_needed = Bu seçim ajanın sormadan çalışmasını sağlar, bu 
 enroll-renew_refused = Bu makinenin sertifikası yenilenemedi ({ $reason }). Elindeki geçerli kalır; iptal edildiyse ya da süresi dolduysa hub'a yeniden katılın.
 task-dispatch_limited = Son bir dakikada ajanlara { $limit } kez görev vermeyi denediniz. Biraz bekleyip yeniden deneyin.
 agent-program_missing = { $kind } başlamadı: bu makine { $program } programını PATH içinde bulamıyor. Programı oraya kurun ya da düğümü { $program } komutunun çalıştığı bir terminalden başlatın.
+theme-catalog_off = Bu hub'da topluluk tema kataloğu kapalı. Sahibi agora hub themes on ile açabilir.
+theme-not_found = Tema kataloğunda { $id } adlı bir tema yok. Son güncellemede kaldırılmış olabilir.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

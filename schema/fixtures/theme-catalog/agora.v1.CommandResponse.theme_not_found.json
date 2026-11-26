@@ -1,0 +1,11 @@
+{
+  "requestId": "w2",
+  "err": {
+    "code": "theme.not_found",
+    "params": {
+      "id": {
+        "str": "night"
+      }
+    }
+  }
+}

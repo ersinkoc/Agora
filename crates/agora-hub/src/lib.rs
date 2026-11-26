@@ -31,6 +31,7 @@ pub mod signin;
 pub mod ssh;
 pub mod ssh_install;
 pub mod store;
+pub mod theme_catalog;
 pub mod tls;
 pub mod transport;
 pub mod usage;

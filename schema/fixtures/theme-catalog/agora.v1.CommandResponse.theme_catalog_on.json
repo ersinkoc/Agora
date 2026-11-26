@@ -1,0 +1,20 @@
+{
+  "requestId": "w1",
+  "ok": {
+    "themeCatalogList": {
+      "on": true,
+      "entries": [
+        {
+          "id": "night",
+          "name": "Night",
+          "version": 2,
+          "author": "Ada Example",
+          "licence": "MIT",
+          "sha256": "2e6b06dd93fbe61eab5530bb61d60b007d1d3c24e0b20396a142c6f1829f8641",
+          "size": 110
+        }
+      ],
+      "updatedAtMs": "1764115200000"
+    }
+  }
+}

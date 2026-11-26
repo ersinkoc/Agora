@@ -181,17 +181,23 @@ trait Stream: Read + Write {}
 impl<T: Read + Write> Stream for T {}
 
 fn open(url: &Url) -> io::Result<Box<dyn Stream>> {
-    let tcp = agora_protocol::dial::connect_timeout((url.host.as_str(), url.port), TIMEOUT)?;
-    tcp.set_read_timeout(Some(TIMEOUT))?;
-    tcp.set_write_timeout(Some(TIMEOUT))?;
+    open_within(url, TIMEOUT).map(|(_, s)| s)
+}
+
+/// Connects (within `step`) and returns the stream with a handle to its socket, whose timeouts the caller may change as it goes.
+fn open_within(url: &Url, step: Duration) -> io::Result<(std::net::TcpStream, Box<dyn Stream>)> {
+    let tcp = agora_protocol::dial::connect_timeout((url.host.as_str(), url.port), step)?;
+    tcp.set_read_timeout(Some(step))?;
+    tcp.set_write_timeout(Some(step))?;
+    let handle = tcp.try_clone()?;
     if !url.https {
-        return Ok(Box::new(tcp));
+        return Ok((handle, Box::new(tcp)));
     }
     let name = rustls::pki_types::ServerName::try_from(url.host.clone())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let conn = rustls::ClientConnection::new(tls_config()?, name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
+    Ok((handle, Box::new(rustls::StreamOwned::new(conn, tcp))))
 }
 
 /// Sends one prepared request; returns the HTTP status. Blocking: call it from a thread of its own.
@@ -202,19 +208,50 @@ pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
 /// `GET` the URL and return the status and the body (at most `max` bytes; more is an error). HTTP/1.0 so the body is not
 /// chunked. Blocking.
 pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = open(url)?;
+    get_within(url, max, TIMEOUT, None)
+}
+
+/// [`get`] where connecting, and then each read or write, may take at most `step`, and, with a `deadline`, the whole exchange must
+/// end by then (`TimedOut` otherwise), so a server that sends a byte now and then cannot hold the caller. A redirect is not followed:
+/// its status comes back like any other.
+pub fn get_within(
+    url: &Url,
+    max: usize,
+    step: Duration,
+    deadline: Option<std::time::Instant>,
+) -> io::Result<(u16, Vec<u8>)> {
+    let timed_out = || io::Error::new(io::ErrorKind::TimedOut, "deadline");
+    // The time left for the next step: at most `step`, and never past the deadline.
+    let left = || -> io::Result<Duration> {
+        match deadline {
+            None => Ok(step),
+            Some(d) => {
+                let rest = d.saturating_duration_since(std::time::Instant::now());
+                if rest.is_zero() {
+                    Err(timed_out())
+                } else {
+                    Ok(rest.min(step))
+                }
+            }
+        }
+    };
+    let (tcp, mut s) = open_within(url, left()?)?;
     let req = format!(
         "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: agora\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         url.path, url.host
     );
+    tcp.set_write_timeout(Some(left()?))?;
     s.write_all(req.as_bytes())?;
     let mut all = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
+        tcp.set_read_timeout(Some(left()?))?;
         let n = match s.read(&mut buf) {
             Ok(n) => n,
             // A server that closes without a TLS close_notify has still sent its whole body.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
+            // A read cut short by the deadline says so, not "would block".
+            Err(_) if deadline.is_some() && left().is_err() => return Err(timed_out()),
             Err(e) => return Err(e),
         };
         if n == 0 {

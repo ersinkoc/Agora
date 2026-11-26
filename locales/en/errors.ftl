@@ -134,4 +134,6 @@ agent-approval_needed = This choice lets the agent act without asking, so it wai
 enroll-renew_refused = This machine's certificate could not be renewed ({ $reason }). It keeps the one it has; if that one is revoked or has ended, join the hub again.
 task-dispatch_limited = You tried to give { $limit } tasks to agents in the last minute. Wait a moment, then try again.
 agent-program_missing = { $kind } did not start: this machine cannot find { $program } in its PATH. Install it there, or start the node from a terminal where { $program } runs.
+theme-catalog_off = The community theme catalog is off on this hub. Its owner can turn it on with agora hub themes on.
+theme-not_found = The theme catalog has no theme { $id }. It may have been removed at the last update.
 internal = Something went wrong. Reference: { $incident_id }.

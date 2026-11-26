@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -412,6 +412,24 @@ impl SqliteStore {
                  PRAGMA user_version = 14;
                  COMMIT;"
             ))?;
+        }
+        if version < 15 {
+            // ADR-0113 decision 6: the community theme catalog the owner fetched (`agora hub themes update`), one row per accepted
+            // theme with its file as fetched. An update replaces every row in one transaction.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS theme_catalog (
+                     id         TEXT PRIMARY KEY,
+                     name       TEXT NOT NULL,
+                     version    INTEGER NOT NULL,
+                     author     TEXT NOT NULL,
+                     licence    TEXT NOT NULL,
+                     sha256     TEXT NOT NULL,
+                     data       TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 15;
+                 COMMIT;",
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
