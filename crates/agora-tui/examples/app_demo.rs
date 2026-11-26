@@ -196,7 +196,8 @@ fn run(
                     | Action::CleanUpOld
                     | Action::SaveLayout(_)
                     | Action::UseLayout(_)
-                    | Action::DeleteLayout(_) => {}
+                    | Action::DeleteLayout(_)
+                    | Action::ToggleBell => {}
                 }
             }
         }

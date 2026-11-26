@@ -179,7 +179,10 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   - [x] `agora manual [TOPIC] [--json]`: `scripting`, `themes`, `layouts`, `keys`, `plugins`, `mesh`, `files` (`docs/manual/`); every
     command line, example and limit in it is checked against the product by tests
 - [ ] **M6.6 Images in terminals** (G11, **decision**): kitty graphics and sixel
-- [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications
+- [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications.
+  The terminal client's half is done (the bell, a desktop notification through the terminal, the finished mark;
+  [main-window.md](../ux/main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)); the desktop app's own notifications are not
+  built
 
 ## M7. Accepted, not built (from the 2026-11-26 sweep of every Accepted ADR)
 

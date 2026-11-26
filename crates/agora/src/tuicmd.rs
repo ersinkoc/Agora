@@ -2123,6 +2123,13 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
         }
         c.layout_saved = layout_text(&c.app);
         c.layout_file = Some(file);
+        // M6.7: the alert settings (`tui-settings` in the Agora folder; the bell on, desktop notifications off when there is none), and
+        // whether the output is a terminal at all (no bell or OSC sequence ever goes into a pipe or a file).
+        let settings = home().join(agora_tui::alerts::FILE);
+        c.alerts = agora_tui::alerts::Alerts::new(agora_tui::alerts::load(&settings));
+        c.app.bell = c.alerts.prefs.sound;
+        c.settings_file = Some(settings);
+        c.alerts_tty = std::io::stdout().is_terminal();
         // ADR-0068 decision 6: the person's keys (`keybindings.json` in the Agora folder, the web window's format); the defaults when
         // there is none, and when it cannot be used (the notice says why).
         if let Some(n) = use_keys(say, &mut c.app, &keys_file()) {
@@ -2821,6 +2828,16 @@ struct Console {
     layout_saved: String,
     /// Where it is written: set only when the console is started for real (a console made in a test never writes a file).
     layout_file: Option<PathBuf>,
+    /// M6.7: the bell and desktop notification when an agent finishes or needs you, and the last look they are decided from. Kept
+    /// across reconnects (a routine refresh is not a first look).
+    alerts: agora_tui::alerts::Alerts,
+    /// Whether this client's output is a terminal: set only when the console is started for real, so a console made in a test (or one
+    /// whose output is not a terminal) never writes a bell or an OSC sequence.
+    alerts_tty: bool,
+    /// Where the alert settings are kept (`tui-settings` in the Agora folder); `None` in a test.
+    settings_file: Option<PathBuf>,
+    /// The alerts' clock starts here.
+    started: Instant,
 }
 
 /// ADR-0113 step 3: the theme the console uses (`theme::folder::Choice`, kept in `tui-theme` in the Agora folder) and the stamp of its
@@ -3111,7 +3128,71 @@ impl Console {
             theme: ThemeUse::default(),
             layout_saved: String::new(),
             layout_file: None,
+            alerts: agora_tui::alerts::Alerts::default(),
+            alerts_tty: false,
+            settings_file: None,
+            started: Instant::now(),
         }
+    }
+
+    /// Milliseconds since the console started, the alerts' clock.
+    fn alert_clock(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// M6.7: the bytes an alert writes to this client's terminal: the bell, and the desktop notification when one is asked for, its text a
+/// fixed phrase with the agent's name made safe. Nothing when the console's output is not a terminal.
+fn alert_output(say: &Say, c: &Console, ev: &agora_tui::alerts::Event) -> Vec<u8> {
+    use agora_tui::alerts;
+    let name = c.snapshot.as_ref().map_or_else(
+        || ev.agent.clone(),
+        |s| agora_tui::split::agent_label(s, &ev.agent),
+    );
+    let text = |id: &str, args: &[(&str, Arg)]| say.text(id, args);
+    let (title, body) = alerts::message(ev.kind, &name, &text);
+    alerts::alert_bytes(&c.alerts.prefs, c.alerts_tty, &title, &body)
+}
+
+/// Gives the alert, if any, on the real terminal (after the frame: a bell and an OSC sequence move nothing on screen).
+fn give_alert(say: &Say, c: &Console, ev: Option<agora_tui::alerts::Event>) {
+    let Some(ev) = ev else {
+        return;
+    };
+    let bytes = alert_output(say, c, &ev);
+    if !bytes.is_empty() {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(&bytes);
+        let _ = out.flush();
+    }
+}
+
+/// M6.7: the palette's "Turn the bell off / on": the setting changes now and is kept in `tui-settings` (the file is written again with
+/// both settings). Answers the notice.
+fn toggle_bell(say: &Say, c: &mut Console) -> String {
+    c.alerts.prefs.sound = !c.alerts.prefs.sound;
+    c.app.bell = c.alerts.prefs.sound;
+    let saved = c
+        .settings_file
+        .as_ref()
+        .map_or(Ok(()), |f| agora_tui::alerts::save(f, &c.alerts.prefs));
+    let said = say.text(
+        if c.alerts.prefs.sound {
+            key!("tui-bell-on")
+        } else {
+            key!("tui-bell-off")
+        },
+        &[],
+    );
+    match saved {
+        Ok(()) => said,
+        Err(_) => format!(
+            "{said} {}",
+            say.text(
+                key!("tui-settings-not-kept"),
+                &[("file", Arg::Str(agora_tui::alerts::FILE.to_string()))]
+            )
+        ),
     }
 }
 
@@ -3279,6 +3360,21 @@ fn console(
                 c.snapshot = Some(*s);
                 dirty_since = None;
                 redraw = true;
+                // M6.7: what changed since the last look: the finished marks, and an alert when an agent finished or needs you
+                // (never for the agent in focus; the marks are neither set nor kept for one on screen).
+                let on_screen = c.app.on_screen(area);
+                let viewing = c.app.active_agent().map(str::to_string);
+                let now_ms = c.alert_clock();
+                if let Some(s) = c.snapshot.as_ref() {
+                    let ev = c.alerts.look(
+                        s,
+                        &mut c.app.finished_unseen,
+                        &on_screen,
+                        viewing.as_deref(),
+                        now_ms,
+                    );
+                    give_alert(say, c, ev);
+                }
             }
             Update::Changed => {
                 dirty_since.get_or_insert_with(Instant::now);
@@ -3638,6 +3734,7 @@ fn console(
                         c.notice = clean_up_old(say, session, c, rx);
                         dirty_since.get_or_insert_with(Instant::now);
                     }
+                    Action::ToggleBell => c.notice = toggle_bell(say, c),
                     Action::Command(k) => {
                         // A command's result replaces the last notice: the same long result (the trust command again) opens its
                         // box again instead of staying cut in the footer.
@@ -3916,6 +4013,20 @@ fn console(
             }
             Notice::Same => {}
         }
+        // M6.7: an agent on screen is seen (its finished mark goes), and an alert that waited for the end of the gap is given if it
+        // still holds. What is on screen changes only with something to draw, so it is looked at only then.
+        if redraw && !c.app.finished_unseen.is_empty() {
+            let on_screen = c.app.on_screen(area);
+            let before = c.app.finished_unseen.len();
+            c.app.finished_unseen.retain(|id| !on_screen.contains(id));
+            redraw |= c.app.finished_unseen.len() != before;
+        }
+        if c.alerts.waiting() {
+            let viewing = c.app.active_agent().map(str::to_string);
+            let now_ms = c.alert_clock();
+            let ev = c.alerts.due(now_ms, viewing.as_deref());
+            give_alert(say, c, ev);
+        }
         // At most one frame per FRAME (ADR-0022: an echo within 16 ms), however fast the agent writes; input was handled before this.
         // The first frame of a run is drawn over a cleared screen: lines written meanwhile ("connecting…", a lost link) must not stay
         // under it.
@@ -4177,11 +4288,27 @@ fn draw_console(
         .map(|(a, p)| (a, p.screen()))
         .chain(preview.map(|p| (p.agent.as_str(), p.screen())))
         .collect();
-    let details = c
+    let mut details = c
         .snapshot
         .as_ref()
         .map(|s| inspector_details(c, s, area, &text).lines)
         .unwrap_or_default();
+    // M6.7: the finished mark in words, under the selected agent's name (a check alone says little without colours). Only when the
+    // inspector shows no request: a request there is judged in view from the lines `inspector_details` gives, so nothing may push it.
+    let shows_request = c.snapshot.as_ref().is_some_and(|s| {
+        displayed_request(
+            s,
+            &c.selected,
+            c.app.focus == agora_tui::app::Focus::Terminal,
+        )
+        .is_some()
+    });
+    if !shows_request && c.app.finished_unseen.contains(&c.selected) {
+        details.insert(
+            details.len().min(1),
+            say.text(key!("tui-finished-unseen"), &[]),
+        );
+    }
     // The footer's notice: the last thing done, or the hub's counts (machines, agents, what needs the user).
     let notice = if c.notice.is_empty() {
         c.snapshot.as_ref().map_or_else(String::new, |s| {
@@ -9890,5 +10017,86 @@ mod layout_prune_tests {
         // A snapshot with no agent at all (a hub that just started) prunes nothing.
         let empty = snapshot(&[("mac", true)], &[]);
         assert_eq!(layout_alive(&empty, &w).len(), 4);
+    }
+}
+
+/// M6.7: the console's alerts reach the terminal only when its output is one, and say a fixed phrase with the agent's name made safe.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod alert_tests {
+    use super::*;
+    use agora_tui::alerts::{Desktop, Event, Kind, Prefs};
+
+    fn console(kind: &str) -> Console {
+        let mut c = Console::new(
+            agora_tui::backend::Window::offscreen(100, 30).unwrap(),
+            ColorMode::Mono,
+        );
+        c.snapshot = Some(Snapshot {
+            agents: vec![agora_protocol::v1::AgentSnapshot {
+                agent_id: "n1/agent-1".into(),
+                node_id: "n1".into(),
+                kind: kind.into(),
+                running: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        c
+    }
+
+    fn finished() -> Event {
+        Event {
+            kind: Kind::Finished,
+            agent: "n1/agent-1".into(),
+        }
+    }
+
+    #[test]
+    fn a_console_whose_output_is_not_a_terminal_writes_nothing() {
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console("claude");
+        c.alerts.prefs = Prefs {
+            sound: true,
+            desktop: Desktop::Osc777,
+        };
+        // A console made here (as one whose output is not a terminal) never writes a bell or an OSC sequence.
+        assert!(!c.alerts_tty);
+        assert!(alert_output(&say, &c, &finished()).is_empty());
+    }
+
+    #[test]
+    fn a_notification_names_the_agent_made_safe() {
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console("evil\x1b]0;x\x07\u{202e}kind");
+        c.alerts_tty = true;
+        c.alerts.prefs = Prefs {
+            sound: false,
+            desktop: Desktop::Osc9,
+        };
+        let out = alert_output(&say, &c, &finished());
+        let name = agora_tui::split::agent_label(c.snapshot.as_ref().unwrap(), "n1/agent-1");
+        let safe = agora_tui::alerts::sanitize(&name, agora_tui::alerts::NAME_MAX);
+        assert_eq!(
+            safe,
+            format!("evil]0xkind · {}", name.rsplit(' ').next().unwrap())
+        );
+        assert_eq!(out, format!("\x1b]9;{safe} finished\x1b\\").into_bytes());
+        // Only the frame's own ESC and no BEL.
+        assert_eq!(out.iter().filter(|&&b| b == 0x1b).count(), 2);
+        assert!(!out.contains(&0x07));
+    }
+
+    #[test]
+    fn the_palette_turns_the_bell_off_and_on() {
+        let say = Say(agora_i18n::Catalog::english());
+        let mut c = console("claude");
+        c.app.bell = c.alerts.prefs.sound;
+        assert!(c.app.bell);
+        let off = toggle_bell(&say, &mut c);
+        assert!(!c.alerts.prefs.sound && !c.app.bell);
+        assert_eq!(off, say.text(key!("tui-bell-off"), &[]));
+        toggle_bell(&say, &mut c);
+        assert!(c.alerts.prefs.sound && c.app.bell);
     }
 }

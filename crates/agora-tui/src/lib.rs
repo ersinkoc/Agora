@@ -1,5 +1,6 @@
 //! Secondary terminal client for SSH-only use.
 
+pub mod alerts;
 pub mod app;
 pub mod backend;
 pub mod board;

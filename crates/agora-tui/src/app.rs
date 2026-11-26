@@ -164,6 +164,9 @@ pub enum Action {
     SaveLayout(String),
     UseLayout(String),
     DeleteLayout(String),
+    /// M6.7: turn the bell for agents that finish or need you on or off (the palette's command); the caller keeps the setting
+    /// (`alerts::FILE`) and answers with [`App::bell`].
+    ToggleBell,
     Quit,
 }
 
@@ -266,6 +269,7 @@ enum Command {
     UseLayout(String),
     DeleteLayout(String),
     ResetLayout,
+    ToggleBell,
     Quit,
 }
 
@@ -371,6 +375,11 @@ pub struct App {
     pub keys: crate::keys::Keymap,
     /// The first key of a chord, waiting for its second since then.
     chord: Option<(crate::keys::strokes::Stroke, std::time::Instant)>,
+    /// M6.7: agents that finished while they were not on screen, not seen since (`alerts::next_unseen`): their tree row has the
+    /// finished mark.
+    pub finished_unseen: std::collections::BTreeSet<String>,
+    /// M6.7: whether the bell rings when an agent finishes or needs you (the palette offers to turn it off or on).
+    pub bell: bool,
 }
 
 impl Default for App {
@@ -399,6 +408,8 @@ impl Default for App {
             saved_layouts: Vec::new(),
             keys: crate::keys::Keymap::default(),
             chord: None,
+            finished_unseen: std::collections::BTreeSet::new(),
+            bell: true,
         }
     }
 }
@@ -547,6 +558,22 @@ impl App {
                 if !out.iter().any(|(a, _)| a == agent) {
                     out.push((agent.clone(), x.body));
                 }
+            }
+        }
+        out
+    }
+
+    /// M6.7: the agents whose own view is on screen in a window of `area`: the active tab's, or in a tiled layout the agent in focus
+    /// and every agent drawn in a visible pane. Seeing one takes its finished mark away (as the web's `onScreen`).
+    pub fn on_screen(&self, area: Rect) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .active_agent()
+            .map(str::to_string)
+            .into_iter()
+            .collect();
+        for (agent, _) in self.tile_streams(area, |_| true) {
+            if !out.contains(&agent) {
+                out.push(agent);
             }
         }
         out
@@ -1254,6 +1281,17 @@ impl App {
         if cx.rows.iter().any(|r| r.id == crate::split::OLD_MACHINES) {
             all.push((Command::CleanUpOld, t(key!("tui-app-cmd-cleanup"), &[])));
         }
+        all.push((
+            Command::ToggleBell,
+            t(
+                if self.bell {
+                    key!("tui-app-cmd-bell-off")
+                } else {
+                    key!("tui-app-cmd-bell-on")
+                },
+                &[],
+            ),
+        ));
         all.push((Command::Quit, t(key!("tui-app-cmd-quit"), &[])));
         let query = self
             .palette
@@ -1482,6 +1520,7 @@ impl App {
                     Some(Command::ToggleInspector) => self.toggle_inspector(cx.area),
                     Some(Command::CloseTab) => self.close_tab(out),
                     Some(Command::CleanUpOld) => out.push(Action::CleanUpOld),
+                    Some(Command::ToggleBell) => out.push(Action::ToggleBell),
                     Some(Command::Quit) => out.push(Action::Quit),
                     Some(c) => self.layout_command(c, cx, out),
                     None => {}
@@ -1917,26 +1956,28 @@ impl App {
                 continue;
             }
             let open = self.shown(&row.id);
+            // M6.7: finished while not on screen, not seen since: the Finished green and its check, never the attention colour (the
+            // selected row under a theme keeps the row's own colours, which are checked to read on the accent).
+            let unseen = !row.needs_you && self.finished_unseen.contains(&row.id);
             let marker = if row.needs_you {
                 "! "
+            } else if unseen {
+                "✓ "
             } else if open {
                 "• "
             } else {
                 "  "
             };
+            let marker_style = if row.needs_you {
+                attention
+            } else if unseen && !(i == self.selected && self.look.is_some()) {
+                finished_style(s.colors, self.look.as_ref())
+            } else {
+                Style::default()
+            };
             let width = usize::from(a.tree.width);
             let (label, gap, state) = tree_row_fit(width, &row.label, &row.state, row.needs_you);
-            let mut spans = vec![
-                Span::styled(
-                    marker,
-                    if row.needs_you {
-                        attention
-                    } else {
-                        Style::default()
-                    },
-                ),
-                Span::raw(label),
-            ];
+            let mut spans = vec![Span::styled(marker, marker_style), Span::raw(label)];
             // Under a theme the selected row is in the accent: its secondary text takes the text on the accent, which is checked to read
             // there (without one the row is inverted, which keeps it readable as it is).
             let state_dim =
@@ -2424,6 +2465,17 @@ pub fn attention_style(colors: ColorMode) -> Style {
         ColorMode::Mono => bold,
         ColorMode::Ansi16 => bold.fg(Color::Red),
         ColorMode::Full | ColorMode::Ansi256 => bold.fg(Color::Indexed(166)),
+    }
+}
+
+/// M6.7: the finished mark's colour: the Finished green (the theme's `state-finished`, readable on its agents list, under a theme;
+/// the terminal's green otherwise), the check alone without colour (plain, where "needs you" is bold); never the attention style, so it cannot be read as
+/// "needs you".
+pub fn finished_style(colors: ColorMode, look: Option<&crate::theme::map::Shell>) -> Style {
+    match (colors, look) {
+        (ColorMode::Mono, _) => Style::default(),
+        (_, Some(l)) => Style::default().fg(l.styles.finished),
+        _ => Style::default().fg(Color::Green),
     }
 }
 
@@ -5444,6 +5496,73 @@ mod tests {
         });
         assert_eq!(app.handle(up, &small), vec![], "nothing was dragged over");
     }
+
+    /// M6.7: an agent that finished while it was not on screen has the check in its row's marker place until it is seen; "needs you"
+    /// outranks it, and the label and state are where they always are.
+    #[test]
+    fn the_finished_mark_is_drawn_in_the_tree_until_it_is_seen() {
+        let rows = rows();
+        let mut app = App {
+            finished_unseen: ["mac/agent-2".to_string(), "mac/agent-3".to_string()]
+                .into_iter()
+                .collect(),
+            ..App::default()
+        };
+        let lines = draw(&app, &rows, None, ColorMode::Mono);
+        let row = |lines: &[String], name: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(name))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert!(row(&lines, "codex").starts_with("✓ codex"), "{lines:?}");
+        assert!(row(&lines, "claude").starts_with("  claude"), "{lines:?}");
+        // The third needs the user: its "!" stays, never the check.
+        assert!(row(&lines, "shell").starts_with("! shell"), "{lines:?}");
+        // Seen: the caller takes it out of the set, and the row is as before.
+        app.finished_unseen.clear();
+        let lines = draw(&app, &rows, None, ColorMode::Mono);
+        assert!(row(&lines, "codex").starts_with("  codex"), "{lines:?}");
+    }
+
+    /// M6.7: what is on screen, for the mark: the active tab's agent; none with no tab.
+    #[test]
+    fn on_screen_is_the_agent_in_front() {
+        let rows = rows();
+        let mut app = App::default();
+        assert!(app.on_screen(AREA).is_empty());
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.on_screen(AREA), vec!["mac/agent-2".to_string()]);
+    }
+
+    /// M6.7: the palette offers to turn the bell off while it is on, and on while it is off; the caller keeps the setting.
+    #[test]
+    fn the_palette_turns_the_bell_off_and_on() {
+        let rows = rows();
+        for (bell, offered, other) in [
+            (true, "tui-app-cmd-bell-off", "tui-app-cmd-bell-on"),
+            (false, "tui-app-cmd-bell-on", "tui-app-cmd-bell-off"),
+        ] {
+            let mut app = App {
+                bell,
+                ..App::default()
+            };
+            key(&mut app, &rows, Key::Ctrl('k'));
+            for c in "cmd-bell".chars() {
+                key(&mut app, &rows, Key::Char(c));
+            }
+            let labels: Vec<String> = app
+                .commands(&cx(&rows))
+                .into_iter()
+                .map(|(_, l)| l)
+                .collect();
+            assert_eq!(labels, vec![offered.to_string()], "{other}");
+            assert_eq!(key(&mut app, &rows, Key::Enter), vec![Action::ToggleBell]);
+            assert!(app.palette.is_none());
+        }
+    }
 }
 
 /// ADR-0113 in the shell: a theme colours the parts of the window and its chrome, and never what needs the user.
@@ -5851,6 +5970,86 @@ mod theme_tests {
             );
         }
     }
+
+    /// M6.7: the finished mark is the Finished green (the terminal's own without a theme, the theme's `state-finished` under one), plain in
+    /// monochrome, never the attention style; on the selected row under a theme it takes the row's own colours.
+    #[test]
+    fn the_finished_mark_is_green_and_never_the_attention_colour() {
+        let rows = rows();
+        for colors in [
+            ColorMode::Full,
+            ColorMode::Ansi256,
+            ColorMode::Ansi16,
+            ColorMode::Mono,
+        ] {
+            // A theme is not used without colours.
+            let themed = (colors != ColorMode::Mono).then(|| shell("slate", colors));
+            for look in std::iter::once(None).chain(themed.map(Some)) {
+                let app = App {
+                    finished_unseen: ["mac/agent-2".to_string(), "mac/agent-1".to_string()]
+                        .into_iter()
+                        .collect(),
+                    // The first row is selected.
+                    selected: 0,
+                    look,
+                    ..App::default()
+                };
+                let mut tui =
+                    Tui::new(ratatui::backend::TestBackend::new(AREA.width, AREA.height)).unwrap();
+                tui.draw(|f| {
+                    app.draw(
+                        f,
+                        &Screen {
+                            rows: &rows,
+                            terminal: None,
+                            details: &[],
+                            notice: "",
+                            no_screen: None,
+                            conversation: None,
+                            dialog: None,
+                            note: None,
+                            tiles: &[],
+                            colors,
+                            t: &text,
+                        },
+                    );
+                })
+                .unwrap();
+                let buf = tui.backend().buffer().clone();
+                let y = (0..buf.area.height)
+                    .find(|&y| row_text(&buf, y).contains("codex"))
+                    .unwrap();
+                let x = u16::try_from(row_text(&buf, y).chars().position(|c| c == '✓').unwrap())
+                    .unwrap();
+                let cell = &buf[(x, y)];
+                let want = finished_style(colors, look.as_ref());
+                assert_eq!(
+                    cell.fg,
+                    want.fg.unwrap_or(Color::Reset),
+                    "{colors:?} {}",
+                    look.is_some()
+                );
+                if colors == ColorMode::Mono {
+                    // Without colours the check alone says it: plain, where "needs you" is bold.
+                    assert!(!cell.modifier.contains(Modifier::BOLD));
+                } else {
+                    assert_ne!(cell.fg, attention_style(colors).fg.unwrap_or(Color::Reset));
+                    assert_ne!(cell.fg, Color::Reset);
+                }
+                // The selected row's mark under a theme: the row's own colours (the accent's text), not the green.
+                if look.is_some() {
+                    let y0 = (0..buf.area.height)
+                        .find(|&y| row_text(&buf, y).contains("claude"))
+                        .unwrap();
+                    let x0 =
+                        u16::try_from(row_text(&buf, y0).chars().position(|c| c == '✓').unwrap())
+                            .unwrap();
+                    let label = cells_of(&buf, y0, "claude")[0];
+                    assert_eq!(buf[(x0, y0)].fg, buf[label].fg);
+                }
+            }
+        }
+    }
 }
 
 /// ADR-0068 rung 5: the layout in the app shell.
@@ -6079,6 +6278,37 @@ mod layout_tests {
     }
 
     /// ADR-0068 decision 7: only the panes on screen are watched.
+    /// M6.7: on screen, for the finished mark, is every agent drawn in a visible pane of a tiled layout (a chat agent's too, which has
+    /// no terminal to watch) and the agent in focus; never a tab behind another, a pane hidden by a maximized one, or another panel.
+    #[test]
+    fn on_screen_in_a_tiled_layout_is_every_visible_agent() {
+        let rows = rows(5);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        // agent-5 is a tab behind agent-4.
+        assert_eq!(
+            sorted(app.on_screen(AREA)),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-4"]
+        );
+        // Maximized: the one in focus.
+        let focus = app.active_agent().map(str::to_string).unwrap_or_default();
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(app.on_screen(AREA), [focus]);
+        key(&mut app, &rows, Key::Char('z'));
+        // A pane of another panel shows no agent.
+        let first = pane_ids(&app)[0].clone();
+        app.layout_act(layout_engine::Action::Bind {
+            pane: first,
+            bind: None,
+            panel: Some("approvals".into()),
+        });
+        assert!(!app.on_screen(AREA).contains(&"mac/agent-1".to_string()));
+    }
+
     #[test]
     fn only_the_panes_on_screen_are_watched() {
         let rows = rows(5);
