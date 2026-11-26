@@ -99,7 +99,13 @@ pub(crate) fn plugin(say: &Say, op: &str, o: &Opts) -> ExitCode {
         ("new", [id]) if !pack_flags => new(say, id, None),
         ("new", [id, folder]) if !pack_flags => new(say, id, Some(folder)),
         ("check", [path]) if !pack_flags => check(say, path),
-        ("pack", [folder]) => pack(say, Path::new(folder), o.out.as_deref(), o.write_hashes, o.watch),
+        ("pack", [folder]) => pack(
+            say,
+            Path::new(folder),
+            o.out.as_deref(),
+            o.write_hashes,
+            o.watch,
+        ),
         _ => {
             say.err(key!("cli-bad-arguments"), &[]);
             say.err(key!("cli-plugin-usage"), &[]);
