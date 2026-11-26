@@ -1030,6 +1030,8 @@ theme-import-note-variant = { $used ->
    *[dark] Dosyada ayrı açık ve koyu renkler var; koyu olanlar kullanıldı.
   }
 theme-import-note-first-scheme = Dosyada { $count } renk şeması var; ilki içe aktarıldı.
+theme-import-note-window-colours = VS Code'un { $count } pencere rengi alınmadı: pencerenin renkleri terminalin renklerinden yapılır.
+theme-import-note-include = Bu tema başka bir dosyanın üzerine kurulu (include); o dosya okunmadı, yalnızca bu dosyadaki renkler kullanıldı.
 theme-import-note-fallback = Dosyada { $key } yok, bu yüzden { $from } değerinden alındı.
 theme-import-note-syntax = { $count } kod rengi temanın simge renklerinden alındı.
 theme-name-dark = Koyu

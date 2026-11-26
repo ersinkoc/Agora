@@ -72,13 +72,15 @@
       "from": "editor.foreground"
     },
     {
+      "code": "window-colours",
+      "count": 2
+    },
+    {
       "code": "selection-alpha"
     },
     {
       "code": "ignored",
       "keys": [
-        "sideBar.background",
-        "focusBorder",
         "semanticHighlighting"
       ],
       "more": 0

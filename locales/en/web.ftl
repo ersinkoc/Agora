@@ -1058,6 +1058,11 @@ theme-import-note-variant = { $used ->
    *[dark] The file has separate light and dark colours; its dark ones were used.
   }
 theme-import-note-first-scheme = The file has { $count } colour schemes; the first was imported.
+theme-import-note-window-colours = { $count ->
+    [one] One of VS Code's window colours was left out: the window's colours are made from the terminal's.
+   *[other] { $count } of VS Code's window colours were left out: the window's colours are made from the terminal's.
+  }
+theme-import-note-include = This theme builds on another file (include), which was not read: only the colours in this file were used.
 theme-import-note-fallback = The file has no { $key }, so it was taken from { $from }.
 theme-import-note-syntax = { $count ->
     [one] One code colour was taken from the theme's token colours.

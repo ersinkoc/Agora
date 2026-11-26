@@ -123,7 +123,10 @@ describe('each app\'s colour file becomes a format-2 theme', () => {
     expect(r.notes).toContainEqual({ code: 'fallback', key: 'background', from: 'editor.background' });
     // `include` and a token colours path name other files: never read, named as left out.
     const inc = fromVsCode('{"include":"./base.json","tokenColors":"./tokens.tmTheme","colors":{"terminal.background":"#000000"}}', 'v.json') as Extract<Converted, { ok: true }>;
-    expect(inc.notes).toContainEqual({ code: 'ignored', keys: ['tokenColors', 'include'], more: 0 });
+    expect(inc.notes).toContainEqual({ code: 'ignored', keys: ['tokenColors'], more: 0 });
+    expect(inc.notes).toContainEqual({ code: 'include' });
+    const many = fromVsCode(JSON.stringify({ colors: { 'terminal.background': '#000000', 'editor.background': '#111111', 'sideBar.background': '#222222', danger: '#ff0000' } }), 'v.json') as Extract<Converted, { ok: true }>;
+    expect(many.notes).toContainEqual({ code: 'window-colours', count: 3 });
   });
 
   it('reads one Windows Terminal scheme, a list of them or a settings file with them', () => {
@@ -170,7 +173,7 @@ describe('the floor and the theme check hold after import', () => {
       const text = JSON.stringify(r.file);
       for (const k of floorNames) expect(text, k).not.toContain(`"${k}"`);
       expect(readTheme(r.file).ok).toBe(true);
-      expect(r.notes.some((n) => n.code === 'ignored')).toBe(true);
+      expect(r.notes.some((n) => n.code === 'ignored' || n.code === 'window-colours')).toBe(true);
     }
   });
 
@@ -322,7 +325,8 @@ describe('words', () => {
     { code: 'missing', keys: ['cursor', 'bright-white'], more: 2 }, { code: 'ignored', keys: ['a'], more: 0 }, { code: 'unreadable', keys: ['b'], more: 0 },
     { code: 'alpha', keys: ['red'], more: 0 }, { code: 'background-alpha' }, { code: 'selection-alpha' }, { code: 'colour-space', space: 'p3' },
     { code: 'colour-space', space: 'other' }, { code: 'variant', used: 'light' }, { code: 'first-scheme', count: 3 },
-    { code: 'fallback', key: 'background', from: 'editor.background' }, { code: 'syntax', count: 1 },
+    { code: 'fallback', key: 'background', from: 'editor.background' }, { code: 'syntax', count: 1 }, { code: 'syntax', count: 6 },
+    { code: 'window-colours', count: 1 }, { code: 'window-colours', count: 130 }, { code: 'include' },
   ];
   const errors: ImportError[] = ['too-large', 'unknown-format', 'unreadable', 'entities', 'no-colours'];
   for (const lang of ['en', 'tr']) {

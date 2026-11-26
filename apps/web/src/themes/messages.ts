@@ -84,7 +84,7 @@ export function importNoteText(n: ImportNote): string {
     case 'ignored': case 'unreadable': return t(`theme-import-note-${n.code}`, { keys: listText(n.keys, n.more) });
     case 'colour-space': return t('theme-import-note-colour-space', { space: n.space });
     case 'variant': return t('theme-import-note-variant', { used: n.used });
-    case 'first-scheme': case 'syntax': return t(`theme-import-note-${n.code}`, { count: n.count });
+    case 'first-scheme': case 'syntax': case 'window-colours': return t(`theme-import-note-${n.code}`, { count: n.count });
     case 'fallback': return t('theme-import-note-fallback', { key: terminalLabel(n.key), from: n.from });
     default: return t(`theme-import-note-${n.code}`);
   }

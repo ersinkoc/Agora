@@ -28,7 +28,9 @@ export type ImportNote =
   | { code: 'variant'; used: Scheme } // iTerm2: the file has light and dark colours; one set was used
   | { code: 'first-scheme'; count: number } // Windows Terminal: several schemes; the first was used
   | { code: 'fallback'; key: TerminalKey; from: string } // VS Code: a terminal colour taken from the editor's
-  | { code: 'syntax'; count: number }; // VS Code: code colours taken from its token colours
+  | { code: 'syntax'; count: number } // VS Code: code colours taken from its token colours
+  | { code: 'window-colours'; count: number } // VS Code: its own window colours, left out (the window's are made from the terminal's)
+  | { code: 'include' }; // VS Code: the theme builds on another file, which is not read
 
 export type ImportError = 'too-large' | 'unknown-format' | 'unreadable' | 'entities' | 'no-colours';
 export type Converted =
@@ -434,8 +436,11 @@ function fromVsCodeValue(value: unknown, fileName: string, fallbackName: string)
   const tokenColors = own(value, 'tokenColors');
   if (Array.isArray(tokenColors)) src.syntax = syntaxFrom(tokenColors);
   else if (tokenColors !== undefined) src.ignored.push('tokenColors');
-  for (const k of keysOf(c)) if (!used.has(k)) src.ignored.push(k);
-  for (const k of keysOf(value)) if (!['name', 'colors', 'tokenColors', 'type', '$schema'].includes(k)) src.ignored.push(k);
+  // VS Code's own window colours are many (a theme has a hundred or more): counted in one note, not named.
+  const windowColours = Object.keys(c).filter((k) => !used.has(k)).length;
+  if (windowColours > 0) src.notes.push({ code: 'window-colours', count: windowColours });
+  if (own(value, 'include') !== undefined) src.notes.push({ code: 'include' });
+  for (const k of keysOf(value)) if (!['name', 'colors', 'tokenColors', 'type', '$schema', 'include'].includes(k)) src.ignored.push(k);
   return build('vscode', src, fileName, fallbackName);
 }
 export function fromVsCode(text: string, fileName = '', fallbackName = ''): Converted {

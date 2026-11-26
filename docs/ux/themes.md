@@ -336,6 +336,7 @@ the same two ways open it as a screen of its own (`#/theme`) with Back.
 ![A VS Code colour theme, shown with what changed on the way, before it is added (Dark)](../screenshots/theme-import-dark.png)
 ![A Ghostty theme with a light background, with the theme check's warnings (Light)](../screenshots/theme-import-light.png)
 ![The VS Code theme added: the window and the terminal in its colours, the request card as always](../screenshots/theme-import-added-dark.png)
+![The Ghostty theme added as the light theme](../screenshots/theme-import-added-light.png)
 
 **Import from another app…** in the editor reads the colours of another app's colour file and makes a format-2 theme of them
 (roadmap M5.1; web and desktop window only: no CLI, no hub, no schema). Nothing is added until **Add theme**: first a dialog shows
@@ -370,8 +371,9 @@ the terminal's colours, every note on what was left out or guessed, and what the
   `name`, else the file name) loses control and direction characters and the pieces a theme refuses (`;`, `<`, `url(` …).
 - **Bounded.** A file over 256 KiB is refused before it is read. The readers (`themes/import/read.ts`) are small hand-written subsets
   (TOML, YAML, Ghostty's lines, JSON with comments) that read line by line, keep keys in a `Map`, and stop at 4096 keys; a property
-  list goes through the browser's own XML parser, which loads no external DTD or entity (the dialog's screenshot script checks that
-  importing an iTerm2 file makes no request), after the text is refused if it declares an entity or a DTD of its own, nests deeper
+  list goes through the browser's own XML parser, which loads no external DTD, entity or stylesheet (the dialog's screenshot script
+  checks that importing an iTerm2 file makes no request, and that one naming a DTD and a stylesheet on the page's own server fetches
+  neither), after the text is refused if it declares an entity or a DTD of its own, nests deeper
   than eight, or has more than 20 000 elements. A fuzz test throws random and mutated files at every converter.
 - Taken by `scripts/screenshots-theme-import.mjs` from the demo window.
 

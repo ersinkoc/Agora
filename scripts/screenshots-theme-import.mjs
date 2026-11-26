@@ -13,7 +13,9 @@ const fixtures = new URL('../apps/web/src/themes/import/fixtures/', import.meta.
 const { chromium } = createRequire(join(process.env.PW_DIR ?? '.', 'x.js'))('playwright-core');
 const exe = process.env.CHROME ?? `${process.env.HOME}/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`;
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm' };
+const served = [];
 const server = createServer((req, res) => {
+  served.push(req.url ?? '');
   const path = join(dist, req.url === '/' || !req.url ? 'index.html' : req.url.split('?')[0]);
   if (!existsSync(path)) { res.writeHead(404).end(); return; }
   res.writeHead(200, { 'content-type': types[extname(path)] ?? 'application/octet-stream' }).end(readFileSync(path));
@@ -73,6 +75,16 @@ for (const [scheme, file, name] of [['dark', 'harbour-color-theme.json', 'harbou
   await importFile(page, 'harbour.itermcolors', 'harbour.itermcolors');
   await page.getByRole('button', { name: 'Add theme' }).click();
   await page.waitForTimeout(500);
+  // A hostile one: a DTD and a stylesheet on this very server. The parser asks for neither.
+  const origin = url.replace('/#/demo', '');
+  const hostile = readFileSync(join(fixtures, 'harbour.itermcolors'), 'utf8')
+    .replace(/<!DOCTYPE[^>]*>/, `<?xml-stylesheet type="text/xsl" href="${origin}/evil.xsl"?>\n<!DOCTYPE plist SYSTEM "${origin}/evil.dtd">`);
+  await page.locator('[data-import-other]').setInputFiles({ name: 'hostile.itermcolors', mimeType: 'application/xml', buffer: Buffer.from(hostile) });
+  await page.waitForSelector('[data-theme-import]');
+  await page.waitForTimeout(500);
+  const fetched = served.filter((u) => u.startsWith('/evil'));
+  console.log(`DTD or stylesheet fetched while reading a hostile iTerm2 file: ${fetched.length}`);
+  if (fetched.length > 0) errors.push(`fetched ${fetched.join(' ')}`);
   console.log(`requests while importing an iTerm2 file: ${requests.length}${requests.length ? ` ${requests.join(' ')}` : ''}`);
   if (requests.some((r) => !r.startsWith(url.replace('/#/demo', '')))) errors.push(`a request left the page: ${requests.join(' ')}`);
   await ctx.close();
