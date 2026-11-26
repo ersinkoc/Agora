@@ -1,8 +1,7 @@
 # 0048. The desktop app is a thin Tauri shell around the hub's page
 Status: Accepted
 Date: 2026-11-10
-Amended: Amendment A below is **Proposed** (2026-11-26): the hub's page may ask the app for a notification. It needs the maintainer's
-acceptance before the branch that builds it (`claude/desktop-notify`) is merged.
+Amended: 2026-11-26 (Amendment A below, accepted by the maintainer 2026-11-26: the hub's page may ask the app for a notification).
 
 ## Context
 ADR-0005 chose a web-first client with a Tauri desktop package; `apps/desktop` holds only a README. The web client already does
@@ -51,7 +50,7 @@ listener and cancels active connections, including WebSocket streams.
 - **A native client (Rust UI):** a second client to keep in step with the web one; ADR-0005 rejected it.
 - **PWA only (ADR-0046 on desktop):** installable today, but cannot pin a private CA and has no menu-bar or hidden-window notifications.
 
-## Amendment A (Proposed, 2026-11-26, roadmap M6.7): the hub's page may ask the app for a notification, and nothing else
+## Amendment A (Accepted 2026-11-26, roadmap M6.7): the hub's page may ask the app for a notification, and nothing else
 
 **Why.** M6.7 asks for the app's own notification when an agent finishes or needs you, with the rules the web window uses for its
 sounds since #1227. Only the page knows those events (the agents' states and the Needs you list come over its own connection), and the
@@ -59,7 +58,7 @@ page's title, which the shell reads for decision 5, carries the number of approv
 app could not be told. Also, `agora_platform::desktop_notify` posts as Script Editor on macOS (so the Mac got no notification) and never
 reports a click.
 
-**Proposed.**
+**Accepted** (the maintainer, 2026-11-26).
 
 1. **One command for the hub's page, `notify_agents`.** Decision 2 stays for everything else: no file system, no shell, no other
    command of the shell's, no plugin command.

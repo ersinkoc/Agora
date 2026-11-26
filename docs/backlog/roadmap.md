@@ -188,8 +188,7 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   - the terminal client: the bell, a desktop notification through the terminal, the finished mark;
   - the desktop app: App notifications through Tauri's notification plugin, with a click that opens the agent.
 
-  The desktop half rests on ADR-0048 Amendment A (**Proposed**: the hub's page may call one command), which the maintainer accepts
-  before it is merged.
+  The desktop half rests on ADR-0048 Amendment A (Accepted 2026-11-26: the hub's page may call one command).
 
 ## M7. Accepted, not built (from the 2026-11-26 sweep of every Accepted ADR)
 

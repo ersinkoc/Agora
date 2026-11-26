@@ -74,7 +74,7 @@ The maintainer wants community plugins next to community themes, as the most ext
    - **The window's policy** is not loosened: it gains only `frame-src 'self'`, and every other page of the hub still refuses to be
      framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
    - **The desktop app:** its webview grants the hub's page nothing (ADR-0048 decision 2), so a frame inside it has nothing to
-     reach either. (ADR-0048 Amendment A, Proposed, would grant the hub's top frame one command that asks for a notification; a
+     reach either. (ADR-0048 Amendment A, Accepted 2026-11-26, grants the hub's top frame one command that asks for a notification; a
      plugin's opaque frame still reaches nothing.)
 3. **The interface: a small, versioned message set over `postMessage`, and capabilities the person grants.**
    - **Messages:** the host accepts only messages from its own frames, of known types, within size limits, at a bounded rate.

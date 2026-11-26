@@ -201,7 +201,7 @@ sign: everything it says is on screen too.
   only: a reload is a new look at everything. Screens: `docs/ux/screens/finished-mark-{dark,light}.png`,
   `docs/ux/screens/sounds-settings-{dark,light}.png`. Tests: `net/sounds.test.ts`, `net/finished.test.ts`,
   `components/agentAlerts.test.tsx`.
-- **In the desktop app** (M6.7; ADR-0048 Amendment A, **Proposed**): **App notifications**, a card in Settings shown only inside
+- **In the desktop app** (M6.7; ADR-0048 Amendment A, Accepted): **App notifications**, a card in Settings shown only inside
   the app (`#/device/app-notifications`), **off until the person turns them on** and kept in the app's page storage. It has one switch
   for when an agent finishes and one for when an agent needs you. It uses the same events and the same rules as the sounds
   (`net/desktopNotify.ts`):

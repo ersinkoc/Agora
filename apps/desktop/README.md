@@ -39,7 +39,7 @@ Allow" applies to that build only. Allow it: seen with the 0.3.4 image on macOS 
 whether the window can still sign with its stored device key (approvals, grants, folder listing) is not tested. A Developer ID signature
 (stable identity) removes the prompt. WebView2 on Windows keeps that key with the user's account and does not ask.
 
-Notifications (ADR-0048 decision 5 and Amendment A, **Proposed**), through Tauri's notification plugin (`tauri-plugin-notification`,
+Notifications (ADR-0048 decision 5 and Amendment A, Accepted), through Tauri's notification plugin (`tauri-plugin-notification`,
 used from Rust only), so they come from the app itself on every system (from Terminal in a `cargo run` on a Mac, which the plugin uses
 for a development run):
 - **Approvals waiting:** when the number in the page's title (`(N) Agora`) grows while the window is hidden, minimized or not focused,
