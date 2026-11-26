@@ -1721,6 +1721,7 @@ mod tests {
                     launch_options: Vec::new(),
                     skips_permissions: false,
                     always_allowed: Vec::new(),
+                    runs_inside: String::new(),
                 },
             );
         }

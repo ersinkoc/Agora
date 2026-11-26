@@ -1443,6 +1443,22 @@ node sets. The window's button and the terminal client's key come with the next 
   or `confined_only` the node refuses such an Allow (`approval.adapter_outdated`).
 - Golden fixtures: `schema/fixtures/v1/agora.v1.AgentAlwaysAllowed.*` and `schema/fixtures/approval-always/`.
 
+### What runs inside a plain terminal (ADR-0094)
+
+Schema step approved with ADR-0094 by the maintainer on 2026-11-26. No capability: an older hub stores the event and ignores it (its
+body is unknown to it), an older window ignores the field.
+
+- **The event** `AgentRunsInside` (`Event.body` 90, producer `node`: `agent_id`, `kind`). A node sends it for a running `shell` agent when
+  the kind of the program in the terminal's foreground changes: the kind id of the installed manifest whose `[process] names` holds the
+  foreground program's file name, or empty when no such program is in front any more. Only the node's process lookup sets it (threat
+  model T70); nothing the terminal prints can. A node says the current mark again after every `AgentStarted` it restates (a resync, a
+  take-up), and a new process of the agent starts with none.
+- **The hub** keeps `kind` for a running agent of the producer when it is a plain kind id (1 to 64 of `a-z`, `0-9`, `-`, `_`, `.`;
+  anything else is not kept and leaves the mark as it was), clears it on an empty `kind`, and on the agent's `AgentStarted`,
+  `AgentExited`, `AgentInterrupted` and its node's `NodeOnline`. `AgentSnapshot.runs_inside` (46) carries it for a running agent; empty
+  otherwise. A window sees `AgentRunsInside` when it may see the agent.
+- Golden fixture: `schema/fixtures/v1/agora.v1.AgentRunsInside.*`; the published `AgentSnapshot` fixture is unchanged and reads as empty.
+
 ### The community theme catalog (ADR-0113)
 
 ADR-0113 decision 6. The hub keeps a catalog of community themes that it fetched on its owner's command (`agora hub themes update`) and

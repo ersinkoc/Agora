@@ -662,6 +662,12 @@ fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() 
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(!states(&seen).contains(&AgentState::Blocked), "{seen:?}");
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, SupervisorEvent::RunsInside { .. })),
+        "{seen:?}"
+    );
     // Let it finish before the next one.
     let end = Instant::now() + Duration::from_secs(20);
     while !sup
@@ -684,6 +690,16 @@ fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() 
     });
     assert_eq!(sup.runs_inside(&id).as_deref(), Some("fake"));
     assert!(states(&events).contains(&AgentState::Blocked), "{events:?}");
+    // ADR-0094 step 2: the change is an event for the hub (`AgentRunsInside`), and the node's list says it for its announcements.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, SupervisorEvent::RunsInside { agent, kind }
+            if *agent == id && kind.as_deref() == Some("fake"))),
+        "{events:?}"
+    );
+    let listed = sup.list().into_iter().find(|v| v.id == id).unwrap();
+    assert_eq!(listed.runs_inside.as_deref(), Some("fake"));
     // It ends, the shell is in front again: the mark ends, and so does what its rules said.
     let end = Instant::now() + Duration::from_secs(20);
     let mut after = Vec::new();
@@ -695,6 +711,13 @@ fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() 
     assert_eq!(
         states(&after).last(),
         Some(&AgentState::Unknown),
+        "{after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|e| matches!(e, SupervisorEvent::RunsInside { agent, kind }
+            if *agent == id && kind.is_none())),
         "{after:?}"
     );
     sup.stop(&id).unwrap();

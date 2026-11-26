@@ -53,6 +53,9 @@ message Event {
     AgentQuotaObserved agent_quota_observed = 67;
     // ADR-0101, capability `approval.always`: an agent holds an "always" answer for its session.
     AgentAlwaysAllowed agent_always_allowed = 69;
+    // ADR-0094: the kind of the program a person runs by hand in a plain terminal (a `shell` agent), found by the node's process lookup;
+    // `kind` empty when that program ended.
+    AgentRunsInside agent_runs_inside = 90;
     // terminal
     TerminalOpened terminal_opened = 40;
     TerminalTitleChanged terminal_title_changed = 41;
@@ -354,6 +357,13 @@ message AgentAlwaysAllowed {
   string action = 3;
   string signer_device_id = 4;
   uint64 at_ms = 5;
+}
+
+// ADR-0094: what runs inside a plain terminal now. Only the node's foreground-process lookup sets it, never anything the terminal printed.
+message AgentRunsInside {
+  string agent_id = 1;
+  // A kind id of the node's installed manifests (never `shell`); empty: no known program runs inside any more.
+  string kind = 2;
 }
 
 message MessagePosted {

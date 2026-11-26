@@ -366,6 +366,8 @@ impl Scope {
             Body::AgentCommands(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // ADR-0101
             Body::AgentAlwaysAllowed(e) => self.granted(self.agents.get(&q(&e.agent_id))),
+            // ADR-0094
+            Body::AgentRunsInside(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentExited(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             Body::AgentStartRefused(e) => self.granted(self.agents.get(&q(&e.agent_id))),
             // Made by the hub, which names the agent by its hub-wide key already (ADR-0053).
@@ -697,6 +699,30 @@ mod tests {
             (always("n1", "a1"), true),
             (always("n1", "a2"), false),
             (always("n1", "never-seen"), false),
+        ] {
+            assert_eq!(s.admit(&event), visible);
+        }
+    }
+
+    /// ADR-0094: what runs inside a terminal reaches only the people who may see that agent.
+    #[test]
+    fn what_runs_inside_a_terminal_is_seen_only_with_its_agent() {
+        let mut s = scope(&["n1/id:shared"]);
+        let inside = |node: &str, id: &str| {
+            ev(
+                node,
+                Body::AgentRunsInside(v1::AgentRunsInside {
+                    agent_id: id.into(),
+                    kind: "codex".into(),
+                }),
+            )
+        };
+        for (event, visible) in [
+            (agent("n1", "a1", "id:shared"), true),
+            (agent("n1", "a2", "id:private"), false),
+            (inside("n1", "a1"), true),
+            (inside("n1", "a2"), false),
+            (inside("n1", "never-seen"), false),
         ] {
             assert_eq!(s.admit(&event), visible);
         }

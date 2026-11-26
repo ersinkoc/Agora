@@ -129,6 +129,18 @@ pub struct AgentView {
     /// ADR-0101: the "always" answers the agent's process holds, as `(approval id, action)`, newest last, at most
     /// [`MAX_ALWAYS_ALLOWED`]. Cleared when it ends, is interrupted or starts again.
     pub always_allowed: Vec<(String, String)>,
+    /// ADR-0094: the kind of the program a person runs by hand in this plain terminal (`AgentRunsInside`); empty when none. Only a
+    /// running agent has one (a node sends it for its `shell` agents); cleared by its next `AgentStarted`, its end, its interruption and its node's start.
+    pub runs_inside: String,
+}
+
+/// ADR-0094: a kind id the hub keeps from `AgentRunsInside`: a manifest's id, at most 64 lowercase letters, digits, `-`, `_` or `.`.
+fn runs_inside_kind(kind: &str) -> bool {
+    !kind.is_empty()
+        && kind.len() <= 64
+        && kind.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+        })
 }
 
 /// ADR-0101: how many "always" answers the hub lists per agent (the newest are kept).
@@ -491,6 +503,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         | Body::AgentInterrupted(_)
         // ADR-0101: names an agent of the producer.
         | Body::AgentAlwaysAllowed(_)
+        // ADR-0094: names an agent of the producer.
+        | Body::AgentRunsInside(_)
         | Body::TerminalTitleChanged(_)
         | Body::TerminalClosed(_)
         | Body::ApprovalRequested(_)
@@ -812,6 +826,8 @@ impl View {
                     a.state = AgentState::Done;
                     // ADR-0101: an always answer lives in the agent's process.
                     a.always_allowed.clear();
+                    // ADR-0094: the node looks again at what runs inside a terminal it took up.
+                    a.runs_inside.clear();
                 }
                 let prefix = format!("{producer}/");
                 self.approvals.retain(|k, _| !k.starts_with(&prefix));
@@ -978,6 +994,7 @@ impl View {
                         launch_options: e.launch_options.clone(),
                         skips_permissions: e.skips_permissions,
                         always_allowed: Vec::new(),
+                        runs_inside: String::new(),
                     },
                 );
             }
@@ -1011,9 +1028,11 @@ impl View {
                         launch_options: Vec::new(),
                         skips_permissions: false,
                         always_allowed: Vec::new(),
+                        runs_inside: String::new(),
                     });
                 a.running = false;
                 a.always_allowed.clear();
+                a.runs_inside.clear();
                 a.session.config = None;
                 a.session.commands = None;
                 a.state = AgentState::Done;
@@ -1143,6 +1162,22 @@ impl View {
                     a.exit_code = Some(e.exit_code);
                     a.state = AgentState::Done;
                     a.always_allowed.clear();
+                    a.runs_inside.clear();
+                }
+            }
+            // ADR-0094: what a running plain terminal runs inside now (the node sends it for its `shell` agents only). A kind that is
+            // not a plain kind id is not kept.
+            Body::AgentRunsInside(e) => {
+                if let Some(a) = self
+                    .agents
+                    .get_mut(&q(&e.agent_id))
+                    .filter(|a| a.running)
+                {
+                    if e.kind.is_empty() {
+                        a.runs_inside.clear();
+                    } else if runs_inside_kind(&e.kind) {
+                        a.runs_inside = e.kind.clone();
+                    }
                 }
             }
             // ADR-0101: an agent that runs holds one more "always" answer (a repeat of one it holds, as a resync says it again, changes
@@ -2433,6 +2468,75 @@ mod tests {
             (a.always_label.as_str(), a.always_option_id.as_str()),
             ("Always allow git", "aa")
         );
+    }
+
+    /// ADR-0094: what runs inside a plain terminal, from `AgentRunsInside`: kept for a running agent of the producer, only as a plain
+    /// kind id; cleared by an empty kind, a start (the restated mark that follows brings it back), the end, an interruption and the
+    /// node's start.
+    #[test]
+    fn what_runs_inside_a_terminal_is_kept_while_it_runs_and_cleared_with_its_process() {
+        let inside = |agent: &str, kind: &str| {
+            Body::AgentRunsInside(AgentRunsInside {
+                agent_id: agent.into(),
+                kind: kind.into(),
+            })
+        };
+        let shown = |v: &View| {
+            v.agents
+                .get("n1/a")
+                .map(|a| a.runs_inside.clone())
+                .unwrap_or_default()
+        };
+        let mut v = View::default();
+        v.apply(&ev("n1", 1, started("a")));
+        v.apply(&ev("n1", 2, inside("a", "claude-code")));
+        assert_eq!(shown(&v), "claude-code");
+        // Not a plain kind id: not kept, the mark stays as it was.
+        for bad in ["Claude", "claude code", "x\u{1b}[31m", &"k".repeat(65)] {
+            v.apply(&ev("n1", 3, inside("a", bad)));
+            assert_eq!(shown(&v), "claude-code", "{bad:?}");
+        }
+        // Another node cannot mark this agent.
+        v.apply(&ev("n2", 4, inside("a", "codex")));
+        assert_eq!(shown(&v), "claude-code");
+        // An empty kind: the program ended.
+        v.apply(&ev("n1", 5, inside("a", "")));
+        assert_eq!(shown(&v), "");
+        // A start clears; a restated mark brings it back.
+        v.apply(&ev("n1", 6, inside("a", "codex")));
+        v.apply(&ev("n1", 7, started("a")));
+        assert_eq!(shown(&v), "");
+        v.apply(&ev("n1", 8, inside("a", "codex")));
+        assert_eq!(shown(&v), "codex");
+        // The end clears, and an ended agent takes none.
+        v.apply(&ev(
+            "n1",
+            9,
+            Body::AgentExited(AgentExited {
+                agent_id: "a".into(),
+                exit_code: 0,
+            }),
+        ));
+        assert_eq!(shown(&v), "");
+        v.apply(&ev("n1", 10, inside("a", "codex")));
+        assert_eq!(shown(&v), "");
+        // The node's start clears.
+        v.apply(&ev("n1", 11, started("a")));
+        v.apply(&ev("n1", 12, inside("a", "codex")));
+        v.apply(&ev("n1", 13, node_online("n1")));
+        assert_eq!(shown(&v), "");
+        // An interruption clears.
+        v.apply(&ev("n1", 14, started("a")));
+        v.apply(&ev("n1", 15, inside("a", "codex")));
+        v.apply(&ev(
+            "n1",
+            16,
+            Body::AgentInterrupted(AgentInterrupted {
+                agent_id: "a".into(),
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(shown(&v), "");
     }
 
     /// ADR-0101: an agent's always answers, from `AgentAlwaysAllowed` (a repeat of one changes nothing, at most 16, newest kept),

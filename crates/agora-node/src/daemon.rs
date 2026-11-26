@@ -707,6 +707,13 @@ impl EventSink {
                 session_id: session.clone(),
             }));
         }
+        // ADR-0094: the hub cleared what runs inside a plain terminal on the `AgentStarted` above; said again while it runs.
+        if let Some(kind) = &view.runs_inside {
+            record(Body::AgentRunsInside(v1::AgentRunsInside {
+                agent_id: agent.into(),
+                kind: kind.clone(),
+            }));
+        }
         if view.terminal {
             record(Body::TerminalOpened(v1::TerminalOpened {
                 terminal_id: crate::control::terminal_id_of(&view.id),
@@ -880,6 +887,13 @@ impl EventSink {
                     self.record(Body::AgentSessionReported(v1::AgentSessionReported {
                         agent_id: agent.as_str().into(),
                         session_id: session.clone(),
+                    }));
+                }
+                // ADR-0094: the kind of the program a person runs by hand in a plain terminal, or that it ended.
+                SupervisorEvent::RunsInside { agent, kind } => {
+                    self.record(Body::AgentRunsInside(v1::AgentRunsInside {
+                        agent_id: agent.as_str().into(),
+                        kind: kind.clone().unwrap_or_default(),
                     }));
                 }
                 SupervisorEvent::StateChanged {
@@ -3754,6 +3768,7 @@ mod announce_tests {
             parent: None,
             launch_options: Vec::new(),
             skips_permissions: false,
+            runs_inside: None,
         }
     }
 
@@ -4585,6 +4600,7 @@ mod process_record_tests {
             parent: None,
             launch_options: Vec::new(),
             skips_permissions: false,
+            runs_inside: None,
         };
         let exited = |code| SupervisorEvent::Exited {
             agent: AgentId::new("agent-1"),

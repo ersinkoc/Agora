@@ -847,6 +847,12 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 } else {
                     Vec::new()
                 },
+                // ADR-0094: only a running plain terminal runs something inside.
+                runs_inside: if a.running {
+                    a.runs_inside.clone()
+                } else {
+                    String::new()
+                },
                 ..session_snapshot(&a.session)
             })
             .collect(),

@@ -192,6 +192,12 @@ pub enum SupervisorEvent {
     Stopped {
         agent: AgentId,
     },
+    /// ADR-0094: what a person runs by hand in a plain terminal changed: the kind of the program in its foreground now, or `None`
+    /// when no program a manifest names is (it ended). Only the node's process lookup says it.
+    RunsInside {
+        agent: AgentId,
+        kind: Option<String>,
+    },
     /// P2-16 (ADR-0090): the node stopped an adapter agent because the mode or a config option it reported in use makes it act without
     /// asking and the node's `skip_permissions` policy refuses that ([`skip_in_use_refused`]). `policy` is the refusing policy
     /// (`forbid`, `confined_only`), `setting` what skipped (`mode`, `model` or `config`). A [`Self::Stopped`] follows.
@@ -745,6 +751,8 @@ pub struct AgentView {
     /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
     pub launch_options: Vec<String>,
     pub skips_permissions: bool,
+    /// ADR-0094: the kind of the program a person runs by hand in this plain terminal, found by its foreground program.
+    pub runs_inside: Option<String>,
 }
 
 /// ADR-0095: whether an agent started with `launch_skips` (a launch option that skips permissions) and with these options in use acts
@@ -1594,6 +1602,9 @@ impl Supervisor {
             e.terminal = Some(terminal);
             e.pacer = Pacer::default();
             e.next_check = now;
+            // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
+            e.inside = None;
+            e.next_look = now;
         }
         Ok(())
     }
@@ -4292,6 +4303,10 @@ impl Supervisor {
             });
             if inside != entry.inside {
                 let ended = entry.inside.is_some();
+                events.push(SupervisorEvent::RunsInside {
+                    agent: entry.agent.id.clone(),
+                    kind: inside.clone(),
+                });
                 entry.inside = inside;
                 entry.next_check = now;
                 if ended && !entry.state_reported {
@@ -4353,6 +4368,9 @@ impl Supervisor {
                 entry.native_since = (native && !from_nothing).then_some(now);
                 entry.pacer = Pacer::default();
                 entry.next_check = now;
+                // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
+                entry.inside = None;
+                entry.next_look = now;
                 entry.agent.process_restarted();
                 entry.state_reported = false;
                 // An agent taken up from the holder knows its launch options but not their arguments (`set_kept_launch`): the
@@ -4845,6 +4863,9 @@ impl Supervisor {
         entry.terminal = Some(terminal);
         entry.pacer = Pacer::default();
         entry.next_check = now;
+        // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
+        entry.inside = None;
+        entry.next_look = now;
         entry.restarts = 0;
         entry.gave_up = false;
         // Used once: a later restart of its process (a crash) never carries the message again.
@@ -5081,6 +5102,7 @@ impl Supervisor {
                 parent: self.parents.get(id).cloned(),
                 launch_options: e.launch.ids.clone(),
                 skips_permissions: e.launch.skips_permissions,
+                runs_inside: e.inside.clone(),
             })
             .collect();
         out.extend(self.adapters.iter().map(|(id, e)| AgentView {
@@ -5100,6 +5122,7 @@ impl Supervisor {
             parent: self.parents.get(id).cloned(),
             launch_options: e.launch.ids.clone(),
             skips_permissions: e.launch.skips_permissions,
+            runs_inside: None,
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out

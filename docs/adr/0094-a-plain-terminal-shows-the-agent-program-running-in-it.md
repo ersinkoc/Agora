@@ -9,8 +9,11 @@ Built (2026-11-26, on `main`): build step 1 and the node side of step 2 without 
 `[process] names` (documented as foreground process names and already set by the shipped manifests) rather than a new `[match]` table, so
 no engine version was needed; they are now validated. The node looks every 2 s at a watched or not-idle `shell` agent's foreground program
 and reads it with the matched kind's screen rules, so state and needs-you work for a hand-started agent; the mark ends with the program.
-Not built: the snapshot field and the window's "X in Shell" label (step 2's schema part, which waits for the maintainer's OK), the
-Windows lookup (step 3, measured on Windows first), the TUI line, and filling names from the ACP registry.
+Step 2's schema part (approved by the maintainer on 2026-11-26: "onay veriyorum"): the event `AgentRunsInside` (`Event.body` 90) and
+`AgentSnapshot.runs_inside` (46); the node records the mark's changes and says it again after every `AgentStarted` it restates; the hub keeps
+it for a running agent and clears it with the process (`docs/specs/protocol.md`, "What runs inside a plain terminal").
+Not built: the window's "X in Shell" label and the TUI line (step 4), the Windows lookup (step 3, measured on Windows first), and filling
+names from the ACP registry.
 
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the
 user-visible viewport". Touches the threat model (a program name is untrusted data).

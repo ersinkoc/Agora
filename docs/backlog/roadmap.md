@@ -127,7 +127,8 @@ fixes it.
 - [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3)
   - [x] Unix lookup and the node's mark: a program a manifest's `[process] names` lists, started by hand in a `shell` agent, is read
     with its kind's screen rules (state, needs you) until it ends
-  - [ ] the snapshot field and the "X in Shell" label in the windows (**schema**); the **win** lookup; the TUI line
+  - [x] the event and the snapshot field (`AgentRunsInside`, `AgentSnapshot.runs_inside`; schema approved 2026-11-26)
+  - [ ] the "X in Shell" label in the windows; the TUI line; the **win** lookup
 - [ ] **M3.5 The diff names every changed file** (ADR-0071, **schema**): `GitDiffResult.paths`, the review screen says what is not shown
 - [ ] **M3.6 A reply keeps its link across machines** (ADR-0074, **schema**): `MeshPost.message_id` / `reply_to`, the broker and hub checks
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap

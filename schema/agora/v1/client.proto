@@ -89,6 +89,9 @@ message AgentSnapshot {
   // ADR-0101: the actions of the "always" answers the agent holds (`AgentAlwaysAllowed`), newest last, at most 16; cleared when it
   // ends or starts again.
   repeated string always_allowed = 45;
+  // ADR-0094: `AgentRunsInside.kind` of a running `shell` agent; empty when nothing known runs inside. Cleared by its `AgentStarted`,
+  // `AgentExited` and `AgentInterrupted`, and when its node starts again.
+  string runs_inside = 46;
 }
 
 message TerminalSnapshot {
