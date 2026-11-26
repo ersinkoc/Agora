@@ -90,33 +90,48 @@ impl<H> Default for Streams<H> {
 }
 
 impl<H> Streams<H> {
-    /// Closes the streams of agents not in `want` and opens the missing ones. `open` may fail (`None`): it is asked again at the next
-    /// sync, so the caller decides how often to try.
-    pub fn sync<'a>(
-        &mut self,
-        want: impl IntoIterator<Item = &'a str>,
-        mut open: impl FnMut(&str) -> Option<H>,
-        mut close: impl FnMut(H),
-    ) {
-        let want: Vec<&str> = want.into_iter().collect();
+    /// Takes out the streams of agents not in `want`, for the caller to close.
+    pub fn unwanted(&mut self, want: &[&str]) -> Vec<H> {
         let gone: Vec<String> = self
             .open
             .keys()
             .filter(|a| !want.contains(&a.as_str()))
             .cloned()
             .collect();
-        for a in gone {
-            if let Some(h) = self.open.remove(&a) {
-                close(h);
-            }
-        }
+        gone.into_iter()
+            .filter_map(|a| self.open.remove(&a))
+            .collect()
+    }
+
+    /// Opens the streams of agents in `want` that have none. `open` may fail (`None`): it is asked again at the next call, so the
+    /// caller decides how often to try.
+    pub fn open_missing(&mut self, want: &[&str], mut open: impl FnMut(&str) -> Option<H>) {
         for a in want {
-            if !self.open.contains_key(a) {
+            if !self.open.contains_key(*a) {
                 if let Some(h) = open(a) {
-                    self.open.insert(a.to_string(), h);
+                    self.open.insert((*a).to_string(), h);
                 }
             }
         }
+    }
+
+    /// Closes the streams of agents not in `want` and opens the missing ones.
+    pub fn sync<'a>(
+        &mut self,
+        want: impl IntoIterator<Item = &'a str>,
+        open: impl FnMut(&str) -> Option<H>,
+        mut close: impl FnMut(H),
+    ) {
+        let want: Vec<&str> = want.into_iter().collect();
+        for h in self.unwanted(&want) {
+            close(h);
+        }
+        self.open_missing(&want, open);
+    }
+
+    /// Every open stream, by agent.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &H)> {
+        self.open.iter().map(|(a, h)| (a.as_str(), h))
     }
 
     pub fn get(&self, agent: &str) -> Option<&H> {

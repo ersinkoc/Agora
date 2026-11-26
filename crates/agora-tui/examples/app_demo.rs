@@ -112,6 +112,7 @@ fn run(
                         conversation: None,
                         dialog: None,
                         note: None,
+                        tiles: &[],
                         colors,
                         t: &text,
                     },
@@ -192,7 +193,10 @@ fn run(
                     Action::Scroll(_)
                     | Action::Command(_)
                     | Action::Copy(_)
-                    | Action::CleanUpOld => {}
+                    | Action::CleanUpOld
+                    | Action::SaveLayout(_)
+                    | Action::UseLayout(_)
+                    | Action::DeleteLayout(_) => {}
                 }
             }
         }

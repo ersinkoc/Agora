@@ -335,6 +335,56 @@ fn cut(s: &str, width: usize) -> String {
     out
 }
 
+/// The names in a pane's bar, as drawn: each tab (or the pane alone) with the text it takes, cut to the bar's width.
+pub fn bar_items(placed: &Placed, panes: &[&Pane], tiles: &Tiles<'_>) -> Vec<(String, String)> {
+    let find = |id: &str| panes.iter().copied().find(|p| p.id == id);
+    let names: Vec<&Pane> = match &placed.tabs {
+        Some(ids) => ids.iter().filter_map(|id| find(id)).collect(),
+        None => find(&placed.id).into_iter().collect(),
+    };
+    let width = usize::from(placed.bar.width);
+    let mut used = 0usize;
+    let mut out = Vec::new();
+    for (i, p) in names.iter().enumerate() {
+        let room = width.saturating_sub(used);
+        if room == 0 {
+            break;
+        }
+        let mark = if needs_you(p, tiles) { "! " } else { "" };
+        let number = if placed.tabs.is_some() {
+            format!("{}:", i + 1)
+        } else {
+            String::new()
+        };
+        let lead = if i == 0 { " " } else { "" };
+        let text = cut(
+            &format!("{lead}{mark}{number}{} ", pane_title(p, tiles)),
+            room,
+        );
+        used += text.chars().count();
+        out.push((p.id.clone(), text));
+    }
+    out
+}
+
+/// The pane whose tab (or own name) is at column `col` of a bar.
+pub fn bar_item_at(
+    placed: &Placed,
+    panes: &[&Pane],
+    tiles: &Tiles<'_>,
+    col: u16,
+) -> Option<String> {
+    let mut x = placed.bar.x;
+    for (id, text) in bar_items(placed, panes, tiles) {
+        let w = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+        if col >= x && col < x.saturating_add(w) {
+            return Some(id);
+        }
+        x = x.saturating_add(w);
+    }
+    None
+}
+
 /// Draws the bars and the bodies that are not the focused agent's live view (the app draws that one, with its selection, scroll and
 /// cursor), and the lines between panes.
 pub fn draw(
@@ -372,29 +422,10 @@ pub fn draw(
         let width = usize::from(placed.bar.width);
         let mut spans: Vec<Span<'_>> = Vec::new();
         let mut used = 0usize;
-        let names: Vec<&Pane> = match &placed.tabs {
-            Some(ids) => ids.iter().filter_map(|id| find(id)).collect(),
-            None => vec![pane],
-        };
-        for (i, p) in names.iter().enumerate() {
+        for (id, text) in bar_items(placed, panes, tiles) {
+            let Some(p) = find(&id) else { continue };
             let front = p.id == placed.id;
             let waits = needs_you(p, tiles);
-            let mark = if waits { "! " } else { "" };
-            let text = format!(
-                "{}{mark}{}{}",
-                if i == 0 { " " } else { "" },
-                if placed.tabs.is_some() {
-                    format!("{}:", i + 1)
-                } else {
-                    String::new()
-                },
-                pane_title(p, tiles)
-            );
-            let room = width.saturating_sub(used);
-            if room == 0 {
-                break;
-            }
-            let text = cut(&format!("{text} "), room);
             used += text.chars().count();
             let style = if waits && !(front && focused && tiles.keyboard) {
                 st.attention
