@@ -165,6 +165,32 @@ is_error}`. `shared = false` means the project is not on two online nodes and it
 broker, so a project that lives on one machine never needs the hub. The board's agents are the project's running agents in the
 hub's view; one that ended gives its tasks and leases back, and a lease also ends at its TTL if its node vanishes.
 
+**Lease renewal (ADR-0039).** On a shared project the holder's node renews each lease the board granted its agent while the agent
+runs, so the lease lasts until the agent releases it or ends; its `ttl_s` bounds only how long it outlives a node that went away.
+The node sends the renewal as the agent's own `lease_acquire` on the same paths with the same `ttl_s` (no new message), when half
+the TTL has passed since the call that last granted it was sent (by the node's monotonic clock, which also counts time the machine slept, so never later than the hub's end).
+Only a TTL of 30 s or more is renewed, so a lease is renewed at most once every 15 s; a shorter one ends as asked. An agent has at
+most 256 paths and 64 grants renewed over all its leases; a lease beyond that is granted as usual and ends at its TTL. Each renewal
+is one stored board change and one `LeaseGranted` per path. A renewal the hub cannot answer (the node is offline, the call timed
+out, `board.unavailable`, `internal`) is tried again every second until the lease's end as the node reckons it; after that the
+lease is gone, and a node that reconnects later does not take it back. A renewal the board refuses (`lease.held`, `agent.not_found`
+when the hub no longer counts the agent as running and gave its leases back, or the project is no longer shared) ends it at once.
+Renewal stops when the agent releases the lease, when the node takes the agent off the mesh (it finished, was stopped, or the node
+gave up restarting it; an agent the supervisor is restarting keeps its endpoint and its renewals, and the hub's answer decides), and
+when `mesh.remote` is switched off. Each renewal gives the paths a new board lease id; the agent keeps the id it was given, and the
+node puts the current one into its `lease_release` (either id releases it). A release the hub did not decide (no answer,
+`board.unavailable`) is not renewed again but keeps the id, so the agent's next try reaches the board's lease. The agent's own
+lease calls and the node's renewals of its leases reach the board one at a time: while an agent's call waits (up to 10 s) for a
+renewal on its way, no other renewal of that agent starts. A path the agent takes again under a newer grant leaves the older one, as
+on the board. The table is kept beside the ledger (`<data>/sessions/lease-renewals.json`, owner-only, replaced whole by a rename,
+written by its own thread whenever it changed): an agent the next run of the node takes up again from the holder gets its leases
+back and they keep being renewed (the table is written as it stands when the node stops, before its agents leave the mesh; rows of
+agents that were not taken up are dropped once the take-up is over, so an agent resumed later starts without them) (each row's grant time is stored on the wall clock and read back as an age; a row dated after the
+current time, or whose end passed, is dropped; a file that is not a renewals file is set aside, renamed). A lease the node's own
+broker granted is not renewed (ADR-0039 leaves local-only projects untouched), but when the project becomes shared and the node
+hands it over in `BoardJoin`, the node renews it on the board at once (to learn the board's id) and from then on, and the agent's
+local id still releases it.
+
 A `handoff` that names a task goes only to an agent of the task's own project (an agent of another project could neither see nor finish the task): to any other it fails with `mesh.recipient_unknown` and nothing moves; a `handoff` without a task is a message and may cross projects. A `handoff` to `<node>/<agent>` moves the task and sends the receiver a message from the giver in one step; if the receiving node
 
 Dispatch (ADR-0095 step 2): the broker can claim an open task of a project for a chosen agent of that project and build the one prompt that gives it the task (`Mesh::dispatch`, `agora_mesh::dispatch::build_prompt`). An agent of another project is `mesh.recipient_unknown`, a blocked or not open task is `task.blocked` / `task.not_open`, and nothing moves on a refusal. The prompt is the node's own template around the task's title and detail in a fenced block marked untrusted task data (a fence longer than any backtick run in the text, control, hidden and bidirectional characters removed, the title on one line, the whole prompt within the message size limit: the budget counts the fence twice, a run of more than eight backticks in the text loses its extra backticks so the fence stays at most eleven long, and a detail that had to be cut ends with a `[cut: N more bytes]` line inside the fence). Dispatch does not refuse an agent that already holds a claimed task: `task_claim` has no one-task limit, no existing error code means "busy", and the prompt queues behind the agent's running turn as any prompt does; a limit would need a new error code and is left to the maintainer. It is not an approval and changes no permission. Reached by `TaskDispatch` (capability `task.dispatch`; `docs/specs/protocol.md`, "Giving a task to an agent"): the node runs it on its broker, or for a shared project through the hub's board as the agent (`task_list` with `task_id`, then `task_claim`; the board has no release, so a shared task whose prompt was not sent stays claimed), and records `TaskDispatched`.

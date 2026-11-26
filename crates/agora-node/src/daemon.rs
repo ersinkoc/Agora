@@ -1899,6 +1899,10 @@ impl Node {
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             eprintln!("mesh: durable handoffs unavailable: {e}");
         }
+        // ADR-0039: before agents are taken up, so each gets back the shared-board leases the last run renewed for it.
+        if let Err(e) = mesh.open_lease_renewals(&cfg.data_dir) {
+            eprintln!("mesh: lease renewals are not kept across a restart: {e}");
+        }
         // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
         // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
         mesh.reserve_ids(&cfg.data_dir);
@@ -2013,6 +2017,8 @@ impl Node {
             let keep: Vec<&str> = taken_up.iter().map(|(id, _)| id.as_str()).collect();
             ledger.forget_kept_except(&keep);
         }
+        // ADR-0039: every agent the holder kept has joined the mesh again and got its renewed leases back; the rest are not taken up.
+        mesh.forget_unadopted_lease_renewals();
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
@@ -2955,6 +2961,8 @@ impl Drop for Node {
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
+        // ADR-0039: the lease renewals as they are now, before agents leave the mesh below (the holder keeps them running).
+        self.mesh.freeze_lease_renewals();
         let began = Instant::now();
         // Shutdown safety: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: the usage, the ledger and
         // the event log are written first, and again below with what the drain adds. The conversation keeps its one last batch after
