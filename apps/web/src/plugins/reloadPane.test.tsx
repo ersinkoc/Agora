@@ -5,7 +5,7 @@
 // the plugin is watched.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage, t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { AnswerGuard } from '../components/useAnswerGuard';
@@ -115,16 +115,18 @@ describe('reload on save in the window', () => {
     expect(document.querySelector('[data-plugin-reload-unsupported]')).toBeNull();
     const load = [...document.querySelectorAll('button')].find((b) => b.textContent === t('plugin-load')) as HTMLButtonElement;
     await act(async () => { load.click(); });
+    // The picker, the read and the package check take several turns; under a loaded test run they can outlast one `act`.
+    await vi.waitFor(() => expect(document.querySelector('[data-plugin-save]')).not.toBeNull());
     expect(asked).toBe('Agora plugin package');
     await act(async () => { (document.querySelector('[data-plugin-save]') as HTMLButtonElement).click(); });
-    expect(document.querySelector('[data-plugin-reload="demo"]')?.textContent).toBe('Starts again when its file changes.');
+    await vi.waitFor(() => expect(document.querySelector('[data-plugin-reload="demo"]')?.textContent).toBe('Starts again when its file changes.'));
     expect(devReload.state().watching).toEqual(['demo']);
     bytes = pkg('1.0.1');
     at = 6;
     await act(async () => { await devReload.tick(); });
     expect(pluginStore.state().plugins[0]?.plugin.manifest.version).toBe('1.0.0');
     await act(async () => { await devReload.tick(); });
-    expect(pluginStore.state().plugins[0]?.plugin.manifest.version).toBe('1.0.1');
+    await vi.waitFor(() => expect(pluginStore.state().plugins[0]?.plugin.manifest.version).toBe('1.0.1'));
     expect(document.querySelector('[data-plugin-reload="demo"]')).not.toBeNull();
   });
 
