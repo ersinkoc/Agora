@@ -192,6 +192,14 @@ pub enum SupervisorEvent {
     Stopped {
         agent: AgentId,
     },
+    /// P2-16 (ADR-0090): the node stopped an adapter agent because the mode or a config option it reported in use makes it act without
+    /// asking and the node's `skip_permissions` policy refuses that ([`skip_in_use_refused`]). `policy` is the refusing policy
+    /// (`forbid`, `confined_only`), `setting` what skipped (`mode` or `config`). A [`Self::Stopped`] follows.
+    SkipRefused {
+        agent: AgentId,
+        policy: &'static str,
+        setting: &'static str,
+    },
     /// `native` is true when the agent's own session was resumed, false for the layout-only fallback
     /// (a fresh process in the same worktree).
     Resumed {
@@ -730,11 +738,20 @@ pub struct AgentView {
 /// without asking now: the launch option, the current mode when it skips, or a config option in use that skips (a boolean that is on,
 /// or a select whose current choice skips).
 pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigOption]) -> bool {
-    let mode = options
+    launch_skips || mode_skips(options) || config_skips(config)
+}
+
+/// The current mode is one that makes the agent act without asking.
+fn mode_skips(options: &SessionOptions) -> bool {
+    options
         .modes
         .iter()
-        .any(|m| m.id == options.current_mode && m.skips_permissions);
-    let config = config.iter().any(|o| {
+        .any(|m| m.id == options.current_mode && m.skips_permissions)
+}
+
+/// A config option in use makes the agent act without asking: a boolean that is on, or a select whose current choice skips.
+fn config_skips(config: &[ConfigOption]) -> bool {
+    config.iter().any(|o| {
         if o.boolean {
             o.skips_permissions && o.current == "true"
         } else {
@@ -742,8 +759,28 @@ pub fn skips_now(launch_skips: bool, options: &SessionOptions, config: &[ConfigO
                 .iter()
                 .any(|c| c.id == o.current && c.skips_permissions)
         }
-    });
-    launch_skips || mode || config
+    })
+}
+
+/// P2-16 (ADR-0090): whether the node's `skip_permissions` policy refuses an adapter agent for what it reported in use: its current
+/// mode, or a config option in use, that makes it act without asking (judged as a switch the user asks for is, [`policy_refusal`] by
+/// how its process was launched). `Some((policy, setting))` with the refusing policy and `mode` or `config`; `None` when the policy
+/// allows it or nothing in use skips. A launch option is not judged here: a start is decided before any process exists
+/// (`launch_choice`).
+pub fn skip_in_use_refused(
+    policy: SkipPermissions,
+    confinement: Confinement,
+    options: &SessionOptions,
+    config: &[ConfigOption],
+) -> Option<(&'static str, &'static str)> {
+    let refusal = policy_refusal(policy, confinement)?;
+    if mode_skips(options) {
+        Some((refusal, "mode"))
+    } else if config_skips(config) {
+        Some((refusal, "config"))
+    } else {
+        None
+    }
 }
 
 /// ADR-0057: whether `program` is a shell, a wrapper or an interpreter, which runs whatever it is given. Compared by its file name,
@@ -2712,6 +2749,9 @@ impl Supervisor {
                 begin_send(e, &id, next, &sent, events);
             }
         }
+        // P2-16: the agents stopped because what they have in use skips permissions under a policy that refuses it.
+        let skip_policy = self.skip_permissions;
+        let mut ended = Vec::new();
         for (id, e) in &mut self.adapters {
             if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
                 continue;
@@ -2769,6 +2809,9 @@ impl Supervisor {
             };
             // ADR-0093: the holder kept only the newest of what the adapter wrote while no node read it: the person is told.
             let lost = e.adapter.as_ref().map_or(0, Adapter::take_dropped);
+            // P2-16: a report of a mode or config option in use that skips permissions under a policy that refuses it is not kept or
+            // passed on: the agent is stopped below, and nothing after that report is read.
+            let mut refused = None;
             for ev in polled {
                 match ev {
                     AdapterEvent::State { state, .. } => {
@@ -2789,6 +2832,17 @@ impl Supervisor {
                     }
                     AdapterEvent::Options { options, .. } => {
                         let options = bounded_options(options);
+                        if !letting_go {
+                            refused = skip_in_use_refused(
+                                skip_policy,
+                                e.confinement,
+                                &options,
+                                &e.rich.config,
+                            );
+                            if refused.is_some() {
+                                break;
+                            }
+                        }
                         if options != e.options {
                             e.options = options.clone();
                             events.push(SupervisorEvent::Adapter {
@@ -2802,6 +2856,17 @@ impl Supervisor {
                     }
                     AdapterEvent::Config { options, .. } => {
                         let options = bounded_config(options);
+                        if !letting_go {
+                            refused = skip_in_use_refused(
+                                skip_policy,
+                                e.confinement,
+                                &e.options,
+                                &options,
+                            );
+                            if refused.is_some() {
+                                break;
+                            }
+                        }
                         if options != e.rich.config {
                             e.rich.config = options.clone();
                             events.push(SupervisorEvent::Adapter {
@@ -2905,6 +2970,19 @@ impl Supervisor {
                     bytes: lost,
                 });
             }
+            // P2-16: what it has in use is judged too, not only a new report: an agent taken up from the holder comes back with what
+            // the last node recorded (`adopt_held_pipe`), which no report repeats.
+            if refused.is_none() && !letting_go && e.running {
+                refused =
+                    skip_in_use_refused(skip_policy, e.confinement, &e.options, &e.rich.config);
+            }
+            if let Some((policy, setting)) = refused.filter(|_| e.running) {
+                refuse_skipping(id, e, policy, setting, events);
+                ended.push(id.clone());
+            }
+        }
+        for id in ended {
+            self.notify_run(&id, "", None);
         }
     }
 
@@ -4939,6 +5017,61 @@ fn bounded_options(o: SessionOptions) -> SessionOptions {
     }
 }
 
+/// P2-16 (ADR-0090): stops an adapter agent whose mode or config option in use skips permissions under a policy that refuses it, as
+/// [`Supervisor::stop`] does (no restart, `done`, its waiting prompts dropped), and says why ([`SupervisorEvent::SkipRefused`], then
+/// [`SupervisorEvent::Stopped`]). It takes no more prompts from here on (`running` is false). Its process is ended on a thread of its
+/// own (`stop_session`, then `shutdown`, up to six seconds): this runs in the tick, under the supervisor's lock. The launch's Git file
+/// goes with the process, once it is ended (#933). What it reported is forgotten, so it is not shown acting freely after its end.
+fn refuse_skipping(
+    id: &AgentId,
+    e: &mut AdapterEntry,
+    policy: &'static str,
+    setting: &'static str,
+    events: &mut Vec<SupervisorEvent>,
+) {
+    // Operational log, not UI text.
+    eprintln!(
+        "agent.skip_refused: agent={} policy={policy} setting={setting}",
+        id.as_str()
+    );
+    e.restart_at = None;
+    e.running = false;
+    let adapter = e.adapter.take();
+    let git_config = e.git_config.take();
+    let session = e.session_id.clone();
+    if let Some(adapter) = adapter {
+        // A thread that cannot be made drops what it was given: the adapter's drop ends its process here instead.
+        let _ = std::thread::Builder::new()
+            .name("agora-skip-refused".into())
+            .spawn(move || {
+                let _ = adapter.stop_session(&session, "stop", Duration::from_secs(5));
+                adapter.shutdown(Duration::from_secs(1));
+                drop(git_config);
+            });
+    }
+    e.options = SessionOptions::default();
+    let dropped = e.rich.forget();
+    apply_state(
+        &mut e.agent,
+        &mut e.state_reported,
+        AgentState::Done,
+        Origin::Node,
+        events,
+    );
+    if !dropped.is_empty() {
+        events.push(SupervisorEvent::PromptsDropped {
+            agent: id.clone(),
+            tags: dropped,
+        });
+    }
+    events.push(SupervisorEvent::SkipRefused {
+        agent: id.clone(),
+        policy,
+        setting,
+    });
+    events.push(SupervisorEvent::Stopped { agent: id.clone() });
+}
+
 /// ADR-0090: a queued prompt becomes the turn. The send itself is made on a thread of its own, so a hung adapter cannot stall the tick
 /// (which holds the supervisor's lock); its outcome comes back through `sent`, with the turn's generation, and the next poll reports
 /// it (once) and, when it failed, goes on with the next prompt.
@@ -5996,6 +6129,89 @@ mod adapter_option_tests {
         // A mode no longer offered (the id does not match one of the list) does not count.
         options.current_mode = String::new();
         assert!(!skips_now(false, &options, &[]));
+    }
+
+    /// P2-16: what an adapter agent has in use is judged against the `skip_permissions` policy as a switch is: `forbid` refuses a
+    /// mode or a config option in use that skips (a boolean on, a select's choice), `confined_only` unless the launch was recorded
+    /// as confined (an unknown one is refused), `allow` never; nothing in use that skips is never refused, nor an option offered and
+    /// not in use. The judge takes the bounded report, so the node's own rule (`perm`) counts as well as the adapter's word.
+    #[test]
+    fn what_an_agent_has_in_use_is_refused_as_a_switch_to_it_would_be() {
+        use Confinement::{Confined, Unconfined, Unknown};
+        use SkipPermissions::{Allow, ConfinedOnly, Forbid};
+        let opt = |id: &str, skips: bool| SessionOption {
+            id: id.into(),
+            name: id.into(),
+            skips_permissions: skips,
+            ..SessionOption::default()
+        };
+        let modes = |current: &str| SessionOptions {
+            modes: vec![opt("default", false), opt("bypassPermissions", true)],
+            current_mode: current.into(),
+            ..SessionOptions::default()
+        };
+        let boolean = |current: &str| ConfigOption {
+            id: "auto_approve".into(),
+            boolean: true,
+            current: current.into(),
+            skips_permissions: true,
+            ..ConfigOption::default()
+        };
+        let asks = modes("default");
+        let skips = modes("bypassPermissions");
+        for c in [Confined, Unconfined, Unknown] {
+            assert_eq!(
+                skip_in_use_refused(Forbid, c, &skips, &[]),
+                Some(("forbid", "mode"))
+            );
+            assert_eq!(skip_in_use_refused(Allow, c, &skips, &[]), None);
+            assert_eq!(skip_in_use_refused(Forbid, c, &asks, &[]), None);
+        }
+        assert_eq!(
+            skip_in_use_refused(ConfinedOnly, Confined, &skips, &[]),
+            None
+        );
+        for c in [Unconfined, Unknown] {
+            assert_eq!(
+                skip_in_use_refused(ConfinedOnly, c, &skips, &[]),
+                Some(("confined_only", "mode"))
+            );
+        }
+        // A config option in use: a boolean that is on, a select whose choice skips (flagged by the node's rule, not the adapter's).
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &[boolean("true")]),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &[boolean("false")]),
+            None
+        );
+        let select = |current: &str| {
+            bounded_config(vec![config("approvals", "mode", current, &["ask", "yolo"])])
+        };
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &select("yolo")),
+            Some(("forbid", "config"))
+        );
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &asks, &select("ask")),
+            None
+        );
+        // A mode the adapter did not flag, read by the node's own rule once bounded as a report is.
+        let reported = bounded_options(SessionOptions {
+            modes: vec![opt("default", false), opt("yolo", false)],
+            current_mode: "yolo".into(),
+            ..SessionOptions::default()
+        });
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &reported, &[]),
+            Some(("forbid", "mode"))
+        );
+        // The mode comes first when both skip.
+        assert_eq!(
+            skip_in_use_refused(Forbid, Unknown, &skips, &[boolean("true")]),
+            Some(("forbid", "mode"))
+        );
     }
 
     #[test]

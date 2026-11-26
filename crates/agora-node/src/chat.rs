@@ -110,7 +110,12 @@ pub const NODE_NOTICES: &[&str] = &[
     "approval.always_only_forbidden",
     // ADR-0089: the agent's history could not be written to the node's disk.
     crate::transcript::NOT_SAVED,
+    // P2-16: the node stopped an agent whose mode or config option in use skips permissions under a policy that refuses it.
+    SKIP_REFUSED,
 ];
+/// P2-16 (ADR-0090): the notice of an agent the node stopped because its mode or a config option in use makes it act without asking
+/// and the node's `skip_permissions` policy refuses that (params `policy`, `setting`).
+pub const SKIP_REFUSED: &str = "agent.skip_permissions_refused";
 /// ADR-0058: a notice's code is at most this long and has this many parameters at most, each key at most `MAX_PARAM_KEY` bytes and
 /// each value at most `MAX_PARAM_BYTES` (more is cut). An adapter is untrusted; a notice that does not fit the shape is dropped.
 pub const MAX_CODE: usize = 64;
@@ -2355,6 +2360,21 @@ impl ChatBoard {
         let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
         n.code = "adapter.output_dropped".into();
         n.params = HashMap::from([("bytes".to_string(), bytes.to_string())]);
+        t.add(n, now_ms);
+    }
+
+    /// P2-16 (ADR-0090): the node stopped this agent because its mode (`setting` `mode`) or a config option (`config`) in use makes it
+    /// act without asking and the node's policy (`forbid`, `confined_only`) refuses that. The node's own words: fixed values only,
+    /// never the agent's names for its modes.
+    pub fn skip_refused(&self, agent: &AgentId, policy: &str, setting: &str, now_ms: u64) {
+        let mut g = self.lock();
+        let t = slot(&mut g, agent, self.wake.as_ref());
+        let mut n = entry(ChatRole::Agent, ChatKind::Notice, String::new(), now_ms);
+        n.code = SKIP_REFUSED.into();
+        n.params = HashMap::from([
+            ("policy".to_string(), policy.to_string()),
+            ("setting".to_string(), setting.to_string()),
+        ]);
         t.add(n, now_ms);
     }
 

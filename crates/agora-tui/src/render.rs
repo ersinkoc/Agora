@@ -633,6 +633,8 @@ pub fn notice_text(e: &ChatEntry, t: Text<'_>) -> String {
         },
         // ADR-0089: the node could not write this conversation to its disk.
         "chat.history_not_saved" => t(key!("tui-notice-history_not_saved"), &[]),
+        // P2-16: the node stopped the agent: what it had in use skips permissions, which the machine's policy refuses.
+        "agent.skip_permissions_refused" => t(key!("tui-notice-skip_permissions_refused"), &[]),
         other => t(
             key!("tui-notice-other"),
             &[("code", Arg::Str(plain(other)))],

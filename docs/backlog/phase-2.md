@@ -26,6 +26,7 @@ parallel; most others touch different crates.
 | P2-13 resource limits | done | cgroups v2 and Job Objects not yet |
 | P2-14 local CLI | done | `agent list` came with ADR-0025 (accepted); `agent kinds`, `agent start|stop|prompt` and `terminal attach` are there too |
 | P2-15 footprint | done | all budgets met, see `design/performance.md`; nothing relaxed |
+| P2-16 adapter starting in a skipping mode | done for `forbid` and `confined_only` | stopped with a notice; under `allow` such an agent still runs unasked (open, see below) |
 
 Exit criterion: a node runs agents in worktrees and reports state, controllable via the local CLI
 (`agora node run`, `agent start|stop`, `terminal attach`; covered end to end by `crates/agora/tests/cli.rs`), and
@@ -153,3 +154,16 @@ cross-review by Codex of all Phase 2 PRs (AGENTS.md).
   change the user asks for is checked: an adapter that starts in a bypass mode (its own default, or a saved setting) is not refused.
 - **Done when:** under `forbid` such an agent is stopped or switched to a safe mode with a notice, and a test with the fake ACP agent
   starting in a bypass mode proves it.
+- **Status: done for a refusing policy.** On every tick the node judges each report of the mode or the config options, and what an
+  agent taken up from the holder has in use (`adopt_held_pipe` puts back what the last node recorded), with the rule a switch is judged
+  by (`skip_in_use_refused` in `supervisor.rs`: `policy_refusal`, so `confined_only` refuses an agent whose launch was not recorded as
+  confined, and the node's own `perm` flag counts). A refused report is neither kept nor passed on; the agent is **stopped** (no safe
+  mode is chosen for it: the node cannot know which of an agent's modes asks, and a stop needs no trust in the adapter): no restart, no
+  prompt taken from that tick, its process ended off the supervisor's lock, it leaves the mesh, what its adapter asked is withdrawn, and
+  its conversation gets the node's notice `agent.skip_permissions_refused` (`policy`, `setting` `mode` or `config`). This also stops an
+  agent that switches itself into such a mode later, not only at start. Tests: `crates/agora/tests/acp.rs`
+  (`an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy`, the fake ACP agent with `--start-bypass`),
+  `crates/agora-node/tests/skip_approval.rs` (mode, config option, `confined_only`, a switch the agent makes itself, `allow`), and the
+  unit test of the judge. **Open:** under `allow` such an agent runs without anyone being asked (shown "Acts freely"); whether the
+  owner should be asked then (ADR-0090 Amendment A covers only a switch asked for from a window, and says an agent cannot request one
+  for itself) is a decision for the maintainer.

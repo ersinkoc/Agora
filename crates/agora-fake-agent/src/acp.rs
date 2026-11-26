@@ -38,7 +38,8 @@
 //! - `auto`: switches itself to the `plan` mode (`current_mode_update`), says `switched` and finishes.
 //!
 //! `session/new` answers with a model list and a mode list (`build`, `plan`) like real ACP agents; with
-//! `AGORA_FAKE_ACP_BYPASS_MODE=1` (or the flag `--bypass-mode`, for a node that clears the environment) the list also has `bypassPermissions`. `session/set_mode` and `session/set_model` take an id from
+//! `AGORA_FAKE_ACP_BYPASS_MODE=1` (or the flag `--bypass-mode`, for a node that clears the environment) the list also has `bypassPermissions`;
+//! with `--start-bypass` it has it and it is the mode in use from the start (P2-16). `session/set_mode` and `session/set_model` take an id from
 //! those lists and refuse anything else (and `fake/model-2` with `AGORA_FAKE_ACP_REFUSE_MODEL=1`); with
 //! `AGORA_FAKE_ACP_REFUSE_SESSION=1` `session/new` itself is refused; with `AGORA_FAKE_ACP_NO_STDIO_MCP=1` `initialize` says
 //! `mcpCapabilities.stdio: false`; with `AGORA_FAKE_ACP_NO_CURRENT=1` the agent does not say which mode and model it runs with. [`fail_at_start`] is an agent
@@ -286,14 +287,19 @@ pub fn run<R: BufRead, W: Write>(input: R, out: &mut W) -> io::Result<()> {
                     json!({"id": "build", "name": "Build"}),
                     json!({"id": "plan", "name": "Plan", "description": "No edits"}),
                 ];
+                // `--start-bypass`: the agent starts in `bypassPermissions` (its own default or a saved setting, P2-16).
+                let start_bypass = std::env::args().any(|a| a == "--start-bypass");
                 if std::env::var_os("AGORA_FAKE_ACP_BYPASS_MODE").is_some()
                     || std::env::args().any(|a| a == "--bypass-mode")
+                    || start_bypass
                 {
                     modes.push(json!({"id": "bypassPermissions", "name": "Bypass Permissions"}));
                 }
                 // An agent that does not say which mode or model it runs with: `AGORA_FAKE_ACP_NO_CURRENT=1` leaves both ids out.
                 let (model, mode) = if std::env::var_os("AGORA_FAKE_ACP_NO_CURRENT").is_some() {
                     (json!(""), json!(""))
+                } else if start_bypass {
+                    (json!("fake/model-1"), json!("bypassPermissions"))
                 } else {
                     (json!("fake/model-1"), json!("build"))
                 };

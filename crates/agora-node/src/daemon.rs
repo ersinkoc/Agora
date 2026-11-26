@@ -2525,6 +2525,26 @@ impl Node {
                                     }
                                     restart_notice(&chat, e, &views, now);
                                 }
+                                // P2-16: the node stopped an agent whose mode or config option in use skips permissions under a
+                                // policy that refuses it. As a stop asked for (`AgentStop`): it leaves the mesh and what its adapter
+                                // asked is withdrawn (the `Stopped` that follows does the rest); its conversation says why.
+                                SupervisorEvent::SkipRefused {
+                                    agent,
+                                    policy,
+                                    setting,
+                                } => {
+                                    mesh.unregister_because(agent, "stopped");
+                                    for approval in approvals.cancel_adapter_requests(agent) {
+                                        chat.set_permission(
+                                            agent,
+                                            &approval,
+                                            v1::PermissionOutcome::Cancelled,
+                                            now,
+                                        );
+                                        ev.approval_resolved(&approval, false, "");
+                                    }
+                                    chat.skip_refused(agent, policy, setting, now);
+                                }
                                 SupervisorEvent::Stopped { agent }
                                 | SupervisorEvent::AdapterCrashed { agent } => {
                                     chat.set_working(agent, false);

@@ -206,6 +206,8 @@ fn node_with_acp_before(
         ("acp-broken", ", \"--fail-at-start\""),
         ("acp-bypass", ", \"--bypass-mode\""),
         ("acp-config", ", \"--config-options\""),
+        // P2-16: an agent whose own session starts in a mode that skips permissions.
+        ("acp-startbypass", ", \"--start-bypass\""),
     ] {
         std::fs::write(
             home.join(format!("manifests/{kind}.toml")),
@@ -400,6 +402,102 @@ fn a_mode_that_skips_permissions_follows_the_nodes_policy() {
             let err = skipped.unwrap_err();
             assert_eq!(err.code, "agent.option_forbidden");
             assert!(set_mode("build").is_ok());
+        }
+        drop(node);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+/// P2-16: an ACP agent whose own session starts in a mode that skips permissions (its default or a saved setting) follows the node's
+/// `skip_permissions` policy as a switch to that mode does: under `forbid` the node stops it and its conversation says why, while an
+/// agent that starts in a mode that asks runs; under `allow` it runs (shown acting freely, `skip_approval.rs`).
+#[test]
+fn an_acp_agent_that_starts_in_a_mode_that_skips_follows_the_nodes_policy() {
+    for (policy, refused) in [
+        ("skip_permissions = forbid\n", true),
+        ("skip_permissions = allow\n", false),
+    ] {
+        let tag = if refused {
+            "start-forbid"
+        } else {
+            "start-allow"
+        };
+        let Some((home, node)) = node_with_acp_policy(tag, Some(policy)) else {
+            return;
+        };
+        let (code, started) = agora(&home, &["agent", "start", "acp-startbypass"]);
+        assert_eq!(code, 0, "{started}");
+        let id = started
+            .split_whitespace()
+            .find(|w| w.starts_with("agent-"))
+            .expect("an agent id")
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-')
+            .to_string();
+        let mut c = Client::connect(&home.join("node.sock")).unwrap();
+        if refused {
+            c.call_on(
+                3,
+                Cmd::ChatSubscribe(v1::ChatSubscribe {
+                    agent_id: id.clone(),
+                }),
+            )
+            .unwrap()
+            .expect("subscribed");
+            let end = Instant::now() + Duration::from_secs(30);
+            let notice = loop {
+                assert!(Instant::now() < end, "no notice arrived");
+                let Some(f) = c.read_frame(Some(Duration::from_millis(200))).unwrap() else {
+                    continue;
+                };
+                if f.stream_id != 3 {
+                    continue;
+                }
+                let entries = match f.kind {
+                    KIND_CHAT_SNAPSHOT => {
+                        v1::ChatSnapshot::decode(f.payload.as_slice())
+                            .unwrap()
+                            .entries
+                    }
+                    KIND_CHAT_ENTRY => {
+                        vec![v1::ChatEntry::decode(f.payload.as_slice()).unwrap()]
+                    }
+                    _ => continue,
+                };
+                if let Some(n) = entries
+                    .into_iter()
+                    .find(|e| e.code == "agent.skip_permissions_refused")
+                {
+                    break n;
+                }
+            };
+            assert_eq!(
+                notice.params.get("policy").map(String::as_str),
+                Some("forbid")
+            );
+            assert_eq!(
+                notice.params.get("setting").map(String::as_str),
+                Some("mode")
+            );
+            // Stopped: it takes no prompt.
+            let end = Instant::now() + Duration::from_secs(15);
+            loop {
+                let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
+                if code != 0 {
+                    break;
+                }
+                assert!(Instant::now() < end, "the agent still takes prompts: {out}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            // An agent that starts in a mode that asks runs under the same policy.
+            let normal = started_agent_of(&home, "acp-fake");
+            std::thread::sleep(Duration::from_millis(600));
+            let (code, out) = agora(&home, &["agent", "prompt", &normal, "hello"]);
+            assert_eq!(code, 0, "{out}");
+        } else {
+            wait_ready(&home, &id);
+            std::thread::sleep(Duration::from_millis(600));
+            let (code, out) = agora(&home, &["agent", "prompt", &id, "hello"]);
+            assert_eq!(code, 0, "{out}");
         }
         drop(node);
         let _ = std::fs::remove_dir_all(&home);

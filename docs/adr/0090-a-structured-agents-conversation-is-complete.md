@@ -198,7 +198,10 @@ Everything is additive (ADR-0006): new enum values, new fields and new messages 
   followers are bounded; adapters cannot forge the node's notices; a decision that cannot be delivered cancels its entry; a queued prompt
   is at most 64 KiB.
 - **Known gap (not fixed here, `docs/backlog/phase-2.md` P2-16):** the node never checks an adapter's CURRENT mode or config value
-  against the `skip_permissions` policy at start: an adapter that starts in a bypass mode is not refused.
+  against the `skip_permissions` policy at start: an adapter that starts in a bypass mode is not refused. **Built later (P2-16) for a
+  refusing policy:** under `forbid`, and `confined_only` for an agent not launched confined, an adapter agent whose reported mode or
+  config option in use skips permissions (at start, after a resume or restart, on take-up from the holder, or switched by the agent
+  itself) is stopped, and its conversation says why (`agent.skip_permissions_refused`). Under `allow` it still runs unasked: open.
 - Step 5 (hub): done: the hub keeps the last `AgentSessionConfig` and `AgentCommands` per agent (bounded, dropped with the agent) and sends them after a snapshot, since `AgentSnapshot` has no field for them. Steps 6 (web) and 7 (TUI): not done in that PR. Step 1 (real-agent
   fixtures) is still the maintainer's: nothing here was run against a real agent, and what real agents send (thinking, config options,
   `usage_update`) is unverified.
@@ -277,7 +280,9 @@ for a skipping mode; a stale card after the agent ended), the "Temporarily unava
   can raise no `agent.*` request (closes the `agent.start` forgery); per-agent limits (2 waiting, 3 per minute) beside the node's.
 - **Known dead end, documented:** `AgentSetModel` of a model the node judges as skipping stays `agent.option_unconfirmed` (no card exists for models; the
   amendment names modes and config options). **Known gap:** P2-16 (`docs/backlog/phase-2.md`): the node never checks an adapter's CURRENT mode or
-  config value at start or resume, so an agent whose own session comes back in a bypass mode is not asked.
+  config value at start or resume, so an agent whose own session comes back in a bypass mode is not asked. Since P2-16 such an agent is
+  stopped under a refusing policy (`forbid`, unconfined `confined_only`); under `allow` it is still not asked (open: an agent cannot
+  request this approval for itself, decision 4).
 - **Web** (built): `SkipApproval` draws the card for the new kind from the node's `detail` (the window writes its own words, shows the real `option` and
   `value` ids beside the agent's names, strict shape check, anything else says "update your window" and signs nothing); the decision is signed over
   `agora-approval-skip-v1` (`apps/web/src/net/skipApproval.ts`, vectors reproduced in `skipApproval.test.ts`). The SessionBar sends a skipping choice like any
