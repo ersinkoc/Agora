@@ -86,7 +86,12 @@ const LETTERS: [(&str, char, &str); 14] = [
 pub fn commands() -> Vec<CommandDef> {
     use Context::{Anywhere, List, Window};
     let mut all = vec![
-        def("palette.open", Anywhere, Act::Palette, &["ctrl+k", "alt+k"]),
+        def(
+            "palette.open",
+            Anywhere,
+            Act::Palette,
+            &["ctrl+k", "alt+k", "alt+shift+k"],
+        ),
         def("attention.next", List, Act::NextNeedsYou, &["shift+n"]),
     ];
     const TABS: [&str; 9] = [
@@ -156,7 +161,12 @@ pub fn commands() -> Vec<CommandDef> {
         ),
         def("layout.save-as", Window, Act::SaveLayoutAs, &[]),
         def("layout.reset", Window, Act::ResetLayout, &[]),
-        def("window.mouse", Anywhere, Act::Mouse, &["m", "alt+m"]),
+        def(
+            "window.mouse",
+            Anywhere,
+            Act::Mouse,
+            &["m", "alt+m", "alt+shift+m"],
+        ),
         def("window.details", Window, Act::Inspector, &["i"]),
         def("tab.close", List, Act::CloseTab, &["w"]),
         def("machines.clean-up", Window, Act::CleanUpOld, &[]),
@@ -219,20 +229,23 @@ pub const FIXED_COMMANDS: [&str; 1] = ["window.safe-mode"];
 /// said), never used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeptReason {
-    /// y, n, A and Alt+Y, Alt+N, Alt+A answer a request (T44: no key in a file may stand in for them).
+    /// y, n, A and Alt+Y, Alt+N, Alt+A (with Shift too) answer a request (T44: no key in a file may stand in for them).
     Answers,
     /// Ctrl+] and F12 leave an agent's tab; j and k, Home and End move in the list.
     Moving,
 }
 
 /// The keys the terminal client keeps (see [`KeptReason`]).
-pub const KEPT_KEYS: [(&str, KeptReason); 12] = [
+pub const KEPT_KEYS: [(&str, KeptReason); 15] = [
     ("y", KeptReason::Answers),
     ("n", KeptReason::Answers),
     ("shift+a", KeptReason::Answers),
     ("alt+y", KeptReason::Answers),
     ("alt+n", KeptReason::Answers),
     ("alt+a", KeptReason::Answers),
+    ("alt+shift+y", KeptReason::Answers),
+    ("alt+shift+n", KeptReason::Answers),
+    ("alt+shift+a", KeptReason::Answers),
     ("ctrl+]", KeptReason::Moving),
     ("f12", KeptReason::Moving),
     ("j", KeptReason::Moving),

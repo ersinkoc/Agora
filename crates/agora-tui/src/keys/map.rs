@@ -253,6 +253,9 @@ mod tests {
         assert_eq!(p(Key::Ctrl('k'), false, true), Press::Pass);
         assert_eq!(p(Key::Char('m'), false, true), Press::Pass);
         assert_eq!(p(Key::Alt('m'), false, true), Press::Run(Act::Mouse));
+        // With Shift (Caps Lock) too, as before.
+        assert_eq!(p(Key::Alt('K'), false, true), Press::Run(Act::Palette));
+        assert_eq!(p(Key::Alt('M'), false, true), Press::Run(Act::Mouse));
         assert_eq!(p(Key::Alt('3'), false, true), Press::Run(Act::Tab(2)));
         assert_eq!(
             p(Key::Char('4'), true, false),
@@ -291,7 +294,7 @@ mod tests {
                 {"command":"agent.start","keys":["ctrl+s"]},
                 {"command":"layout.maximize","keys":[]},
                 {"command":"go.settings","keys":["ctrl+,"]},
-                {"command":"attention.next","keys":["n","alt+shift+n"]}
+                {"command":"attention.next","keys":["n","ctrl+n"]}
             ]}"#,
         )
         .unwrap();
@@ -303,7 +306,7 @@ mod tests {
         assert_eq!(p(Key::Char('s')), Press::Taken);
         assert_eq!(p(Key::Char('z')), Press::Taken);
         assert_eq!(p(Key::Char('N')), Press::Taken);
-        assert_eq!(p(Key::Alt('N')), Press::Run(Act::NextNeedsYou));
+        assert_eq!(p(Key::Ctrl('n')), Press::Run(Act::NextNeedsYou));
         // `n` answers a request here: left out, and said.
         assert_eq!(p(Key::Char('n')), Press::Pass);
         assert_eq!(map.unknown, vec!["go.settings".to_string()]);

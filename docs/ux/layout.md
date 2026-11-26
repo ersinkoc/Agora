@@ -288,7 +288,8 @@ writes it back as the same JSON; the file the Rust writer makes was also read ba
   list) add: the presets, Maximize / Restore, Split right, Split down, Close pane, Next pane, Swap with the next pane, Move to the next
   pane as a tab, Take out of the tabs, Make this pane wider / narrower / taller / shorter (5 % of its split), Show here: Needs you,
   the fleet, what needs you next or the agent selected in the list, Save layout as…, Use layout “…”, Delete layout “…”, Reset layout.
-  The terminal client has no keybindings file yet: these keys are fixed.
+  These keys are commands with ids (`layout.preset-2x2`, `layout.maximize`, …) in the keybindings file's format
+  ([keybindings.md](keybindings.md#the-terminal-client)); the console does not read that file yet, so these defaults are in force.
 - **Saved layouts, import and export:** each saved layout is a file `layouts/<name>.json` in the client's Agora folder
   (`$AGORA_HOME`, else `~/.agora`, beside `themes/` and `tui-theme`), holding exactly what the web window's Export writes and its Import
   reads. So saving here is exporting (import that file in the web window), and a `layout.json` exported from the web, put in that

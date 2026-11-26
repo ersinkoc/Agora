@@ -239,8 +239,10 @@ pub fn load(path: &Path) -> Result<Option<KeyFile>, Vec<Issue>> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(vec![Issue::TooBig]);
     }
-    let text = String::from_utf8(bytes).map_err(|_| vec![Issue::Json])?;
-    read(&text).map(Some)
+    // As the web window reads a chosen file (`File.text()`): a byte-order mark is dropped and a byte that is not UTF-8 becomes U+FFFD
+    // (as the theme files, audit F1800), so a file saved by Windows PowerShell 5.1 or an older Notepad reads the same in both clients.
+    let text = String::from_utf8_lossy(&bytes);
+    read(text.strip_prefix('\u{feff}').unwrap_or(&text)).map(Some)
 }
 
 /// A problem in words.
@@ -452,6 +454,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(&ok).unwrap().unwrap().entries[0].keys, vec!["ctrl+q"]);
+        let mut bom = b"\xef\xbb\xbf".to_vec();
+        bom.extend_from_slice(br#"{"version":1,"bindings":[]}"#);
+        std::fs::write(&ok, bom).unwrap();
+        assert_eq!(load(&ok), Ok(Some(KeyFile::default())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

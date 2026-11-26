@@ -606,6 +606,7 @@ tui-layout-error-too-many = it has too many panes (at most 32).
 ## ADR-0090 step 7: a structured agent's conversation (thinking, tool status, plan steps, Stop turn, settings while it runs).
 tui-chat-hint-rich = Type a request and press Enter · /mode, /model, /effort or /set change how it runs · /stop ends the turn · /thinking shows the thinking · Ctrl-] goes back
 tui-chat-thought = thinking (hidden; /thinking shows it)
+tui-chat-thought-plain = thinking (hidden)
 tui-chat-thought-shown = thinking:
 tui-chat-queued = (waits until this turn ends)
 tui-chat-permission = asked for your permission

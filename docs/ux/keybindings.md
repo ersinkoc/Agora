@@ -205,11 +205,12 @@ does not read that file when it starts, so the defaults below are in force; the 
 tested, and `App::keys` takes them.
 
 - **Reading the file** follows "Reading a file" above exactly (the same limits, the same closed fields, the same refusals, the web's fixed
-  keys and fixed command), so a file is valid in one client exactly when it is valid in the other. It is read only when it is at most
+  keys and fixed command; a byte-order mark is dropped and a byte that is not UTF-8 is replaced, as the web reads a chosen file), so a file
+  is valid in one client exactly when it is valid in the other. It is read only when it is at most
   64 KiB (asked of the file system first). Each problem is a stable code, said from `locales/<lang>/tui.ftl` (`tui-keys-error-*`); any
   problem leaves the defaults in force.
 - **A command the terminal client does not have** (a web window's: `go.settings`, `side.place-1`, …) is kept and binds nothing here.
-- **Keys the terminal client keeps:** y, n, Shift+A, Alt+Y, Alt+N and Alt+A answer a request, and Ctrl+], F12, j, k, Home and End move
+- **Keys the terminal client keeps:** y, n, Shift+A, Alt+Y, Alt+N and Alt+A (and these three with Shift) answer a request, and Ctrl+], F12, j, k, Home and End move
   around the window. A file may bind them (the web window has other uses for them); here such a key is left out of the binding and said.
 - **What a terminal can report:** the terminal client hears characters, not key places. A letter with Shift is its capital (`shift+n` is
   N); Shift with a digit or a sign, Ctrl with Shift, and Meta (⌘) never arrive, so such a binding never acts here. `<` and `>` (the
@@ -223,13 +224,13 @@ The terminal client's commands, with their default keys (the keys it had before)
 
 | id | does | default keys | acts |
 | --- | --- | --- | --- |
-| `palette.open` | the commands (palette) | Ctrl+K, Alt+K | anywhere |
+| `palette.open` | the commands (palette) | Ctrl+K, Alt+K, Alt+Shift+K | anywhere |
 | `attention.next` | the next agent that needs you | Shift+N | the list |
 | `pane.tab-1` … `pane.tab-9` | tab 1 … 9 | Alt+1 … Alt+9 | anywhere |
 | `layout.preset-1x1`, `-2x1`, `-1x2`, `-2x2`, `-focus`, `-3x2` | the layout presets | 1, 2, 3, 4, 5, 6 | list, details |
 | `layout.maximize`, `layout.pane-previous`, `layout.pane-next` | maximize or restore; the pane before or after | z, h, l | list, details |
 | `layout.split-right`, `layout.split-down`, `layout.close-pane`, `layout.swap-next`, `layout.move-next`, `layout.take-out`, `layout.wider`, `layout.narrower`, `layout.taller`, `layout.shorter`, `layout.save-as`, `layout.reset` | the pane in focus; the layout | none | list, details |
-| `window.mouse`, `window.details` | take or release the mouse; show or hide the details | m and Alt+M; i | anywhere (Alt+M); list, details |
+| `window.mouse`, `window.details` | take or release the mouse; show or hide the details | m, Alt+M and Alt+Shift+M; i | anywhere (the Alt keys); list, details |
 | `tab.close` | close the tab or pane | w | the list |
 | `machines.clean-up`, `app.quit` | clean up old machines; quit | none; q | list, details |
 | `agent.start`, `agent.start-in-folder`, `agent.stop`, `agent.resume`, `agent.start-again`, `agent.review`, `agent.files`, `board.open`, `agent.remove`, `device.ask`, `devices.approve`, `typing.grant`, `machines.pair`, `theme.choose` | the console's letters for the selected agent | s, f, x, u, Shift+U, r, o, b, d, a, v, g, p, t | list, details |

@@ -119,7 +119,15 @@ fn rich_is_what_only_a_rich_node_sends() {
 #[test]
 fn thinking_is_hidden_until_asked() {
     let e = entry(1, ChatKind::Thought, "secret plan\n");
-    assert_eq!(body(&e, View::default(), &t).unwrap(), "tui-chat-thought");
+    assert_eq!(
+        body(&e, View::default(), &t).unwrap(),
+        "tui-chat-thought-plain"
+    );
+    let rich = View {
+        rich: true,
+        ..View::default()
+    };
+    assert_eq!(body(&e, rich, &t).unwrap(), "tui-chat-thought");
     let shown = View {
         thoughts: true,
         ..View::default()

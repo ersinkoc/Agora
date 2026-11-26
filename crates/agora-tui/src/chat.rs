@@ -115,8 +115,11 @@ pub fn body(e: &ChatEntry, view: View, t: Text<'_>) -> Option<String> {
                 t(key!("tui-chat-thought-shown"), &[]),
                 text.trim_end()
             )
-        } else {
+        } else if view.rich {
             t(key!("tui-chat-thought"), &[])
+        } else {
+            // A caller that keeps entries as first sent does not read `/thinking` either: no hint to a command it lacks.
+            t(key!("tui-chat-thought-plain"), &[])
         }),
         ChatKind::ToolCall if view.rich => {
             let line = match crate::tool::call(&e.text) {

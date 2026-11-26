@@ -569,6 +569,7 @@ tui-layout-error-too-many = çok fazla bölmesi var (en çok 32).
 ## ADR-0090 adım 7: yapılandırılmış bir ajanın konuşması (düşünme, araç durumu, plan adımları, Turu durdur, çalışırken ayarlar).
 tui-chat-hint-rich = Bir istek yazıp Enter'a basın · /mode, /model, /effort ya da /set nasıl çalıştığını değiştirir · /stop turu bitirir · /thinking düşünmeyi gösterir · Ctrl-] geri döner
 tui-chat-thought = düşünüyor (gizli; /thinking gösterir)
+tui-chat-thought-plain = düşünüyor (gizli)
 tui-chat-thought-shown = düşünme:
 tui-chat-queued = (bu tur bitince gönderilir)
 tui-chat-permission = izninizi istedi
