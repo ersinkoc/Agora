@@ -417,9 +417,12 @@
 @media (pointer: coarse) {
   .button, .terminal-jump, .ide-iconbtn, .ide-tab, .ide-row, .rail__btn, .menu-tile, .tile, button.ide-chip, a.ide-chip, .ide-bar > a, .ide-bar > button, input:not([type='checkbox'], [type='radio']), select { min-height: var(--tap); }
   footer.ide-bar { height: auto; }
-  /* A row whose label holds a radio or a checkbox: the whole label is the target (the box itself stays its size). */
-  .touch-row { min-height: var(--tap); }
+  /* A row whose label holds a radio or a checkbox, or a full-width row button: the whole row is the target (a box keeps its size). The
+     palette's rows too. */
+  .touch-row, .palette__row { min-height: var(--tap); }
   .ide-iconbtn, .menu-tile { min-width: var(--tap); }
+  /* A colour swatch beside its hex field (the theme editor) is as wide as it is tall. */
+  input[type='color'] { min-width: var(--tap); }
   /* The widget kit's controls; the switch keeps its look and grows an invisible target around it. */
   .kit-btn, .kit-row, .kit-seg__item, button.kit-stat, a.kit-stat { min-height: var(--tap); }
   .kit-toggle::before { content: ''; position: absolute; inset: calc((var(--tap) - 1.25rem) / -2) calc((var(--tap) - 2.25rem) / -2); }

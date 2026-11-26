@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { setLanguage } from '../i18n';
+import { setLanguage, t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import type { AnswerGuard } from '../components/useAnswerGuard';
 import { BUILTIN_REGISTRY, type HostActions } from '../layout/builtinPanels';
@@ -124,7 +124,11 @@ describe('a plugin panel in the window', () => {
 
   it('shows the placeholder for a plugin panel this window does not have, and never replaces a built-in', async () => {
     draw(ws({ type: 'split', direction: 'row', ratios: [0.5, 0.5], children: [pane('p1', 'plugin.gone.main'), pane('p2', 'usage')] }), BUILTIN_REGISTRY);
-    expect(host.querySelector('[data-pane="p1"]')?.textContent).toContain('plugin.gone.main');
+    // Named in plain words, never by its internal id (visual-language.md, "UI vocabulary"): its bar says it is a plugin's panel.
+    const placeholder = host.querySelector('[data-pane="p1"]')?.textContent ?? '';
+    expect(placeholder).toContain(t('layout-panel-plugin-missing'));
+    expect([...host.querySelectorAll('[data-pane-name]')].map((n) => n.textContent)).toContain(t('layout-panel-plugin'));
+    expect(placeholder).not.toContain('plugin.gone.main');
     expect(host.querySelector('iframe')).toBeNull();
     const p = await loaded('Demo', { panels: [{ id: 'approvals', kind: 'global' }] });
     const reg = withPlugins(BUILTIN_REGISTRY, [p, p]);

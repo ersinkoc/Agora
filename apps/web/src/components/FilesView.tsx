@@ -469,7 +469,7 @@ export function CodeView({ label, lines, html, marks, matches, current }: { labe
     rows.push(
       <div key={i} className="flex" style={{ height: LINE }}>
         <span className="sticky start-0 z-[1] flex flex-none bg-surface-0">
-          <span className="select-none pe-2 ps-3 text-end text-muted/70" style={{ width: `calc(${digits}ch + 1.25rem)` }}>{i + 1}</span>
+          <span className="select-none pe-2 ps-3 text-end text-muted" style={{ width: `calc(${digits}ch + 1.25rem)` }}>{i + 1}</span>
           <span className={`my-0.5 w-[3px] flex-none rounded-full ${mark ? MARK_CLASS[mark] : ''} ${mark === 'del' ? 'h-1 self-end' : ''}`} title={mark ? t(`files-mark-${mark}`) : undefined} />
         </span>
         {html?.[i] !== undefined

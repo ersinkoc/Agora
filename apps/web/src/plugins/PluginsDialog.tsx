@@ -135,7 +135,7 @@ function Grant({ titleId, screen, onChange, onCancel, onSave }: { titleId: strin
     {m.capabilities.length === 0 ? <p className="m-0">{t('plugin-grant-nothing')}</p> : <fieldset className="m-0 grid gap-2 border-0 p-0" data-plugin-grants="">
       <legend className="mb-1 p-0 font-medium text-ink">{t('plugin-grant-asks')}</legend>
       {m.capabilities.map((c) => (
-        <label key={c} className="flex items-start gap-2">
+        <label key={c} className="touch-row flex items-start gap-2">
           <input type="checkbox" className="mt-0.5 size-4 flex-none" checked={screen.allow.includes(c)} onChange={(e) => toggle(c, e.target.checked)} data-cap={c} />
           <span>{t(capabilityKey(c))}</span>
         </label>
