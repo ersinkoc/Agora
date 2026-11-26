@@ -4,6 +4,7 @@
 // The colour scheme follows the system, or is forced dark or light (the title bar's picker). Each scheme has its chosen theme,
 // so "follow the system" can switch between, say, Sand by day and Slate by night. Another tab's change applies here at once.
 import { type ThemeData, cloneLooks, deserialise, readTheme, writeTheme } from './file';
+import { SAFE } from '../plugins/safe';
 import {
   BUILT_IN, COLOR_TOKENS, DEFAULT_THEME, MAX_NAME, type Scheme, type StyleTarget, type Theme, type ThemeIssue, type Tokens,
   applyTheme, chromeOf, hasScheme, looksOf, schemesOf, textOf,
@@ -184,8 +185,10 @@ function storage(): KV | undefined {
 const LIGHT_QUERY = '(prefers-color-scheme: light)';
 const browser = typeof window !== 'undefined' && typeof document !== 'undefined';
 
+// In safe mode (ADR-0114, plugins/safe.ts) the window shows the built-in theme: nothing stored is read, and a choice made there holds for
+// that visit only, so another tab's change never brings a stored theme back either.
 export const themeStore: ThemeStore = createThemeStore(browser ? {
-  kv: storage(),
+  kv: SAFE ? undefined : storage(),
   root: document.documentElement,
   prefersLight: () => !!window.matchMedia?.(LIGHT_QUERY).matches,
   // The terminals repaint on this; the variables have changed by the time it fires.

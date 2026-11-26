@@ -389,7 +389,7 @@ describe('format 2 in words and in the stylesheet', () => {
 
   it('keeps what needs the person out of every region: the floor resets their variables to the base tokens', () => {
     const css = readFileSync('src/design/app.css', 'utf8').replace(/\r\n/g, '\n');
-    const i = css.indexOf(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {\n');
+    const i = css.indexOf(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) {\n');
     expect(i).toBeGreaterThan(0);
     const floor = css.slice(i, css.indexOf('}', i));
     for (const r of ['cards', 'inputs', 'buttons', 'code-blocks'] as const) for (const p of REGION_PARTS) expect(floor, regionVar(r, p)).toContain(`${regionVar(r, p)}: var(--`);
@@ -429,11 +429,22 @@ describe('the floor in the stylesheet (review of #1206)', () => {
 
   it('keeps the window\'s own fonts in what needs the person, equal to tokens.css', () => {
     const root = block(tokensCss, ':root {');
-    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) {\n');
+    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) {\n');
     const value = (src: string, n: string) => new RegExp(`--${n}:\\s*([^;]+);`).exec(src)?.[1]?.trim();
     for (const n of ['font-ui', 'font-mono']) expect(value(floor, n), n).toBe(value(root, n));
     // Every "needs you" scope declares the font, not only the cards: the word in a pill, a state mark or a count too.
-    expect(css).toContain(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you) { font-family: var(--font-ui); }');
+    expect(css).toContain(':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) { font-family: var(--font-ui); }');
+  });
+
+  it('holds the plugin marker in the floor with what needs the person: base colours, the window\'s fonts, no theme weight (ADR-0114)', () => {
+    const floor = block(css, ':is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) {\n');
+    expect(floor).toContain('--font-ui:');
+    for (const line of css.split('\n').filter((l) => /^\s*:root(:is\(\[data-line-height\], \[data-ligatures\]\)|\[data-line-height\]|\[data-weight\]) :is\(\.kit-callout/.test(l))) expect(line).toContain('.plugin-mark');
+    // Drawn in the base tokens only, never a region's variable, a state colour or the accent.
+    const mark = /\.plugin-mark \{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(mark).toMatch(/background: var\(--surface-2\)/);
+    expect(mark).not.toMatch(/--(cards|buttons|inputs|accent|state)-/);
+    expect(readFileSync('src/layout/Workspace.tsx', 'utf8')).toMatch(/<span className="plugin-mark" data-plugin-mark="">/);
   });
 
   it('puts one state mark in a tab menu row, not one inside another', () => {

@@ -157,7 +157,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
 1. **The panel registry** (ADR-0068 rung 3): built-in panels move onto it. Plugins need it. Done: `docs/ux/layout.md`, "The
    panel registry (rung 3)".
 2. **The sandbox host:** the frame, the page policy, the message set with the read capabilities, the host-drawn header, safe
-   mode, and local development loading.
+   mode, and local development loading. Done: `docs/ux/plugins.md`; under the hub, frames run once Amendment A is accepted.
 3. **Storage on the hub,** install and remove, and per-person grants (schema messages, fixtures).
 4. **The catalog:** repository, review rules, signatures, `agora hub plugin` commands.
 5. **Further capabilities,** each by amendment.
@@ -185,3 +185,37 @@ The maintainer wants community plugins next to community themes, "like herdr".
 - **Should a plugin panel be allowed in a theme pack's layout** before the plugin is installed? Proposed: yes, as the "unknown
   panel" placeholder (ADR-0113 decision 5).
 - **Node-side automations on events:** a separate ADR when wanted.
+
+## Amendment A (Proposed, 2026-11-26): a plugin frame needs a loader, and blob scripts in the window's policy
+
+Not accepted. Nothing in this amendment is final until the maintainer decides; build step 2 is built with it and waits on it.
+
+**Why.** Found while building step 2 (`docs/ux/plugins.md`), in Chromium 156:
+
+- **A blob page keeps the window's policy.** A frame whose page is a blob the window made applies the window's page policy as well as
+  its own (the policy container is inherited by local-scheme pages). The window's policy has no `script-src`, so `default-src 'self'`
+  governs scripts in the frame. Decision 2's frame policy allows scripts only from `blob:`. No address passes both, so no script can
+  run in the frame: "Loading the script 'blob:null/…' violates the following Content Security Policy directive: "default-src 'self'"".
+- **An opaque frame cannot load the window's blobs.** A script blob the window made is refused in the frame ("Not allowed to load local
+  resource": blob addresses are partitioned by origin), so the plugin's files cannot simply be blobs of the window's.
+
+**Proposed.**
+
+1. **A loader.** The frame's page names one script by its full address: the window's own loader, served beside the window's files
+   (`plugin-frame.js`). The frame's policy is decision 2's with that address added to `script-src`. The loader takes the checked files
+   from the window by message, makes them into blobs inside the frame and runs the entry; stylesheets become `<style>` elements (both
+   policies allow `'unsafe-inline'` styles), images are `data:` addresses.
+2. **The window's policy** gains `script-src 'self' blob:` beside `frame-src blob:`, so the plugin's blob scripts made in the frame can
+   run. Nothing else changes: `img-src`, `style-src` and `font-src` stay as they are, so a plugin's images work as `data:`, its styles
+   inline, and its fonts are the system's.
+
+**What it costs.** `blob:` in the window's `script-src` also lets a blob script run in the window itself. Making one needs script
+already running in the window, so it adds no way in for markup injected into the page; it is the one widening of the window's policy.
+
+**Alternative.** The hub serves the frame's page from an address of its own with a page policy of its own (no inheritance), and the
+window's policy gains `frame-src 'self'` instead. The window's `script-src` stays as it is, but the hub's `X-Frame-Options: DENY` and
+`frame-ancestors 'none'` need an exception for that one page, and the frame's page is no longer made from the checked bytes alone.
+
+**Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's policy read from `web.rs`
+(with only `frame-src blob:` added, the frame never runs and the positive checks fail) and, with `--amendment-a`, under the policy
+above (every check passes).

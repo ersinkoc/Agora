@@ -1,0 +1,14 @@
+:root { color-scheme: dark; font: 13px/1.5 system-ui, sans-serif; }
+body { margin: 0; background: var(--surface-0, transparent); color: var(--text, CanvasText); }
+main { padding: 12px 16px; }
+h1 { margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted, GrayText); }
+ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--surface-1, transparent); }
+.dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--state-unknown, gray); }
+.dot--working { background: var(--state-working, dodgerblue); }
+.dot--needs-you { background: var(--state-needs-you, orange); }
+.dot--finished { background: var(--state-finished, seagreen); }
+.dot--idle { background: var(--state-idle, gray); }
+.name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.where, .state { flex: none; font-size: 12px; color: var(--text-muted, GrayText); }
+.note { margin: 8px 0 0; color: var(--text-muted, GrayText); }

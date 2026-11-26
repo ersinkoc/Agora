@@ -624,12 +624,14 @@ async fn respond<S: AsyncWrite + Unpin>(
         429 => "Too Many Requests",
         _ => "Request Header Fields Too Large",
     };
-    // The app talks only to its own origin; nothing is framed, sniffed or loaded from elsewhere.
+    // The app talks only to its own origin; nothing is framed, sniffed or loaded from elsewhere. The one frame it shows is a plugin's
+    // sandboxed blob page (ADR-0114 decision 2), whose own policy takes away the network and everything else.
     let head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
          X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n\
          Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data:; frame-ancestors 'none'\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+         img-src 'self' data:; frame-src blob:; frame-ancestors 'none'\r\n\
+         Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
@@ -749,7 +751,14 @@ mod tests {
         let mut out = String::new();
         c.read_to_string(&mut out).await.unwrap();
         assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
-        assert!(out.contains("Content-Security-Policy"));
+        // The page policy, exactly: the only frames are blob pages (a plugin's, ADR-0114 decision 2).
+        assert!(
+            out.contains(
+                "Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
+                 img-src 'self' data:; frame-src blob:; frame-ancestors 'none'\r\n"
+            ),
+            "{out}"
+        );
         assert!(out.ends_with("hello"));
         assert!(task.await.unwrap().unwrap());
 

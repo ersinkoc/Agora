@@ -1712,3 +1712,58 @@ palette-group-appearance = Görünüm
 palette-key-move = Gezin
 palette-key-open = Aç
 palette-key-close = Kapat
+
+# Eklentiler (ADR-0114 yapım adımı 2, docs/ux/plugins.md).
+palette-plugins = Eklentiler
+plugin-panel = Eklenti
+plugin-marker = Eklenti
+plugin-development = geliştirme
+plugin-frame-title = { $name } (eklenti)
+plugins-title = Eklentiler
+plugins-intro = Bir dosyadan yüklediğiniz eklentiler yalnızca bu tarayıcıda, her biri kendi korumalı bölmesinde çalışır. Yalnızca izin verdiklerinizi görürler; anahtarlarınızı, ağı ve sizi bekleyenleri asla göremezler. Birini bir bölmede göstermek için bölmenin Göster… menüsünü kullanın.
+plugins-safe = Güvenli kip: hiçbir eklenti çalışmıyor ve yerleşik tema açık. Eklentilerinizi yeniden kullanmak için güvenli kipten çıkın.
+plugins-done = Tamam
+plugin-load = Dosyadan yükle…
+plugin-version-by = { $version }, { $author }
+plugin-licence = Lisans: { $licence }
+plugin-held = Bu sürüm, izin verdiğinizden fazlasını görmek istiyor. Siz yeniden bakana kadar bölmeleri kapalı kalır.
+plugin-sees = { $count ->
+    [0] Sizden hiçbir şey görmüyor.
+    [one] İzin verdiğiniz bir şeyi görüyor.
+   *[other] İzin verdiğiniz { $count } şeyi görüyor.
+}
+plugin-review = Yeniden bak
+plugin-change = Neleri görebilir
+plugin-remove = Kaldır
+plugin-added = { $name } eklendi. Bir bölmede göstermek için bölmenin Göster… menüsünü kullanın.
+plugin-added-visit = { $name } yalnızca bu ziyaret için eklendi: bu tarayıcı onu saklayamadı.
+plugin-grant-title = { $name } eklensin mi?
+plugin-grant-never = Yalnızca kendi bölmesinin içine çizer. Ağa, anahtarlarınıza, terminallerinize ve sizi bekleyenlere erişemez; sizin yerinize hiçbir şey yapamaz.
+plugin-grant-asks = Görmek istedikleri:
+plugin-grant-nothing = Sizden hiçbir şey görmek istemiyor.
+plugin-cancel = Vazgeç
+plugin-add = Eklentiyi ekle
+plugin-save = Kaydet
+plugin-cap-agents-read = Ajanlarınızın adları, türleri ve durumları, makineleri ve projeleriyle birlikte
+plugin-cap-usage-read = Ajanlarınızın kullandığı token, bağlam ve süre
+plugin-cap-tasks-read = Projelerinizin ortak görevleri
+plugin-cap-changes-read = Bölmesinin gösterdiği ajanın klasöründe değişen dosyalar ve içlerinde neyin değiştiği
+plugin-cap-chat-read = Bölmesinin gösterdiği ajanın konuşması, sırlar gizlenmiş olarak
+plugin-cap-theme-read = Temanızın renkleri, onlara uyabilmesi için
+plugin-cap-pane-context = Bölmesinin hangi ajanı gösterdiği ya da bölmenin neyi izlediği
+plugin-error-too-large = Bu dosya 2 MB'tan büyük; bir eklenti en fazla bu kadar olabilir.
+plugin-error-format = Bu dosya bir eklenti paketi değil.
+plugin-error-newer-format = Bu eklenti paketi daha yeni bir sürüm için hazırlanmış.
+plugin-error-too-many = Bu paket, bir eklentinin içerebileceğinden fazla dosya içeriyor.
+plugin-error-path = Bu paket, adında klasör ya da yol olan bir dosya içeriyor ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-link = Bu paket bir bağlantı ya da dosya olmayan başka bir şey içeriyor ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-type = Bu paket, bir eklentinin kullanamayacağı türde bir dosya içeriyor ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-manifest = Paketin tanımı (agora-plugin.json) eksik ya da "{ $detail }" alanında hatalı.
+plugin-error-capability = Bu eklenti, bu pencerenin bilmediği bir şeyi görmek istiyor ({ $detail }); bu yüzden yüklenmedi.
+plugin-error-unlisted = Bu paket, tanımında listelenmeyen bir dosya içeriyor ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-missing = Paketin tanımında listelenen bir dosya eksik ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-hash = Bu paketteki bir dosya, tanımında listelenen dosya değil ({ $detail }); bu yüzden hiçbir parçası yüklenmedi.
+plugin-error-newer = Bu eklenti { $detail } ya da daha yeni bir sürüm gerektiriyor.
+plugin-error-full = Zaten dört eklenti yüklü. Önce birini kaldırın.
+safe-mode-on = Güvenli kip: eklenti yok, yerleşik tema açık.
+safe-mode-leave = Güvenli kipten çık

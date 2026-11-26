@@ -187,7 +187,7 @@ format-1 tokens and stay themeable, checked for readability as before. Beyond th
 - **The window keeps it out of the regions, the text values and the fonts.** A request card, the "Needs you" card and tile, and
   anything drawn in the "needs you" tone draw their buttons, cards, fields and code in the base tokens whatever the theme's regions
   say, and keep the window's own fonts (never a theme's font list), text weight, line height and ligatures (`app.css`, the floor
-  rules). A state display never replaces the "needs you" symbol; with the filled tab style a state's mark sits on a chip of the
+  rules). The "Plugin" marker beside a plugin panel's name (ADR-0114, `plugins.md`) is held by the same rules. A state display never replaces the "needs you" symbol; with the filled tab style a state's mark sits on a chip of the
   background, where every state is held to 3:1. Density never changes a "needs you" tile, and never applies under a finger (coarse
   pointer), so every hit target keeps the platform's minimum. What the floor does not hold: the base text size (it only grows,
   16–24 px, so text can only get larger), the base colours (`state-needs-you`, `accent`, surfaces, checked for readability as in

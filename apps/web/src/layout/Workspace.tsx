@@ -42,10 +42,23 @@ function barBox(r: Rect): CSSProperties {
 }
 
 // The name the user sees for a panel id (UI vocabulary, not internal terms), from the registry; an id it does not have is named as unknown.
-export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'label'>, panel: string) => {
-  const key = panels.label(panel);
-  return key ? t(key) : t('layout-panel-unknown', { id: panel });
+// A plugin's panel is named by the plugin's own name as plain text, never looked up as a Fluent key (ADR-0114; the marker says whose it is).
+export const panelName = (panels: Pick<PanelRegistry<PanelInfo>, 'get'>, panel: string) => {
+  const def = panels.get(panel);
+  if (def?.plugin) return def.plugin.name;
+  return def ? t(def.label) : t('layout-panel-unknown', { id: panel });
 };
+
+// The "plugin" marker the window draws beside a plugin panel's name, in its pane bar and its tab (ADR-0114 decision 4): the window's own
+// words, which no plugin can reach and no theme can restyle (the ADR-0113 floor, app.css `.plugin-mark`); "development" too for a plugin
+// loaded from a local file.
+export function PluginMark({ dev }: { dev: boolean }) {
+  return (
+    <span className="plugin-mark" data-plugin-mark="">
+      <Icon name="puzzle" className="size-3" />{t('plugin-marker')}{dev && <>{' '}<span className="plugin-mark__dev">{t('plugin-development')}</span></>}
+    </span>
+  );
+}
 export const panelLabel = (panel: string) => panelName(PANEL_INFO, panel);
 
 export interface WorkspaceProps {
@@ -183,6 +196,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
                   onClick={() => dispatch({ type: 'activate', pane: p.id })} onKeyDown={(e) => tabKey(e, f, i)} {...dragProps(p)}>
                   {pa ? <AgentAvatar accent={pa.accent} kind={agentKind(pa)} size="s" /> : <Icon name="layout" className="size-3.5 text-muted" />}
                   <PaneName text={label(p)} />
+                  {panels.get(p.panel)?.plugin && <PluginMark dev={!!panels.get(p.panel)?.plugin?.dev} />}
                   {pa && <NoAskBadge agent={pa} nested bare />}
                   {pa && <StatusMark state={pa.state} failed={endedWithError(pa)} />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
@@ -194,6 +208,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
           <div className="@container flex min-w-0 flex-1 cursor-grab items-center gap-2 px-3 text-[0.8125rem]" title={t('layout-drag')} {...dragProps(front)}>
             {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
             <PaneName text={label(front)} className="font-medium" />
+            {panels.get(front.panel)?.plugin && <PluginMark dev={!!panels.get(front.panel)?.plugin?.dev} />}
             {a && <NoAskBadge agent={a} bare />}
             {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
             {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
