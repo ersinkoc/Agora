@@ -2074,6 +2074,89 @@ mod tests {
         assert_eq!(Store::new(&dir, limits, None).read("a").high, 43);
     }
 
+    /// An entry `id` whose encoded line (written with `high`, its line break included) is exactly `len` bytes.
+    fn line_of(high: u64, id: u64, len: usize) -> Line {
+        let base = encode_line(high, &text(id, "x")).len();
+        let line = text(id, &"x".repeat(len + 1 - base));
+        assert_eq!(encode_line(high, &line).len(), len);
+        line
+    }
+
+    fn ids(seed: &Seed) -> Vec<u64> {
+        seed.entries.iter().map(|(e, _)| e.entry_id).collect()
+    }
+
+    /// F1601: when the last [`TAIL_READ`] bytes of a file begin exactly on a line start, that line is read back too (before, the
+    /// first line of the tail was always skipped as a partial one, so entry 2 was lost).
+    #[test]
+    fn a_tail_that_begins_on_a_line_start_keeps_that_line() {
+        let dir = temp("tail-on-line");
+        let store = Store::new(&dir, Limits::default(), None);
+        std::fs::create_dir_all(store.dir()).unwrap();
+        let three = encode_line(3, &text(3, "y"));
+        let two = encode_line(3, &line_of(3, 2, TAIL_READ as usize - three.len()));
+        let mut body = header(false);
+        body.extend(encode_line(3, &text(1, "a")));
+        let start = body.len();
+        body.extend(two);
+        body.extend(three);
+        // The tail read is exactly lines 2 and 3.
+        assert_eq!(body.len() - start, TAIL_READ as usize);
+        std::fs::write(store.path("a").unwrap(), &body).unwrap();
+        let seed = store.read("a");
+        assert_eq!(ids(&seed), [2, 3]);
+        assert_eq!(seed.high, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F1600: a rotation whose kept half (2,048 bytes of a 4,096-byte bound) begins exactly on a line start keeps that line (before,
+    /// it was skipped as a partial one, so entry 2 was lost).
+    #[test]
+    fn a_rotation_whose_half_begins_on_a_line_start_keeps_that_line() {
+        let dir = temp("rotate-on-line");
+        let limits = Limits {
+            max_bytes: 4096,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        // The header and entry 1: more than the half, within the bound, so this write does not rotate.
+        let first = 3000 - header(false).len();
+        store
+            .write(&batch("a", 1, vec![line_of(1, 1, first)]))
+            .unwrap();
+        let path = store.path("a").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 3000);
+        // Entries 2 and 3 are exactly the half kept.
+        let three = text(3, "y");
+        let two = line_of(3, 2, 2048 - encode_line(3, &three).len());
+        store.write(&batch("a", 3, vec![two, three])).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\"truncated\":true"), "it rotated");
+        let seed = store.read("a");
+        assert_eq!(ids(&seed), [2, 3]);
+        assert_eq!(seed.high, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F1602: a new file's header counts toward its bound: a first batch of 4,086 bytes under a 4,096-byte bound rotates instead of
+    /// leaving a 4,127-byte file.
+    #[test]
+    fn a_new_files_header_counts_toward_its_bound() {
+        let dir = temp("new-bound");
+        let limits = Limits {
+            max_bytes: 4096,
+            days: 30,
+        };
+        let store = Store::new(&dir, limits, None);
+        let line = line_of(1, 1, 4086);
+        assert!(header(false).len() + 4086 > 4096);
+        store.write(&batch("a", 1, vec![line])).unwrap();
+        let len = std::fs::metadata(store.path("a").unwrap()).unwrap().len();
+        assert!(len <= limits.max_bytes, "{len}");
+        assert_eq!(store.read("a").high, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// "Start again" moves the file aside; the new session's file starts with the earlier session's highest id, so a node that takes
     /// up or resumes the new session before it wrote anything still numbers on after it.
     #[test]
