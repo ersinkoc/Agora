@@ -1,1 +1,0 @@
-- `agora` commands no longer crash when their output is cut short, for example with `| head` (#1150)

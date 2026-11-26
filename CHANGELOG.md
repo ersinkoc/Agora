@@ -6,6 +6,195 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.40
+
+- When the terminal holder cannot start an agent (so the node runs it itself and it will not outlive the node), `run/hold.log` now
+  says why: the holder was full, or the program or its terminal did not start, with the system error and whether the program exists.
+  (ADR-0079)
+- The desktop app can show its own notification when an agent finishes or needs you, with the same rules as the window's sounds:
+  turn on **App notifications** in Settings (off until you do). They come only while the app is in the background, never in safe mode,
+  and at most one every 2 seconds, a burst becoming one. They say only the agent's name and what happened, and clicking one brings
+  the app forward and opens that agent. The count of approvals waiting now reaches macOS too, and a click on it brings the app forward.
+  (M6.7, ADR-0048 Amendment A)
+- Web window, from the visual pass: section titles are sentence case (the Agents list, Settings' side index, the theme editor); the
+  title bar has no language menu any more (choose it in Settings or the command palette); a machine in the Agents list no longer shows
+  its memory (My machines does); pane tabs keep whole agent names when the row scrolls anyway; changed words in a diff stay readable in
+  the light theme. On a phone, **More** in the bottom bar opens the shared board, Team chat and Usage, and a request on an agent's screen
+  folds to one line while the bar at the bottom holds it, so the conversation keeps its room (docs/reviews/2026-11-26-visual-pass.md).
+- The terminal client's start picker (`f`) now preselects the model and effort you last chose for that agent kind on that machine, as the
+  web window's start dialog does; Enter keeps it, `1` picks the tool's default. How the agent acts is never remembered: letting it act
+  without asking is asked and confirmed every time (ADR-0066).
+- A window that opens, reloads or reconnects to a terminal whose program set a scroll region or origin mode (status bars, split
+  views, some editors) now gets both back, so the program's next output scrolls and lands where it does on the machine; `agora terminal
+  attach` gives your terminal the whole screen back when you detach (ADR-0100, M7.10).
+- The hub's prices: `agora hub prices set MODEL INPUT OUTPUT` sets your own price for a model (USD per million tokens), `unset` removes
+  it and `show` says where the prices come from; `agora hub prices auto on` lets the hub fetch the price catalog by itself about once a
+  day (off until you turn it on). A running hub uses each change within a few seconds. An agent kind's `[usage.model_map]` now names the
+  catalog's model, so its usage gets a cost estimate (ADR-0021).
+- `agora panel` opens the hub's window in your browser when you run it at a terminal on a machine with a screen (set `AGORA_NO_BROWSER`
+  to only print the address); `agora web` on a machine that joined a hub elsewhere opens the panel. No other program can bind the panel's
+  port beside it while it runs, on Windows too (ADR-0056).
+- `agora web` on a machine that joined a hub elsewhere runs the panel until Ctrl+C (and fails when the hub does not answer) instead of
+  only saying Agora is running; `agora web` does not open the browser in CI, over SSH, on Linux without a display, or with
+  `AGORA_NO_BROWSER` set, and prints the sign-in address instead (ADR-0056).
+- The visual pass (M1.4) fixed small things on the web window: a plugin's pane in safe mode says plugins are off instead of showing
+  its internal name; the command palette's rows, the review screen's Unified / Side by side switch and "Show unchanged lines", a
+  plugin's checkboxes, the start window's checkbox and the theme editor's colour swatches are 44 px on a touch screen; line numbers in
+  the review screen and the file browser are easier to read; a closed agent on the phone list keeps readable text; the agent list's
+  filter box no longer cuts its hint off; the file manager says "needs your OK" instead of "approval"
+- Writing a plugin is a short loop: `agora plugin new ID` makes a plugin folder that passes the window's checks, with types for
+  `agora` and each capability's answer for your editor; `agora plugin pack FOLDER --out FILE --write-hashes --watch` packs it again on
+  every save (the same package `scripts/pack-plugin.mjs` makes, checked as the window checks it); `agora plugin check` says what the
+  window would refuse and why. In Chrome and Edge a plugin loaded from a file starts again when the file changes, and says why when a
+  new version is refused (roadmap M5.7, ADR-0114).
+- Starter themes: Catppuccin Mocha, Dracula, Gruvbox (dark and light), Rosé Pine and Tokyo Night, ported from each palette's published
+  colours, are in the theme editor's lists under "Starter themes", in the command palette, and in the terminal client's theme list.
+  Each holds to the same readability rules as any theme. (M5.2)
+- The terminal client (`agora tui`) now tells you when an agent finishes or needs you, with the web window's rules: the terminal's bell
+  (on by default; "Turn the bell off" in the command palette), and optionally a desktop notification through the terminal (`OSC 9` or
+  `OSC 777`, off by default, set in `tui-settings` in the Agora folder) that names the agent. Never for the agent you are looking at,
+  never when the output is not a terminal, at most one every 2 seconds. An agent that finishes while it is not on screen keeps a green
+  `✓` in the agent list until you open it (M6.7, G13)
+- `agora manual` prints how to drive and customize Agora, written for coding agents: `agora manual scripting`, `themes`, `layouts`,
+  `keys`, `plugins`, `mesh` and `files`, each ending with a minimal example that works; `agora manual --json` lists the topics for
+  programs (roadmap M6.5, G10).
+- The theme editor can import colours from other apps: **Import from another app…** reads an iTerm2 `.itermcolors` file, an
+  Alacritty `.toml` or `.yml`, a Ghostty theme file, a Windows Terminal colour scheme or a VS Code colour theme, makes the window's
+  colours from its terminal palette, and shows what was left out or guessed before the theme is added. The imported theme goes
+  through the same checks as a theme file, so nothing it holds can change what needs you. (roadmap M5.1, ADR-0113)
+- On a machine whose policy is `skip_permissions = forbid` (or `confined_only` for an agent that is not confined), a structured agent
+  whose own mode or setting lets it act without asking (its default, a saved setting, or a resumed session) is no longer started, and
+  one that turns such a mode on later is stopped, with its conversation saying why; no prompt reaches it. Before, only a switch asked
+  for from the window was refused (backlog P2-16, ADR-0090).
+- On a project shared between machines, a file lease of 30 seconds or more now lasts while its agent runs: the agent's machine
+  renews it at half its time (also after the machine restarts, and for a lease it handed over when the project became shared),
+  and the lease ends when the agent releases it or stops, or at its time when the machine can no longer reach the hub (ADR-0039).
+- The terminal client's conversation with a structured agent works like the web window's: `/stop` ends the agent's turn (`/stop all`
+  also drops the requests waiting behind it) while the agent keeps running, `/effort high` and `/set ID VALUE` change the agent's own
+  settings while it runs, tool calls show their status and how long they took, a plan shows its steps, and the agent's thinking is one
+  hidden line until `/thinking` shows it. "Start an agent in a folder" (f) asks for the model and effort the agent's kind offers. The
+  console reads a keybindings file (`~/.agora/keybindings.json`, the file the web window exports) and uses its keys, saying what it
+  leaves out (ADR-0090, ADR-0066, ADR-0068)
+- An agent started in a folder (every helper is) now shows that folder as its `workspace` when agents on other machines list it
+  (`agents_list`, with `scope: "hub"` or in a shared project, and `workspace_status`), instead of an empty one. (audit F1820, ADR-0112)
+- When the hub is updated, the shared task board of a GitHub, GitLab, Bitbucket or Codeberg repository keeps the tasks of every board
+  the older hub kept for it under a differently cased URL, not only of the one it used last. (audit F1821, ADR-0115)
+- The desktop app has its own way into safe mode that works even when a plugin has frozen the window: **Open in Safe Mode** in the
+  Help menu starts the app again with the hub in safe mode, and `--safe` at start opens it that way from the beginning (on macOS and
+  Linux a plugin's frame runs on the page's own thread, so a frozen plugin could stop the page's own safe-mode key and menus).
+  (ADR-0114, threat model T63)
+- The hub's owner can install plugins from a reviewed community catalog: `agora hub plugins key set FILE` pins the catalog's key,
+  `agora hub plugins on` and `agora hub plugins update --url URL` fetch its index, and the hub refuses an index the key did not sign, or
+  an older one than it already took under that key. `agora hub plugins install ID` and `upgrade ID` install a plugin only when its
+  package is exactly what the signed index lists, after showing what it asks to see (for an upgrade, what changes comes first), and only
+  if nothing changed while the owner was asked. Nothing is installed or upgraded on its own. The plugins dialog lists what the catalog
+  offers, with the command the owner runs on the hub's machine (ADR-0114).
+- `agora` commands no longer crash when their output is cut short, for example with `| head` (#1150)
+- Creating a shared project ID writes `.agent-project.json` whole: a machine stopped at that moment no longer leaves an empty file
+  that made the folder unusable until it was deleted (#1150)
+- When the merge of a repository's differently cased boards has to tell an agent whose machine is not connected yet (its task got
+  a new id, or it lost a lease), the hub now keeps that notice through its own restart and gives it when the machine connects
+  (ADR-0115, #1150)
+- In the merge of a repository's differently cased boards, a lease on a folder and another agent's lease on a file in it (or the
+  other way round) are now settled like two leases on one file: the agent still running keeps its lease, both are told, and the
+  other lease no longer shows as held (ADR-0115, #1150)
+- A request your machine states again after you answered it no longer brings its card back, whatever kind of request it is: the hub
+  and the window ignore a request whose answer they have already seen (#1150)
+- Your themes, the theme packs you imported and which theme you use now follow you to every device where you sign in, so the phone and
+  the laptop agree. "Keep my themes the same on my devices" in Settings > This device turns it off for one browser. Your Agora keeps them
+  for you without reading them, at most 256 KiB; every window checks them again, shows anything it cannot use with the reasons instead
+  of applying it, never drops a theme of yours without a newer removal, and a theme edited on two devices keeps the newer edit. A pack
+  from another device opens in the Import pack preview, and nothing of it is used until you pick its parts. Two people signing in to one
+  browser in turn never get each other's themes: the browser takes the second person's as they are. Safe mode and older hubs keep themes
+  in the browser only. A person's theme saves (60 a minute) and plugin choices (30 a minute) are limited. The hub database moves to
+  schema 17; to go back to an older version, restore a backup made before upgrading (`agora hub backup`, `agora hub restore`) (ADR-0113)
+- Under a theme, the "!" on the tab in front, and in the bar of the pane in focus in a tiled layout, keeps the "needs you" colour on
+  the terminal's own background when its agent needs you, instead of taking the theme's accent. (audit F1804, #1232)
+- When many agents finish within the same second, an agent that needs you in that second still gets the "needs you" sound instead of
+  "finished". (audit F1803, #1232)
+- Importing a keybindings file whose key is a deeply nested list now lists the problem instead of doing nothing. (audit F1802, #1232)
+- The terminal client trims theme values as the web window does (a zero-width no-break space around a colour or a size is a blank,
+  a next-line character is not), so the same theme file is no longer accepted by one client and refused by the other. (audit F1801, #1232)
+- The terminal client reads a theme file that starts with a byte-order mark (as Windows PowerShell 5.1 and older Notepad save UTF-8),
+  or that has a byte that is not UTF-8, as the web window does, instead of refusing it as "not JSON". (audit F1800, #1232)
+- Agents come back after an OS shutdown or reboot more reliably: an agent the shutdown ended is offered to Resume instead of being
+  listed as finished, the node writes what it holds first when it is stopped and syncs it to disk, and a node whose event log cannot
+  be read sets it aside and starts instead of refusing to. On Windows the node is meant to stop cleanly when the session ends; that
+  part is not yet tried on a Windows machine .
+- Theme packs: one file with themes, saved layouts and keys. "Export as pack…" in the theme editor picks what goes in; "Import pack…"
+  shows what a pack holds and applies only what you tick: themes are added to yours, layouts are added to your saved layouts, and keys
+  are merged after a step that shows which of yours they replace and which keys would clash. A pack is data only: it never installs
+  plugins, a plugin's panel in it waits as a placeholder, and the safe-mode key and request answers can't be bound. The terminal client
+  reads a pack's themes from its themes folder and lists the layouts and keys as not used there. (ADR-0113)
+- The terminal client tiles too: several agents' terminals side by side in the same layouts as the web window. In the agent list, 1 to 6
+  apply the presets (one pane with tabs, two side by side, two stacked, 2 × 2, one large and three small, 3 × 2), h / l move between
+  panes, z maximizes and restores, Enter shows an agent in the pane in focus and w closes it; the commands (Alt+K) split, swap, move,
+  resize and show Needs you, the fleet or what needs you next in a pane. Panels it cannot draw (files, changes, theme, plugins…) say
+  so and point to the window. Saved layouts are files in `~/.agora/layouts`, in the format the web window imports and exports, and the
+  arrangement in use comes back after a restart. Only the terminals on screen are watched (ADR-0068)
+- The window can play a short sound when an agent finishes or needs you: off until you turn it on in Settings > Sounds, with a volume,
+  each sound on or off, and a mute for one agent in its menu. It plays only while the window is in the background (unless you ask for it
+  in front too), never for the agent you are using, never in safe mode, and at most once a second. An agent that finishes while you are
+  not looking at it keeps a green "New" mark on its tile, its row and its tab until you open it
+- A community theme catalog, off until the hub's owner turns it on: `agora hub themes update --url URL` fetches a catalog's index and
+  its themes on the hub (never in the browser), keeps only files with the right SHA-256 that pass the theme rules, and reports every
+  one it refused; `agora hub themes on|off|status` switches it. The theme editor then shows a Catalog section to everyone signed in:
+  preview a theme in its own colours, install a copy into your themes, and see "Version N available" on one you installed, which
+  changes only when you choose Update. The project's catalog repository does not exist yet, so the owner gives its address
+  (ADR-0113)
+- The hub database moves to schema 15 (the theme catalog's table); to go back to an older version, restore a backup made before
+  upgrading (`agora hub backup`, `agora hub restore`) (ADR-0113)
+- The hub's owner can install a community plugin for everyone on the hub with `agora hub plugin add FILE` (and `list`, `remove ID`), on
+  the hub's machine. The hub checks the package exactly as the window does and never runs it. Each person then chooses in the window
+  whether to show it and what it may see, and the hub keeps that choice for them; a new version that asks to see more waits until they
+  look again, and a plugin the owner removes is gone from every window at its next load (ADR-0114).
+- Every action of the web window is a command in the command palette (Ctrl K), with the key it has now: the layout presets, maximize,
+  split and close the pane, the agent list, the tabs and the side panel too. Settings > Keyboard gives any command the keys you like
+  (a chord is two presses in a row), shows two commands that want the same keys, and exports and imports your keys as a file; the
+  safe-mode key, Esc, Tab, a terminal's copy and paste and other fixed keys cannot be taken. A focused terminal keeps its keys; Ctrl+Shift+K
+  opens the palette from one (ADR-0068).
+- After the update that joins a repository's differently cased URLs into one project, the shared board shows each task of the
+  older boards on its own line at once (two tasks with the same id were shown as one until one changed), the agent holding a
+  task that got a new id is told it, a task waiting for one that is gone keeps waiting instead of following another task with
+  that id, and a hub that could not finish the merge never adds those tasks twice at its next start (ADR-0115, #1150)
+- In that merge, when two older boards held a lease on the same file for different agents, the agent still running keeps it and
+  both are told, as when a machine joins a shared board; a lease that had already ended no longer shows as held. An agent whose
+  machine is not connected yet is told when it connects (ADR-0115, #1150)
+- An approval you answered no longer comes back as a waiting card when its machine reconnects to the hub at the same moment; the
+  card stayed until the request ran out of time or the machine next reconnected (#1150)
+- The terminal client reads theme files: `t` (or Theme… in Ctrl K) lists the built-in themes and the `.json` files in
+  `~/.agora/themes`, each shown as you move to it, and Enter keeps one for the next start. A theme file in use is read again when
+  it changes. Colours are mapped to what your terminal shows (24-bit, 256 or 16 colours) and stay readable; pane borders, line
+  width, gaps and density are drawn, and the list says what else a theme sets that the terminal client does not use. A request's
+  box and the "needs you" marks look the same under every theme. Without a theme the client looks as before (ADR-0113)
+- A command whose answer would be larger than 1 MiB (for example listing a very large folder) is now refused with `node.resource_limit` instead of never being answered. (#1221)
+- A retried task handoff no longer replaces a handoff the node kept on disk but could not read at start: the retry is refused for now and answered with the original receipt after the next start. (#1221)
+- Stopping an adapter agent the node runs itself no longer waits forever, holding up the whole node, when a program the adapter started keeps its output open. (#1221)
+- An agent whose program ended right as it started is listed as ended, no longer offered for Resume (or restarted with `resume = auto`) after the node restarts. (#1221)
+- A chat transcript that reaches its size limit, or is read back from its last 4 MiB, no longer loses a whole line when the cut falls exactly on a line start, and a new transcript file stays within its limit. (#1221)
+- In the terminal client, "Clean up old machines" is no longer sent by members and viewers (only the owner can forget machines), and keys typed together with b, r or o no longer act on the console after that view closes. (#1221)
+- The node's link to the hub no longer drops a working connection when a send is slow (it took a slow send for a suspended computer), and a hub that stops reading during a resync no longer leaves the link stuck. (#1221)
+- A changed file's path reported by an adapter is cleaned and cut like other paths before it enters the chat: an over-long path no longer empties the conversation, control characters are removed, and a secret file's change shows no text. (#1221)
+- Agents can be driven from shell scripts: `agora agent prompt ID TEXT --wait [--timeout SECS]` waits until the turn is over,
+  `agora agent wait ID --until STATE,...` waits for a state, and `agora events [--agent ID] [--json]` prints each agent change as a
+  line; exit codes say idle or done (0), needs you (3), exited (4), timeout (5). A prompt to an agent that is waiting for you is no
+  longer sent: it is refused with exit code 6 unless `--force` (#1220)
+- A developer can load a plugin package from a local file into this browser and show its panel in a pane: it runs in a sandboxed frame
+  with no network, sees only what the person allowed on its install screen, and its pane says "Plugin · development". `?safe` in the
+  address, or Ctrl+Alt+Shift+S, opens the window with no plugins and the built-in theme (ADR-0114).
+- Security: the node checks a worktree's git links before and after reading it and puts them back before removing it, so an
+  agent cannot redirect what the node's git reads or runs there; removal always makes the node's own checks first, and a
+  worktree the node made keeps the project of the checkout it was made from (T8b)
+- An agent whose request to start a helper was answered at the very moment it was made can start helpers again, instead of being
+  refused until it reconnects; the answer now always reaches it (#1150)
+- A device limited to some projects can no longer approve an agent's request in another project by answering at the exact moment the
+  request is raised (#1150)
+- Clones of one GitHub, GitLab, Bitbucket or Codeberg repository are now one project whatever the case of their URLs
+  (`…/Owner/Repo` and `…/owner/repo`): the project filter no longer shows the repository twice, and machines with either
+  spelling share its board. Project ids on those hosts now print in lowercase. Other Git servers keep the case of the path. A
+  folder you confirmed before is not asked about again, and machines not yet updated join the same project through the hub
+  (ADR-0115)
+
 ## 0.3.39
 
 - New `agora agent explain KIND --file SCREEN`: shows which screen rule decides a captured agent screen, and for every other rule
