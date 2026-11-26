@@ -181,6 +181,7 @@ mod orchestrate;
 mod paircmd;
 mod panelcmd;
 mod pluginkit;
+mod pricefeed;
 mod remotecmd;
 mod secretcmd;
 mod servicecmd;

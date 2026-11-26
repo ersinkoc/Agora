@@ -6,8 +6,9 @@
 //! Targets come from the owner's file `<hub dir>/notify`: one `ntfy <url>` or `webhook <url>` per line.
 
 use std::io::{self, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::notify::Priority;
 
@@ -180,29 +181,131 @@ fn tls_config() -> io::Result<Arc<rustls::ClientConfig>> {
 trait Stream: Read + Write {}
 impl<T: Read + Write> Stream for T {}
 
-fn open(url: &Url) -> io::Result<Box<dyn Stream>> {
-    let tcp = agora_protocol::dial::connect_timeout((url.host.as_str(), url.port), TIMEOUT)?;
-    tcp.set_read_timeout(Some(TIMEOUT))?;
-    tcp.set_write_timeout(Some(TIMEOUT))?;
+/// How long a whole notification post may take.
+const SEND_DEADLINE: Duration = Duration::from_secs(30);
+/// How long a whole [`get`] may take (`agora hub prices update`).
+pub const GET_DEADLINE: Duration = Duration::from_secs(120);
+
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "deadline")
+}
+
+/// The time left for the next step: at most `step`, and never past `deadline` (`TimedOut` once it has passed).
+fn left(step: Duration, deadline: Instant) -> io::Result<Duration> {
+    let rest = deadline.saturating_duration_since(Instant::now());
+    if rest.is_zero() {
+        Err(timed_out())
+    } else {
+        Ok(rest.min(step))
+    }
+}
+
+/// A socket where every read and write may take at most `step` and none starts or outlasts `deadline`. TLS sits on top of it, so
+/// a handshake or a record that arrives a byte at a time is bounded too: rustls reads the socket many times for one record, and each
+/// of those reads gets only the time that is left (#1225 review F1).
+struct Bounded {
+    tcp: TcpStream,
+    step: Duration,
+    deadline: Instant,
+}
+
+impl Bounded {
+    /// A timeout that fired because the deadline came says so, not "would block".
+    fn after(&self, e: io::Error) -> io::Error {
+        if matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) && Instant::now() >= self.deadline
+        {
+            timed_out()
+        } else {
+            e
+        }
+    }
+}
+
+impl Read for Bounded {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.tcp
+            .set_read_timeout(Some(left(self.step, self.deadline)?))?;
+        self.tcp.read(buf).map_err(|e| self.after(e))
+    }
+}
+
+impl Write for Bounded {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.tcp
+            .set_write_timeout(Some(left(self.step, self.deadline)?))?;
+        self.tcp.write(buf).map_err(|e| self.after(e))
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.tcp.flush()
+    }
+}
+
+/// Connects to one of the host's addresses (in the dialler's order), each attempt for at most the time left, and returns the stream,
+/// over TLS for `https`, with every later read and write bounded the same way. Resolving the name is the system's and not bounded here.
+fn open_within(url: &Url, step: Duration, deadline: Instant) -> io::Result<Box<dyn Stream>> {
+    let addrs =
+        agora_protocol::dial::order((url.host.as_str(), url.port).to_socket_addrs()?.collect());
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no address");
+    let mut tcp = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, left(step, deadline)?) {
+            Ok(s) => {
+                tcp = Some(s);
+                break;
+            }
+            Err(e) => last = e,
+        }
+    }
+    let Some(tcp) = tcp else {
+        return Err(if Instant::now() >= deadline {
+            timed_out()
+        } else {
+            last
+        });
+    };
+    let bounded = Bounded {
+        tcp,
+        step,
+        deadline,
+    };
     if !url.https {
-        return Ok(Box::new(tcp));
+        return Ok(Box::new(bounded));
     }
     let name = rustls::pki_types::ServerName::try_from(url.host.clone())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let conn = rustls::ClientConnection::new(tls_config()?, name)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    Ok(Box::new(rustls::StreamOwned::new(conn, tcp)))
+    Ok(Box::new(rustls::StreamOwned::new(conn, bounded)))
 }
 
-/// Sends one prepared request; returns the HTTP status. Blocking: call it from a thread of its own.
+/// Sends one prepared request; returns the HTTP status. Blocking: call it from a thread of its own. Each step may take
+/// [`TIMEOUT`] and the whole post [`SEND_DEADLINE`].
 pub fn send(url: &Url, bytes: &[u8]) -> io::Result<u16> {
-    exchange(open(url)?, bytes)
+    exchange(
+        open_within(url, TIMEOUT, Instant::now() + SEND_DEADLINE)?,
+        bytes,
+    )
 }
 
 /// `GET` the URL and return the status and the body (at most `max` bytes; more is an error). HTTP/1.0 so the body is not
-/// chunked. Blocking.
+/// chunked. Blocking. Each step may take [`TIMEOUT`] and the whole exchange [`GET_DEADLINE`].
 pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
-    let mut s = open(url)?;
+    get_within(url, max, TIMEOUT, Instant::now() + GET_DEADLINE)
+}
+
+/// [`get`] where connecting, and then each read or write (inside TLS too), may take at most `step`, and the whole exchange must
+/// end by `deadline` (`TimedOut` otherwise), so a server that sends a byte now and then cannot hold the caller. A redirect is not
+/// followed: its status comes back like any other.
+pub fn get_within(
+    url: &Url,
+    max: usize,
+    step: Duration,
+    deadline: Instant,
+) -> io::Result<(u16, Vec<u8>)> {
+    let mut s = open_within(url, step, deadline)?;
     let req = format!(
         "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: agora\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
         url.path, url.host
@@ -215,6 +318,8 @@ pub fn get(url: &Url, max: usize) -> io::Result<(u16, Vec<u8>)> {
             Ok(n) => n,
             // A server that closes without a TLS close_notify has still sent its whole body.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
+            // rustls may wrap the socket's error; past the deadline it is the deadline whatever it says.
+            Err(_) if Instant::now() >= deadline => return Err(timed_out()),
             Err(e) => return Err(e),
         };
         if n == 0 {
@@ -317,6 +422,53 @@ mod tests {
         let u = Url::parse(&format!("http://127.0.0.1:{port}/api.json")).unwrap();
         assert_eq!(get(&u, 100).unwrap(), (200, b"0123456789".to_vec()));
         assert!(get(&u, 5).is_err());
+    }
+
+    /// #1225 review F1: a server that answers the TLS handshake with a record header and then one byte now and then (each within a
+    /// step) is given up at the deadline, not after every step again; so is the same over plain http.
+    #[test]
+    fn a_server_that_drips_is_given_up_at_the_deadline_over_https_and_http() {
+        use std::net::TcpListener;
+        for https in [true, false] {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = l.local_addr().unwrap().port();
+            std::thread::spawn(move || {
+                let (mut s, _) = l.accept().unwrap();
+                let mut hello = [0u8; 4096];
+                let _ = s.read(&mut hello);
+                // A handshake record promising 16 KiB (TLS), or a status line and a body (http), then a byte every 100 ms.
+                let head: &[u8] = if https {
+                    &[0x16, 0x03, 0x03, 0x40, 0x00]
+                } else {
+                    b"HTTP/1.0 200 OK\r\n\r\n"
+                };
+                let _ = s.write_all(head);
+                while s.write_all(b"\0").is_ok() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            });
+            let scheme = if https { "https" } else { "http" };
+            let u = Url::parse(&format!("{scheme}://127.0.0.1:{port}/index.json")).unwrap();
+            let started = Instant::now();
+            let e = get_within(
+                &u,
+                1 << 20,
+                Duration::from_millis(400),
+                started + Duration::from_millis(1200),
+            )
+            .unwrap_err();
+            let took = started.elapsed();
+            assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{scheme}: {e}");
+            assert!(took < Duration::from_secs(4), "{scheme} took {took:?}");
+        }
+    }
+
+    /// Nothing starts after the deadline: not even the connection.
+    #[test]
+    fn nothing_starts_after_the_deadline() {
+        let u = Url::parse("http://127.0.0.1:9/x").unwrap();
+        let e = get_within(&u, 10, Duration::from_secs(1), Instant::now()).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
     }
 
     #[test]

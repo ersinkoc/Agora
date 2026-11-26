@@ -25,6 +25,7 @@ dependencies = [
 name = "agora-desktop-tunnel"
 version = "0.3.39"
 dependencies = [
+ "agora-platform",
  "ring",
  "rustls",
  "tokio",

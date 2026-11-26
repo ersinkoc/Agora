@@ -74,8 +74,15 @@ taken, and keeps it in `link/panel-port`; a later run that finds it taken refuse
 It first checks that the hub answers and presents a certificate from the pinned CA, so a hub that is down or foreign is said at once.
 It runs until Ctrl+C and listens on nothing otherwise. The `Host` check (requirement 2) was already in the desktop tunnel (threat
 model T22) when this was built; `Origin` is now checked in the same place (a request with an `Origin` other than the tunnel's own is
-refused), which covers both. Threat model T27. Not built: opening the browser itself (the command prints the address; launching a
-browser needs per-OS code in `agora-platform`), the desktop app's own use of a stored port, and ADR-0062's first-run window.
-Known gap (threat model T27): a fixed, predictable port can be bound by another local user while the panel is not running (and, on
-Windows, shared with a `SO_REUSEADDR` binder even while it runs, since tokio sets no exclusive bind); the desktop tunnel has the same
-exposure. The mitigation is a follow-up, an exclusive bind in `agora-platform`. A port that cannot be saved is reported (`cli-panel-port-unsaved`).
+refused), which covers both. Threat model T27. A port that cannot be saved is reported (`cli-panel-port-unsaved`).
+Built later (roadmap M7.6): the command opens the address in the browser through `agora_platform::open_url` when a person is at a
+terminal on a machine with a screen (not without a terminal, in CI, over SSH, on Linux without a display, or with `AGORA_NO_BROWSER`
+set), and prints it in any case; `agora web` keeps the same gates except the terminal (a desktop launcher or shortcut runs it with
+none), and on a machine that only joined a hub runs the panel. The forwarder's port, and the desktop
+app's tunnel port, are bound exclusively (`agora_platform::bind_loopback_exclusive`: `SO_EXCLUSIVEADDRUSE` on Windows; no
+`SO_REUSEPORT` on Linux and macOS, checked), so no other program can bind beside it while it runs. Not built: the desktop app's own use
+of a stored port, and plain `agora` on such a machine opening the panel by itself (it would hold the terminal for the forwarder).
+Known gap (threat model T27): a fixed, predictable port can still be bound by another local user while the panel is not running.
+To verify on Windows (compile-checked only here): with `SO_EXCLUSIVEADDRUSE`, Windows may keep the port unbindable while connections
+the panel closed are in `TIME_WAIT`, so `agora panel` run again at once after Ctrl+C could report the port taken (and the desktop app
+fall back to another port).

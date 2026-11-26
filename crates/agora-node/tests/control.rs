@@ -1255,6 +1255,56 @@ fn an_adapter_approval_waits_for_a_signed_decision_and_is_relayed() {
     }
 }
 
+/// ADR-0021: an adapter's usage report names the price catalog's model when the kind's `[usage.model_map]` lists the model it
+/// reported; the hub then prices it by that id.
+#[test]
+fn an_adapters_usage_names_the_catalog_model_from_the_model_map() {
+    use v1::event::Body;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    for (tag, map, want) in [
+        (
+            "model-map",
+            "[usage.model_map]\n\"fake/model\" = \"example/model-2026\"\n",
+            "example/model-2026",
+        ),
+        // Negative control: without a map the agent's own id is reported.
+        ("model-map-none", "", "fake/model"),
+    ] {
+        let e = env(tag);
+        add_manifest(
+            &e,
+            "ad.toml",
+            &format!("kind = \"adapted\"\ndisplay_name = \"A\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\"]\n{map}", fake_adapter_path()),
+        );
+        let n = node(&e, NodeLimits::default());
+        let mut c = Client::connect(n.socket().unwrap()).unwrap();
+        let s = started(ok(c.call(start_cmd("adapted"))));
+        ok(c.call(Cmd::AgentPrompt(v1::AgentPrompt {
+            agent_id: s.agent_id.clone(),
+            text: "hello".into(),
+        })));
+        let end = Instant::now() + Duration::from_secs(15);
+        let model = loop {
+            let found = n
+                .events
+                .events_after(0)
+                .into_iter()
+                .find_map(|e| match e.body {
+                    Some(Body::AgentUsageReported(u)) => Some(u.model),
+                    _ => None,
+                });
+            if let Some(m) = found {
+                break m;
+            }
+            assert!(Instant::now() < end, "no usage reported");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(model, want);
+    }
+}
+
 #[test]
 fn with_no_trusted_device_every_decision_is_refused() {
     use agora_node::approvals::signed_message;

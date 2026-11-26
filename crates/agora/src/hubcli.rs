@@ -251,14 +251,20 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
                     .filter(|u| u.starts_with("https://") || u.starts_with("http://")),
             );
         }
-        let (prices, prices_at, bad_overrides) = load_prices(&dir);
-        hub.set_prices(prices, prices_at);
-        if bad_overrides > 0 {
+        let prices = crate::pricefeed::load(&dir);
+        hub.set_prices(prices.catalog, prices.at_ms);
+        if prices.skipped > 0 {
             say.err(
                 key!("cli-hub-prices-skipped"),
-                &[("count", (bad_overrides as i64).into())],
+                &[("count", (prices.skipped as i64).into())],
             );
         }
+        // ADR-0021: the hub takes changes of its price files while it runs, and fetches the catalog by itself once the owner
+        // turned that on (`agora hub prices auto on`); off, it never talks to the internet for prices (ADR-0033).
+        if let Some(url) = crate::pricefeed::auto_url(&dir) {
+            say.out(key!("cli-hub-prices-auto-running"), &[("url", url.into())]);
+        }
+        crate::pricefeed::spawn(dir.clone(), Arc::clone(&hub));
         // ADR-0067 rung 4: a reverse proxy is trusted only while `<hub dir>/remote-proxy` says so (read again every few seconds).
         let sessions = Arc::new(HubSessions::new(Arc::clone(&hub)).with_proxy(Arc::new(
             agora_hub::proxy::ProxyHandle::watch(
@@ -1340,69 +1346,235 @@ pub fn hub_audit(say: &Say, o: &Opts) -> ExitCode {
     }
 }
 
-/// The catalog is a refreshed copy in the hub dir if there is one, else the table bundled with the release; the owner's
-/// `prices.json` overrides sit on top (ADR-0033). Returns the table, when it was refreshed (0 = bundled) and how many
-/// override entries could not be read.
-fn load_prices(dir: &Path) -> (agora_hub::usage::Catalog, u64, usize) {
-    use agora_hub::usage::Catalog;
-    let refreshed = std::fs::read_to_string(dir.join("prices-catalog.json"))
-        .ok()
-        .and_then(|t| Catalog::from_models_dev(&t).ok())
-        .filter(|c| !c.is_empty());
-    let at_ms = refreshed
-        .as_ref()
-        .and_then(|_| std::fs::metadata(dir.join("prices-catalog.json")).ok())
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
-    let mut catalog = refreshed.unwrap_or_else(|| (*Catalog::bundled()).clone());
-    let skipped = std::fs::read_to_string(dir.join("prices.json"))
-        .ok()
-        .and_then(|t| catalog.load_overrides(&t).ok())
-        .unwrap_or(0);
-    (catalog, at_ms, skipped)
-}
-
-/// `agora hub prices update [--url URL]`: fetches the live models.dev catalog (only when asked) and keeps it in the hub dir.
+/// `agora hub prices update [--url URL] | set MODEL INPUT OUTPUT [CACHE_READ [CACHE_WRITE]] | unset MODEL | auto on [--url URL] | auto
+/// off | show`: the price table (ADR-0021, ADR-0033; [`crate::pricefeed`]). `update` fetches the catalog once; `set` and `unset` edit the
+/// owner's overrides (USD per million tokens), which win over the catalog; `auto` turns the hub's daily fetch on or off; `show` says
+/// what the hub prices with. A running hub takes each change within a few seconds.
 pub fn hub_prices(say: &Say, o: &Opts) -> ExitCode {
-    use agora_hub::deliver::{get, Url};
-    if o.positional.first().map(String::as_str) != Some("update") {
+    use crate::pricefeed as pf;
+    let dir = hub_dir(o);
+    let args: Vec<&str> = o.positional.iter().map(String::as_str).collect();
+    let usage = || {
         say.err(key!("cli-bad-arguments"), &[]);
         say.err(key!("cli-usage"), &[]);
-        return ExitCode::from(2);
+        ExitCode::from(2)
+    };
+    let overrides_failed = |e: pf::OverrideError| {
+        let (id, args): (&str, Vec<(&str, crate::Arg)>) = match e {
+            pf::OverrideError::Unreadable => (
+                key!("cli-hub-prices-overrides-unreadable"),
+                vec![(
+                    "file",
+                    dir.join(pf::OVERRIDES_FILE).display().to_string().into(),
+                )],
+            ),
+            pf::OverrideError::BadModel => (key!("cli-hub-prices-bad-model"), vec![]),
+            pf::OverrideError::BadPrice => (key!("cli-hub-prices-bad-price"), vec![]),
+            pf::OverrideError::TooMany => (
+                key!("cli-hub-prices-too-many"),
+                vec![("count", (pf::MAX_OVERRIDES as i64).into())],
+            ),
+            pf::OverrideError::Store(reason) => (
+                key!("cli-hub-prices-store-failed"),
+                vec![("reason", reason.into())],
+            ),
+        };
+        say.err(id, &args);
+        ExitCode::from(1)
+    };
+    match args.as_slice() {
+        ["update"] => {
+            if let Err(e) = private_hub_dir(&dir) {
+                say.err(key!("cli-hub-prices-store-failed"), &[("reason", e.into())]);
+                return ExitCode::from(1);
+            }
+            let get = |u: &agora_hub::deliver::Url, max: usize| agora_hub::deliver::get(u, max);
+            // Asked for by the owner: a smaller catalog (a mirror of a few models) is theirs to choose, so no floor.
+            match pf::update(&dir, o.url.as_deref().unwrap_or(pf::CATALOG_URL), 0, &get) {
+                Ok(n) => {
+                    say.out(
+                        key!("cli-hub-prices-updated"),
+                        &[("count", (n as i64).into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    say_fetch_error(say, &e);
+                    ExitCode::from(1)
+                }
+            }
+        }
+        ["set", model, input, output, rest @ ..] if rest.len() <= 2 => {
+            let parsed: Option<Vec<f64>> = [*input, *output]
+                .into_iter()
+                .chain(rest.iter().copied())
+                .map(pf::parse_price)
+                .collect();
+            let Some(p) = parsed else {
+                return overrides_failed(pf::OverrideError::BadPrice);
+            };
+            let usd = [
+                p[0],
+                p[1],
+                p.get(2).copied().unwrap_or(0.0),
+                p.get(3).copied().unwrap_or(0.0),
+            ];
+            if let Err(e) = private_hub_dir(&dir) {
+                return overrides_failed(pf::OverrideError::Store(e));
+            }
+            match pf::set_override(&dir, model, usd) {
+                Ok(()) => {
+                    say.out(key!("cli-hub-prices-set"), &[("model", (*model).into())]);
+                    ExitCode::SUCCESS
+                }
+                Err(e) => overrides_failed(e),
+            }
+        }
+        ["unset", model] => match pf::unset_override(&dir, model) {
+            Ok(true) => {
+                say.out(key!("cli-hub-prices-unset"), &[("model", (*model).into())]);
+                ExitCode::SUCCESS
+            }
+            Ok(false) => {
+                say.err(
+                    key!("cli-hub-prices-no-override"),
+                    &[("model", (*model).into())],
+                );
+                ExitCode::from(1)
+            }
+            Err(e) => overrides_failed(e),
+        },
+        ["auto", "on"] => {
+            let url = o.url.as_deref();
+            if url.is_some_and(|u| agora_hub::deliver::Url::parse(u).is_none()) {
+                say_fetch_error(say, &pf::FetchError::Address);
+                return ExitCode::from(2);
+            }
+            let set = private_hub_dir(&dir)
+                .and_then(|()| pf::set_auto(&dir, Some(url)).map_err(|e| e.to_string()));
+            match set {
+                Ok(()) => {
+                    say.out(
+                        key!("cli-hub-prices-auto-on"),
+                        &[("url", url.unwrap_or(pf::CATALOG_URL).into())],
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    say.err(key!("cli-hub-prices-store-failed"), &[("reason", e.into())]);
+                    ExitCode::from(1)
+                }
+            }
+        }
+        ["auto", "off"] => match pf::set_auto(&dir, None) {
+            Ok(()) => {
+                say.out(key!("cli-hub-prices-auto-off"), &[]);
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                say.err(
+                    key!("cli-hub-prices-store-failed"),
+                    &[("reason", e.to_string().into())],
+                );
+                ExitCode::from(1)
+            }
+        },
+        ["show"] => prices_show(say, &dir),
+        _ => usage(),
     }
-    let dir = hub_dir(o);
-    let fetched = (|| -> Result<usize, String> {
-        let url = Url::parse(o.url.as_deref().unwrap_or("https://models.dev/api.json"))
-            .ok_or("not an http:// or https:// address")?;
-        let (status, body) = get(&url, 64 * 1024 * 1024).map_err(|e| e.to_string())?;
-        if status != 200 {
-            return Err(format!("status {status}"));
-        }
-        let text = String::from_utf8(body).map_err(|e| e.to_string())?;
-        let count = agora_hub::usage::Catalog::from_models_dev(&text)
-            .map_err(|e| e.to_string())?
-            .len();
-        if count == 0 {
-            return Err("no prices in the answer".into());
-        }
-        private_hub_dir(&dir)?;
-        std::fs::write(dir.join("prices-catalog.json"), text).map_err(|e| e.to_string())?;
-        Ok(count)
-    })();
-    match fetched {
-        Ok(n) => {
-            say.out(
-                key!("cli-hub-prices-updated"),
-                &[("count", (n as i64).into())],
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            say.err(key!("cli-hub-prices-failed"), &[("reason", e.into())]);
-            ExitCode::from(1)
+}
+
+fn say_fetch_error(say: &Say, e: &crate::pricefeed::FetchError) {
+    use crate::pricefeed::FetchError as F;
+    match e {
+        F::Address => say.err(key!("cli-hub-prices-bad-url"), &[]),
+        F::Unreachable(reason) | F::Store(reason) => say.err(
+            key!("cli-hub-prices-failed"),
+            &[("reason", reason.clone().into())],
+        ),
+        F::Status(s) => say.err(
+            key!("cli-hub-prices-status"),
+            &[("status", i64::from(*s).into())],
+        ),
+        F::NotCatalog => say.err(key!("cli-hub-prices-not-catalog"), &[]),
+        F::Shrunk { got, floor } => say.err(
+            key!("cli-hub-prices-shrunk"),
+            &[
+                ("count", (*got as i64).into()),
+                ("floor", (*floor as i64).into()),
+            ],
+        ),
+    }
+}
+
+/// `agora hub prices show`: where the prices come from, whether the hub fetches them by itself and how its last fetch went, and the
+/// owner's overrides.
+fn prices_show(say: &Say, dir: &Path) -> ExitCode {
+    use crate::pricefeed as pf;
+    let loaded = pf::load(dir);
+    let count = (loaded.catalog.len() as i64).into();
+    if loaded.at_ms == 0 {
+        say.out(key!("cli-hub-prices-show-bundled"), &[("count", count)]);
+    } else {
+        say.out(
+            key!("cli-hub-prices-show-refreshed"),
+            &[("count", count), ("at", utc(loaded.at_ms).into())],
+        );
+    }
+    match pf::auto_url(dir) {
+        None => say.out(key!("cli-hub-prices-show-auto-off"), &[]),
+        Some(url) => {
+            say.out(key!("cli-hub-prices-show-auto-on"), &[("url", url.into())]);
+            if let Some(st) = pf::read_status(dir) {
+                let at = utc(st["at_ms"].as_u64().unwrap_or(0));
+                if st["ok"].as_bool() == Some(true) {
+                    say.out(key!("cli-hub-prices-show-last-ok"), &[("at", at.into())]);
+                } else {
+                    say.out(
+                        key!("cli-hub-prices-show-last-failed"),
+                        &[
+                            ("at", at.into()),
+                            (
+                                "code",
+                                st["error"].as_str().unwrap_or("").to_string().into(),
+                            ),
+                        ],
+                    );
+                }
+            }
         }
     }
+    match pf::overrides(dir) {
+        Ok(list) if list.is_empty() => say.out(key!("cli-hub-prices-show-no-overrides"), &[]),
+        Ok(list) => {
+            for (model, p) in list {
+                match p {
+                    Some([i, o, cr, cw]) => say.out(
+                        key!("cli-hub-prices-show-override"),
+                        &[
+                            ("model", model.into()),
+                            ("input", i.to_string().into()),
+                            ("output", o.to_string().into()),
+                            ("cache_read", cr.to_string().into()),
+                            ("cache_write", cw.to_string().into()),
+                        ],
+                    ),
+                    None => say.out(
+                        key!("cli-hub-prices-show-override-bad"),
+                        &[("model", model.into())],
+                    ),
+                }
+            }
+        }
+        Err(_) => say.err(
+            key!("cli-hub-prices-overrides-unreadable"),
+            &[(
+                "file",
+                dir.join(pf::OVERRIDES_FILE).display().to_string().into(),
+            )],
+        ),
+    }
+    ExitCode::SUCCESS
 }
 
 /// Starts the SSH tunnels listed in `<hub dir>/ssh-machines` (ADR-0032) and keeps `<hub dir>/ssh-status` up to date.

@@ -5,6 +5,11 @@
 //! interface opens signed in: the terminal client by default, the browser with `agora web` or `--ui web`. Closing or killing the
 //! interface changes nothing for the hub, the node or the agents: they are processes of their own. `agora status` shows them and
 //! `agora down` stops what the front door started.
+//!
+//! A browser is opened only on a machine with a screen, outside CI and unless `AGORA_NO_BROWSER` is set ([`may_open_browser`]);
+//! otherwise the address is printed. `agora web` needs no terminal for it (a desktop launcher or shortcut runs it with none); `agora
+//! panel`, which runs until Ctrl+C, does. On a machine that only joined a hub elsewhere, `agora web` runs the hub's panel (`agora panel`, ADR-0056 Amendment A),
+//! which holds the terminal while it runs and fails when the hub does not answer.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -669,7 +674,8 @@ fn wants_autostart(answer: Option<&str>) -> bool {
     matches!(answer, Some("" | "y" | "yes" | "e" | "evet"))
 }
 
-/// `agora web`: makes sure this machine's Agora runs, then opens it in the browser, signed in.
+/// `agora web`: makes sure this machine's Agora runs, then opens it in the browser, signed in. A machine that only joined a hub
+/// elsewhere opens the hub's panel through its node (ADR-0056 Amendment A): `agora web` there is `agora panel`, and runs while it does.
 pub fn web(say: &Say) -> ExitCode {
     let h = home();
     let Some(m) = load(&h) else {
@@ -679,7 +685,35 @@ pub fn web(say: &Say) -> ExitCode {
     if let Err(code) = up(say, &h, &m, None) {
         return code;
     }
+    if !m.has("hub") && m.has("node") {
+        return crate::panelcmd::panel(say);
+    }
     open(say, &h, &m, Ui::Web)
+}
+
+/// The variable that keeps every Agora command from opening a browser by itself (it prints the address instead).
+pub(crate) const NO_BROWSER_ENV: &str = "AGORA_NO_BROWSER";
+
+/// Whether a command may open a browser by itself: on a machine with a screen to show it on (not over SSH, not Linux without a display:
+/// [`Ui::default_for`]), outside CI, unless [`NO_BROWSER_ENV`] says no, and, for a command that `needs_terminal`, only for a person at a
+/// terminal (`at_terminal`). `agora web` does not need one: a desktop launcher or shortcut runs it without a terminal and must still open
+/// the browser. `env` says whether a variable is set to something. Otherwise the command prints the address, which it does in any case.
+pub(crate) fn may_open_browser(
+    needs_terminal: bool,
+    at_terminal: bool,
+    env: &dyn Fn(&str) -> bool,
+) -> bool {
+    (at_terminal || !needs_terminal)
+        && !env("CI")
+        && !env(NO_BROWSER_ENV)
+        && Ui::default_for(env) == Ui::Web
+}
+
+/// [`may_open_browser`] for this process: whether standard input is a terminal, and this process's environment.
+pub(crate) fn may_open_browser_here(needs_terminal: bool) -> bool {
+    may_open_browser(needs_terminal, std::io::stdin().is_terminal(), &|k| {
+        std::env::var_os(k).is_some_and(|v| !v.is_empty())
+    })
 }
 
 /// A failure to take or change a role's lock, said in words: a guard held too long by another process (stopped or hung) is named with
@@ -751,7 +785,8 @@ fn open(say: &Say, home: &Path, m: &Machine, ui: Ui) -> ExitCode {
             };
             // The code is in the fragment, which the browser never sends; the page trades it for a session at once.
             let url = format!("https://localhost:{port}/#code={code}");
-            if agora_platform::open_url(&url).is_ok() {
+            // No terminal needed: a desktop launcher or shortcut runs `agora web` without one.
+            if may_open_browser_here(false) && agora_platform::open_url(&url).is_ok() {
                 say.out(key!("frontdoor-web-opened"), &[]);
             } else {
                 say.out(key!("frontdoor-web-url"), &[("url", url.into())]);
@@ -1912,6 +1947,34 @@ mod tests {
             0o600
         );
         let _ = std::fs::remove_dir_all(h);
+    }
+
+    #[test]
+    fn a_browser_is_opened_only_on_a_machine_with_a_screen_and_by_the_panel_only_at_a_terminal() {
+        let env = |set: &'static [&'static str]| move |k: &str| set.contains(&k);
+        let desktop: &[&str] = &["DISPLAY", "WAYLAND_DISPLAY"];
+        for needs_terminal in [false, true] {
+            assert!(may_open_browser(needs_terminal, true, &env(desktop)));
+            // Negative controls, one reason each: CI, the opt-out, SSH, and Linux with no display; for every command.
+            for refused in [
+                &["DISPLAY", "CI"][..],
+                &["DISPLAY", NO_BROWSER_ENV],
+                &["DISPLAY", "SSH_CONNECTION"],
+            ] {
+                assert!(
+                    !may_open_browser(needs_terminal, true, &env(refused)),
+                    "{refused:?}"
+                );
+            }
+            if std::env::consts::OS == "linux" {
+                assert!(!may_open_browser(needs_terminal, true, &env(&[])));
+            }
+        }
+        // Without a terminal: `agora web` (a desktop launcher or shortcut) still opens it; `agora panel` does not.
+        assert!(may_open_browser(false, false, &env(desktop)));
+        assert!(!may_open_browser(true, false, &env(desktop)));
+        // Without a terminal the other gates still hold for `agora web`.
+        assert!(!may_open_browser(false, false, &env(&["DISPLAY", "CI"])));
     }
 
     #[test]

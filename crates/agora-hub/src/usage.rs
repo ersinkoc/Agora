@@ -123,7 +123,8 @@ impl Catalog {
 
     /// The price of `model`: an override, then the catalog by the id as given (`provider/model`), then a bare model id
     /// (what agents usually report) by its first-party provider, or by the only provider that lists it. A bare id that
-    /// several providers list at their own prices has no price rather than a guess.
+    /// several providers list at their own prices has no price rather than a guess. An override of `provider/model` wins for
+    /// the bare id too: it replaces that provider's catalog price before the choice is made.
     pub fn price(&self, model: &str) -> Option<Price> {
         if let Some(p) = self.overrides.get(model).or_else(|| self.prices.get(model)) {
             return Some(*p);
@@ -132,17 +133,16 @@ impl Catalog {
             return None;
         }
         let suffix = format!("/{model}");
-        let found: Vec<(&str, &Price)> = self
-            .prices
-            .iter()
-            .filter_map(|(k, p)| k.strip_suffix(suffix.as_str()).map(|prov| (prov, p)))
-            .collect();
-        if let [(_, p)] = found.as_slice() {
-            return Some(**p);
+        let mut found: BTreeMap<&str, &Price> = BTreeMap::new();
+        for (k, p) in self.prices.iter().chain(self.overrides.iter()) {
+            if let Some(prov) = k.strip_suffix(suffix.as_str()) {
+                found.insert(prov, p);
+            }
         }
-        FIRST_PARTY
-            .iter()
-            .find_map(|f| found.iter().find(|(prov, _)| prov == f).map(|(_, p)| **p))
+        if found.len() == 1 {
+            return found.values().next().map(|p| **p);
+        }
+        FIRST_PARTY.iter().find_map(|f| found.get(f).map(|p| **p))
     }
 
     /// Reads the hub owner's override file: `{ "<model>": { "input": USD, "output": USD, "cache_read": USD,
@@ -405,6 +405,36 @@ mod tests {
         );
         assert_eq!(c.price("dup"), None, "two resellers, two prices: no guess");
         assert_eq!(c.price(""), None);
+    }
+
+    /// An override of `provider/model` is the price of the bare id the agent reports, too (it was only found by the full id).
+    #[test]
+    fn an_override_wins_for_the_bare_id_an_agent_reports() {
+        let mut c = Catalog::from_models_dev(
+            r#"{"anthropic":{"models":{"claude-x":{"cost":{"input":3,"output":15}}}},
+                "reseller":{"models":{"claude-x":{"cost":{"input":4,"output":20}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.price("claude-x").unwrap().input, 3_000_000, "first party");
+        c.set_override(
+            "anthropic/claude-x",
+            Price {
+                input: 1_000_000,
+                output: 2_000_000,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("claude-x").unwrap().input, 1_000_000);
+        assert_eq!(c.price("reseller/claude-x").unwrap().input, 4_000_000);
+        // A private model only the owner priced is found by its bare id as well.
+        c.set_override(
+            "private/solo",
+            Price {
+                input: 7,
+                ..Price::default()
+            },
+        );
+        assert_eq!(c.price("solo").unwrap().input, 7);
     }
 
     #[test]

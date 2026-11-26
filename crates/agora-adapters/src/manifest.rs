@@ -315,11 +315,47 @@ pub struct UsageFile {
     pub mode: UsageMode,
 }
 
-/// `[usage]`: other keys (`quota_profiles`, `model_map`) are accepted and not read yet.
+/// `[usage]`: other keys (`quota_profiles`) are accepted and not read yet.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UsageSpec {
     pub source: Option<String>,
     pub file: Option<UsageFile>,
+    /// `[usage.model_map]` (ADR-0021): the model id the agent reports → the price catalog's `provider/model` id. The node reports the
+    /// mapped id with the agent's usage, so the hub prices it; an id not listed is reported as the agent gave it. At most
+    /// [`MAX_MODEL_MAP`] entries of at most [`MAX_MODEL_ID`] bytes each.
+    #[serde(default)]
+    pub model_map: BTreeMap<String, String>,
+}
+
+/// Most entries a `[usage.model_map]` may have, and the longest model id on either side of one.
+pub const MAX_MODEL_MAP: usize = 256;
+pub const MAX_MODEL_ID: usize = 128;
+
+impl UsageSpec {
+    /// The catalog's id for a model the agent reported: its `[usage.model_map]` entry, or the id unchanged.
+    pub fn catalog_model<'a>(&'a self, reported: &'a str) -> &'a str {
+        self.model_map
+            .get(reported)
+            .map_or(reported, String::as_str)
+    }
+}
+
+/// Whether `[usage.model_map]` is within its bounds: a reported id is printable text without spaces, and a catalog id is exactly
+/// `provider/model`, both parts non-empty.
+fn model_map_ok(map: &BTreeMap<String, String>) -> bool {
+    let id_ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= MAX_MODEL_ID
+            && s.chars().all(|c| !c.is_control() && !c.is_whitespace())
+    };
+    map.len() <= MAX_MODEL_MAP
+        && map.iter().all(|(from, to)| {
+            id_ok(from)
+                && id_ok(to)
+                && to
+                    .split_once('/')
+                    .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty() && !m.contains('/'))
+        })
 }
 
 /// Most `[[quota.window]]` entries a manifest may list, and the longest JSON path in one.
@@ -647,6 +683,13 @@ impl Manifest {
             if !paths_ok || !glob_ok || u.format.as_deref().is_some_and(|f| f != "jsonl") {
                 return Err(invalid("usage.file"));
             }
+        }
+        if self
+            .usage
+            .as_ref()
+            .is_some_and(|u| !model_map_ok(&u.model_map))
+        {
+            return Err(invalid("usage.model_map"));
         }
         if self
             .structured
@@ -1090,6 +1133,49 @@ mod usage_tests {
             String::new()
         };
         format!("{head}{u}[quota]\n{tail}")
+    }
+
+    /// ADR-0021: `[usage.model_map]` is read and bounded; an id it does not list is reported as given.
+    #[test]
+    fn a_model_map_is_read_and_bounded() {
+        let m = Manifest::parse(&format!(
+            "{}[usage.model_map]\n\"big-1\" = \"example/big-1-2026\"\n",
+            with(GOOD)
+        ))
+        .unwrap();
+        let u = m.usage.unwrap();
+        assert_eq!(u.catalog_model("big-1"), "example/big-1-2026");
+        assert_eq!(u.catalog_model("other"), "other");
+        // Negative control: no map, nothing changes.
+        assert!(Manifest::parse(&with(GOOD))
+            .unwrap()
+            .usage
+            .unwrap()
+            .model_map
+            .is_empty());
+        let long = "x".repeat(MAX_MODEL_ID + 1);
+        for bad in [
+            "\"a\" = \"no-provider\"".to_string(),
+            "\"a\" = \"/m\"".to_string(),
+            "\"a\" = \"p/\"".to_string(),
+            "\"a\" = \"p/m/x\"".to_string(),
+            "\"a b\" = \"p/m\"".to_string(),
+            "\"\" = \"p/m\"".to_string(),
+            "\"a\" = \"p/m\\n\"".to_string(),
+            format!("\"{long}\" = \"p/m\""),
+            format!("\"a\" = \"p/{long}\""),
+        ] {
+            let text = format!("{}[usage.model_map]\n{bad}\n", with(GOOD));
+            assert!(Manifest::parse(&text).is_err(), "{bad}");
+        }
+        let many: String = (0..=MAX_MODEL_MAP)
+            .map(|i| format!("\"m{i}\" = \"p/m{i}\"\n"))
+            .collect();
+        assert!(Manifest::parse(&format!("{}[usage.model_map]\n{many}", with(GOOD))).is_err());
+        let enough: String = (0..MAX_MODEL_MAP)
+            .map(|i| format!("\"m{i}\" = \"p/m{i}\"\n"))
+            .collect();
+        assert!(Manifest::parse(&format!("{}[usage.model_map]\n{enough}", with(GOOD))).is_ok());
     }
 
     /// ADR-0091: `[quota]` is for a kind with `[usage.file]`, needs `min_engine` 5, and its paths are checked.

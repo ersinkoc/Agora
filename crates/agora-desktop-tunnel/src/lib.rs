@@ -296,9 +296,14 @@ async fn open_with_limit(
 ) -> Result<Tunnel, TunnelError> {
     let name = server_name(hub)?;
     let tls = connector(ca_pem)?;
-    // Only the loopback interface: the tunnel is for this machine's webview, never for the network.
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .await
+    // Only the loopback interface: the tunnel is for this machine's webview, never for the network. Bound exclusively, so no other
+    // program can bind the same port beside it while it runs (threat model T27; Windows lets a `SO_REUSEADDR` binder share a port
+    // that tokio bound).
+    let listener = agora_platform::bind_loopback_exclusive(port)
+        .and_then(|l| {
+            l.set_nonblocking(true)?;
+            TcpListener::from_std(l)
+        })
         .map_err(|_| TunnelError::Listen)?;
     let local = listener.local_addr().map_err(|_| TunnelError::Listen)?;
     let hub = hub.to_string();

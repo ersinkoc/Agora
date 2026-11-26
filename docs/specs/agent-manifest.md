@@ -126,7 +126,9 @@ output = "message.usage.output_tokens"
 mode = "delta"                          # delta: each line adds; total: each line is the session's running total
 
 [usage.model_map]
-# agent-reported model id → models.dev provider/model id (ADR-0021)
+# agent-reported model id → models.dev provider/model id (ADR-0021). The node reports the mapped id with the agent's usage (from the
+# usage file and from an adapter); an id not listed is reported as given. At most 256 entries; each id at most 128 bytes, no spaces;
+# the value is exactly `provider/model`. A map outside these bounds makes the manifest invalid (`usage.model_map`).
 "example-large" = "example-provider/example-large-2026"
 
 # Screen rules: fallback state detection from the live bottom of the buffer.

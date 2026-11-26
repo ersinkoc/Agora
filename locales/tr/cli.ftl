@@ -33,7 +33,8 @@ cli-usage =
       agora password set|clear|status [--hub-dir DİZİN]
       agora remote tailscale [--serve] [--port N] | status | off [--hub-dir DIR]
       agora hub notify [--ntfy URL | --webhook URL | --test] [--hub-dir DIR]
-      agora hub prices update [--url URL] [--hub-dir DIR]
+      agora hub prices update [--url URL] | set MODEL GİRİŞ ÇIKIŞ [ÖNBELLEK_OKUMA [ÖNBELLEK_YAZMA]] | unset MODEL [--hub-dir DİZİN]
+      agora hub prices auto on [--url URL] | auto off | show [--hub-dir DİZİN]
       agora hub ssh [add AD HEDEF [--port N]] [--hub-dir DIR]
       agora hub backup [DOSYA] [--keep N] [--hub-dir DİZİN]
       agora hub restore DOSYA [--hub-dir DİZİN]
@@ -336,6 +337,30 @@ cli-hub-notify-unreachable = { $target } hedefine ulaşılamadı: { $reason }
 cli-hub-prices-updated = Fiyat tablosu güncellendi: { $count } model.
 cli-hub-prices-failed = Fiyat tablosu güncellenemedi: { $reason }
 cli-hub-prices-skipped = prices.json içindeki { $count } kayıt anlaşılamadı ve yok sayılıyor. Her kayıtta giriş ve çıkış fiyatı (milyon token başına USD) olmalı.
+cli-hub-prices-auto-running = Hub fiyat tablosunu { $url } adresinden kendisi, yaklaşık günde bir alıyor ("agora hub prices auto off" durdurur).
+cli-hub-prices-bad-url = Bu bir http:// veya https:// adresi değil.
+cli-hub-prices-status = Fiyat kataloğunun sunucusu { $status } durumuyla yanıt verdi, hiçbir şey değişmedi. Yönlendirme izlenmez: son adresi --url ile verin.
+cli-hub-prices-not-catalog = Yanıt bir fiyat kataloğu değil (ya da çok büyük), hiçbir şey değişmedi.
+cli-hub-prices-shrunk = Katalogda yalnızca { $count } modelin fiyatı var, kullanılan tablonun yarısından az (en az { $floor } gerekir), bu yüzden kullanılmadı.
+cli-hub-prices-store-failed = Hub'ın klasörüne yazılamadı: { $reason }
+cli-hub-prices-set = Hub artık { $model } modelini sizin fiyatınızla hesaplıyor. Çalışan bir hub bunu birkaç saniye içinde kullanır.
+cli-hub-prices-unset = { $model } için fiyatınız kaldırıldı; yeniden kataloğun fiyatı geçerli. Çalışan bir hub bunu birkaç saniye içinde kullanır.
+cli-hub-prices-no-override = { $model } için sizin bir fiyatınız yok.
+cli-hub-prices-bad-model = Model adı boşluksuz, 1 ile 128 karakter arasında olmalı; örneğin anthropic/claude-sonnet-4-5.
+cli-hub-prices-bad-price = Fiyat, milyon token başına ABD doları cinsinden 0 ile 1000000 arasında bir sayıdır.
+cli-hub-prices-too-many = Fiyat listenizde zaten en fazla olan { $count } model var. Birini "agora hub prices unset MODEL" ile kaldırın.
+cli-hub-prices-overrides-unreadable = { $file } bu komutun değiştirebileceği bir fiyat listesi değil, olduğu gibi bırakıldı. Düzeltin ya da silin, sonra yeniden deneyin.
+cli-hub-prices-auto-on = Hub fiyat tablosunu { $url } adresinden kendisi, yaklaşık günde bir alacak; tablosu bir günden eskiyse birkaç dakika içinde başlar. Çalışan bir hub birkaç saniye içinde başlar.
+cli-hub-prices-auto-off = Hub fiyat tablosunu artık kendisi almıyor. "agora hub prices update" istediğinizde bir kez alır.
+cli-hub-prices-show-bundled = Fiyatlar: bu sürümle gelen tablo ({ $count } model).
+cli-hub-prices-show-refreshed = Fiyatlar: { $at } tarihinde alınan tablo ({ $count } model).
+cli-hub-prices-show-auto-off = Kendiliğinden alma: kapalı ("agora hub prices auto on" açar).
+cli-hub-prices-show-auto-on = Kendiliğinden alma: açık, { $url } adresinden, yaklaşık günde bir.
+cli-hub-prices-show-last-ok = Son alma: { $at }, tamam.
+cli-hub-prices-show-last-failed = Son alma: { $at }, başarısız ({ $code }); daha sonra yeniden denenir.
+cli-hub-prices-show-no-overrides = Sizin fiyatlarınız: yok.
+cli-hub-prices-show-override = { $model } için fiyatınız: giriş { $input }, çıkış { $output }, önbellek okuma { $cache_read }, önbellek yazma { $cache_write } (milyon token başına USD).
+cli-hub-prices-show-override-bad = { $model } için fiyatınız anlaşılamadı ve yok sayılıyor (giriş ve çıkış gerekir).
 cli-hub-ssh-started = { $file } dosyasındaki { $count } makineye SSH tünelleri açık tutuluyor.
 cli-hub-ssh-skipped = { $file } dosyasının { $count } satırı anlaşılamadı ve yok sayılıyor. Her satır `AD HEDEF [PORT]` olmalı.
 cli-hub-ssh-none = Henüz SSH makinesi yok. "agora hub ssh add AD HEDEF" ile ekleyin.
@@ -386,6 +411,7 @@ cli-panel-no-port = Panel bu makinede bir port açamadı.
 cli-panel-port-unsaved = Panelin portu kaydedilemedi; bir sonraki "agora panel" başka bir port kullanabilir ve tarayıcınız bunu yeni bir cihaz sayıp yeniden giriş ister. Bu makinedeki node klasörünün yazılabilir olduğunu kontrol edin.
 cli-panel-unreachable = Hub bu makineden yanıt vermiyor, açılacak panel yok. Buradaki ajanlar çalışmaya devam eder.
 cli-panel-untrusted = Hub'ın sertifikası bu makinenin kaydolduğu sertifikadan değil, panel açılmadı.
+cli-panel-opened = Tarayıcınızda açıldı.
 
 # ADR-0062: yalın `agora` (ön kapı), `agora web`, `agora status`, `agora down`.
 frontdoor-welcome = Agora'ya hoş geldiniz. Bu makine ne yapsın?
