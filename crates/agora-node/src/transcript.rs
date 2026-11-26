@@ -1402,13 +1402,18 @@ impl Store {
         Ok(())
     }
 
-    /// ADR-0089 decision 2: the newest half of the bound, whole lines, in a new file that replaces the old one and says it was cut.
+    /// ADR-0089 decision 2: the newest half of the bound, whole lines, in a new file that replaces the old one and says it was cut
+    /// (under a bound below twice its header and mark, the bound less them, so it stays within the bound).
     /// The line after the header holds `high`, the highest id given, so the ids go on past it even when no whole entry fits (review
     /// of #1103: one entry larger than the half kept left a file with no `n` at all).
     fn rotate(&self, path: &Path, high: u64) -> io::Result<()> {
         let mut f = agora_platform::open_read_no_follow(path)?;
         let len = f.metadata()?.len();
-        let keep = self.limits.max_bytes / 2;
+        let mut out = header(true);
+        out.extend(mark(high));
+        // F2120: under a bound below twice the header and the mark, the half less them, so the new file stays within the bound.
+        let keep =
+            (self.limits.max_bytes / 2).min(self.limits.max_bytes.saturating_sub(out.len() as u64));
         let start = len.saturating_sub(keep);
         // F1600: the byte before the half too, so a half that begins on a line start keeps that line (its break is skipped).
         let at = start.saturating_sub(1);
@@ -1422,8 +1427,6 @@ impl Store {
                 .position(|b| *b == b'\n')
                 .map_or(tail.len(), |i| i + 1)
         };
-        let mut out = header(true);
-        out.extend(mark(high));
         out.extend_from_slice(&tail[from..]);
         agora_platform::write_private(path, &out)
     }
@@ -2174,6 +2177,40 @@ mod tests {
         let len = std::fs::metadata(store.path("a").unwrap()).unwrap().len();
         assert!(len <= limits.max_bytes, "{len}");
         assert_eq!(store.read("a").high, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F2120: under a bound below twice a rotated file's header and id mark (79 bytes here), a rotation still stays within it: the
+    /// part kept is the bound less those, when that is less than the half (before, a 140-byte bound left a 141-byte file).
+    #[test]
+    fn a_rotation_under_a_small_bound_stays_within_it() {
+        let dir = temp("small-bound");
+        let limits = Limits {
+            max_bytes: 140,
+            days: 30,
+        };
+        let only_id = |i: u64| {
+            Line::Entry(
+                Box::new(ChatEntry {
+                    entry_id: i,
+                    ..Default::default()
+                }),
+                Side::default(),
+            )
+        };
+        // A file within the bound that keeps the newest entry exists.
+        assert!(header(true).len() + mark(9).len() + encode_line(9, &only_id(9)).len() <= 140);
+        let store = Store::new(&dir, limits, None);
+        let path = store.path("a").unwrap();
+        for i in 1..=9u64 {
+            store.write(&batch("a", i, vec![only_id(i)])).unwrap();
+            let len = std::fs::metadata(&path).unwrap().len();
+            assert!(len <= limits.max_bytes, "after entry {i}: {len}");
+        }
+        let seed = store.read("a");
+        assert_eq!(ids(&seed).last(), Some(&9));
+        assert!(!ids(&seed).contains(&1), "it rotated");
+        assert_eq!(seed.high, 9);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
