@@ -3,11 +3,18 @@
 // none of its panes until the person shows it, keeps the person's grant on the hub (not in the browser) so a reload draws it at once with
 // the real agents, and drops it at the next load once the owner removed it (`agora hub plugin remove`).
 //
+// Then the community catalog (ADR-0114 decision 7, build step 4): an index signed with `ssh-keygen -Y sign` (a key made for the run) is
+// served on this machine; the owner pins the key, turns the catalog on and fetches it; the window lists the plugin as available, read
+// only, with the owner's command; once the owner installs it from the catalog (`--yes`) the window lists it as the hub's and the catalog
+// has nothing more. SHOT_DIR, when set, gets the plugins dialog with the catalog in both themes.
+//
 //   cargo build -p agora -p agora-fake-agent && (cd apps/web && npm ci && npm run gen && npm run build)
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/e2e-plugin-hub.mjs
 //
 // AGORA_BIN names another agora binary (default target/debug/agora); AGORA_TEST_PORT another port for the hub (default 17443).
-import { writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startStack } from './browser-harness.mjs';
 import { pack } from './pack-plugin.mjs';
@@ -79,6 +86,64 @@ try {
   await plugins();
   check((await frames()) === 0 && (await row.count()) === 0 && placeholder.includes('plugin.sample-agents.list'),
     'at the next load it is gone from the window, its pane a placeholder');
+
+  // The community catalog, signed as the maintainer signs it.
+  const key = join(work, 'catalog');
+  execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'catalog', '-f', key]);
+  const archive = Buffer.from(pack(join(root, 'apps/web/plugins/sample')));
+  const m = JSON.parse(readFileSync(join(root, 'apps/web/plugins/sample/agora-plugin.json'), 'utf8'));
+  const index = JSON.stringify({ 'agora-plugin-catalog': 1, serial: 1, plugins: [{ id: m.id, name: m.name, version: m.version, author: m.author,
+    licence: m.licence, description: 'Lists the agents and their states in the theme\'s colours.', capabilities: m.capabilities,
+    sha256: createHash('sha256').update(archive).digest('hex'), size: archive.length, file: `plugins/${m.id}/${m.id}-${m.version}.json` }] });
+  writeFileSync(join(work, 'index.json'), index);
+  execFileSync('ssh-keygen', ['-Y', 'sign', '-f', key, '-n', 'agora-plugin-catalog', join(work, 'index.json')], { stdio: 'ignore' });
+  const cat = join(work, 'cat');
+  mkdirSync(join(cat, 'plugins', m.id), { recursive: true });
+  writeFileSync(join(cat, 'index.json'), index);
+  writeFileSync(join(cat, 'index.json.sig'), readFileSync(join(work, 'index.json.sig')));
+  writeFileSync(join(cat, 'plugins', m.id, `${m.id}-${m.version}.json`), archive);
+  // In a process of its own: the commands below run synchronously, so a server in this process could not answer them.
+  const server = spawn(process.execPath, ['-e', `const fs = require('node:fs'), path = require('node:path');
+    const s = require('node:http').createServer((q, r) => { const f = path.join(${JSON.stringify(cat)}, path.normalize(q.url));
+      fs.readFile(f, (e, b) => { r.writeHead(e ? 404 : 200); r.end(e ? '' : b); }); });
+    s.listen(0, '127.0.0.1', () => console.log(s.address().port));`], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const port = await new Promise((r) => server.stdout.once('data', (d) => r(String(d).trim())));
+  const url = `http://127.0.0.1:${port}/index.json`;
+  try {
+    const keyed = run(['hub', 'plugins', 'key', 'set', `${key}.pub`, '--hub-dir', hubDir]);
+    run(['hub', 'plugins', 'on', '--hub-dir', hubDir]);
+    const updated = run(['hub', 'plugins', 'update', '--url', url, '--hub-dir', hubDir]);
+    check(keyed.includes('SHA256:') && /1 plugins kept, 0 refused/.test(updated), `the owner pins the key and fetches the signed index (${updated.trim().split('\n')[0]})`);
+    await page.reload();
+    await page.waitForSelector('[data-layout-root]');
+    await plugins();
+    const offered = page.locator(`[data-catalog-row="${m.id}"]`);
+    await offered.waitFor();
+    const command = await offered.locator('[data-catalog-command]').innerText();
+    check(command === `agora hub plugins install ${m.id}` && (await offered.getByRole('button').count()) === 0
+      && (await offered.innerText()).includes('The colours of your theme'),
+    `the window lists it from the catalog, read only, with the owner's command (${command})`);
+    if (process.env.SHOT_DIR) {
+      for (const scheme of ['dark', 'light']) {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.waitForTimeout(300);
+        await page.locator('[data-plugins-dialog]').screenshot({ path: join(process.env.SHOT_DIR, `plugin-catalog-${scheme}.png`) });
+      }
+      await page.emulateMedia({ colorScheme: 'dark' });
+    }
+    await done();
+    const installed = run(['hub', 'plugins', 'install', m.id, '--yes', '--hub-dir', hubDir]);
+    check(installed.includes(`Installed ${m.name} ${m.version} (${m.id}) from the catalog`), `the owner installs it from the catalog (${installed.trim().split('\n').pop()})`);
+    await page.reload();
+    await page.waitForSelector('[data-layout-root]');
+    await plugins();
+    await row.waitFor();
+    check((await offered.count()) === 0 && (await page.locator('[data-plugin-catalog]').innerText()).includes('installed already'),
+      'then the window lists it as the hub\'s, and the catalog has nothing more to install');
+    await done();
+  } finally {
+    server.kill();
+  }
   check(errors.length === 0, `no page errors (${errors.join('; ')})`);
 } catch (e) {
   check(false, `the run went through: ${e.message.split('\n')[0]}`);

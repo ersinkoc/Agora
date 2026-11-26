@@ -395,5 +395,8 @@ runs.
   (`schema/fixtures/plugin-catalog/`); the window's list, read only, with the owner's command (`catalog.test.ts`, `hubDialog.test.tsx`).
 - Real hub (`scripts/e2e-plugin-hub.mjs`, headless Chromium with a real hub and node): the owner installs the sample plugin; the window lists
   it as the hub's without Remove and draws none of its panes until the person shows it; then it draws the real agents, and after a reload
-  it is drawn with the grant the hub kept (nothing in this browser's storage); once the owner removes it, the next load drops it.
+  it is drawn with the grant the hub kept (nothing in this browser's storage); once the owner removes it, the next load drops it. Then the
+  catalog: an index signed with `ssh-keygen -Y sign` is served on this machine, the owner pins the key, turns the catalog on and fetches
+  it, the dialog lists the plugin read only with the owner's command (`SHOT_DIR` keeps `plugin-catalog-dark.png` and `-light.png`, as in
+  `screens/`), and once the owner installs it from the catalog the window lists it as the hub's and the catalog has nothing more.
 - Visual: `plugin-desktop-dark` and `plugin-desktop-light` (`scripts/visual-regression.mjs`, under the hub's headers per path).
