@@ -107,6 +107,7 @@ tui-agent-exited = The agent stopped, so it did not get this. Start the agent ag
 tui-start-pick = Start which agent on { $machine }? Press its number, any other key cancels.
 tui-start-pick-page = Start which agent on { $machine }? Press its number, n for the next page ({ $page } of { $pages }), any other key cancels.
 tui-start-item = { $n }  { $name }
+tui-start-item-last = { $n }  { $name }  (last time)
 tui-start-group-untested = Untested (from the ACP registry, not yet tried in Agora)
 tui-start-none = No agent is installed on { $machine }.
 tui-start-signed-only = { $name } downloads its program when it starts, so the machine starts it only when this device signs the start: press f and choose its folder.
@@ -638,7 +639,9 @@ tui-config-approval-needed = The machine waits for your signed approval before s
 ## ADR-0066: the start's settings (model, effort, ...).
 tui-start-settings-step = Settings for the start ({ $n } of { $total })
 tui-start-settings-pick = { $setting }: press its number. Enter keeps the default, Esc cancels the start.
+tui-start-settings-pick-last = { $setting }: press its number. Enter keeps { $value } (your last choice here), 1 the default, Esc cancels the start.
 tui-start-settings-type = { $setting }: type a value and press Enter. Enter alone keeps { $default }; Esc cancels the start.
+tui-start-settings-type-last = { $setting }: Enter keeps { $value } (your last choice here). Type another value, or clear the field to keep { $default }; Esc cancels the start.
 tui-start-settings-default = the default ({ $value })
 tui-start-settings-default-tool = the tool's default
 tui-start-settings-default-word = default

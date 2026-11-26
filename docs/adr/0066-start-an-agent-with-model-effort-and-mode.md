@@ -46,8 +46,14 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
   value for a setting without values, held to the node's rule for a value so what is shown is what is signed, an arrow typing
   nothing there; Enter keeps the default, Backspace goes back, Esc cancels the start), signs the chosen pairs in that
   order with the launch (`directory-action-v4`) and sends them in `AgentLaunch.settings`; nothing chosen sends none. `Session::kind_settings`
-  reads them from the machine's kind list. The quick start (`s`, an unsigned `AgentStart` through the hub) carries no settings, and the
-  TUI does not remember the last choice per kind per machine.
-- **Not built yet:** remembering the TUI's last choice, the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
+  reads them from the machine's kind list. The quick start (`s`, an unsigned `AgentStart` through the hub) carries no settings.
+- **Remembered choices (TUI, built):** the picker preselects the last choice per kind per machine, kept in `tui-start-settings` in the
+  client's Agora folder (`launch::recall`/`remember`: read only up to 64 KiB, at most 256 machine and kind pairs, written after the
+  node accepted the start); Enter keeps the preselected value (said and marked in the list), `1` still picks the tool's default, and a
+  remembered value the kind no longer offers is dropped. Neither client remembers how the agent acts: an option that skips permissions
+  (the only thing the window's warning classifies, `skips_permissions`) is asked and confirmed on every start. A setting has no such
+  flag (the manifest refuses a setting whose arguments skip permissions); if a `mode` setting with a value that does is ever shipped,
+  it needs that flag before it may be remembered.
+- **Not built yet:** the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
   does not specify the policy key's place or the catalog lookup closely enough for a small change), `mode` as a shipped setting, and
   keeping the settings across a resume after a node restart.
