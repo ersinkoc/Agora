@@ -5,6 +5,10 @@
 //! interface opens signed in: the terminal client by default, the browser with `agora web` or `--ui web`. Closing or killing the
 //! interface changes nothing for the hub, the node or the agents: they are processes of their own. `agora status` shows them and
 //! `agora down` stops what the front door started.
+//!
+//! A browser is opened only for a person at a terminal on a machine with a screen ([`may_open_browser`]); otherwise the address is
+//! printed. On a machine that only joined a hub elsewhere, `agora web` runs the hub's panel (`agora panel`, ADR-0056 Amendment A),
+//! which holds the terminal while it runs and fails when the hub does not answer.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};

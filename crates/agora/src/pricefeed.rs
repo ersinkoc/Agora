@@ -11,7 +11,7 @@
 //! wait. A fetch is one bounded HTTPS `GET` (`agora_hub::deliver::get`: no redirect followed, a size cap here and a time cap there),
 //! and an answer is kept only when it is a catalog with prices, written beside the old file and renamed over it, so a bad answer or
 //! an interrupted write leaves the table that was in use. An automatic fetch also refuses a catalog with fewer than half the prices
-//! of the one in use (a truncated or emptied answer).
+//! of the one it fetched before (a truncated or emptied answer; this guard is ours, not the ADR's).
 //!
 //! A running hub watches the three files and takes a change within [`POLL`], so neither an override nor a manual update needs a
 //! restart.
@@ -437,8 +437,14 @@ impl Feed {
         }
         if let (Some(url), Some(due)) = (self.url.clone(), self.due) {
             if now >= due {
-                // Half of what is in use now: a refreshed table, or the bundled one.
-                let floor = load(&self.dir).catalog.len() / 2;
+                // Half of a catalog fetched before; none while the bundled table is in use, so an owner's smaller mirror is
+                // taken the first time as `update --url` takes it.
+                let in_use = load(&self.dir);
+                let floor = if in_use.at_ms == 0 {
+                    0
+                } else {
+                    in_use.catalog.len() / 2
+                };
                 let result = update(&self.dir, &url, floor, &*self.get);
                 let wait = match &result {
                     Ok(_) => {
@@ -740,15 +746,14 @@ mod tests {
         let d = tmp("feed");
         let calls = Arc::new(AtomicUsize::new(0));
         let n = Arc::clone(&calls);
-        // As many models as the bundled table: an automatic fetch keeps no catalog with fewer than half of the one in use.
-        let full = catalog(Catalog::bundled().len());
+        let full = catalog(10);
         let get: Arc<Getter> = Arc::new(move |_: &Url, _| {
             let k = n.fetch_add(1, Ordering::SeqCst);
-            // The first answer fails, the second is a truncated catalog; the next ones are a whole catalog.
+            // The first answer fails, the second is a catalog, the third a truncated one (1 of 10).
             match k {
                 0 => Ok((503, Vec::new())),
-                1 => Ok((200, ONE.as_bytes().to_vec())),
-                _ => Ok((200, full.clone().into_bytes())),
+                1 => Ok((200, full.clone().into_bytes())),
+                _ => Ok((200, ONE.as_bytes().to_vec())),
             }
         });
         let h = hub();
@@ -782,30 +787,28 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         f.tick(retry);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        assert_eq!(read_status(&d).unwrap()["error"], "prices.shrunk");
-        assert!(
-            !d.join(CATALOG_FILE).exists(),
-            "a truncated catalog is not kept"
-        );
-        assert_eq!(h.usage_report().prices_at_ms, 0);
-        let again = f.due().unwrap();
-        assert!(
-            again >= retry + Duration::from_secs(20),
-            "the second failure waits twice as long"
-        );
-        f.tick(again);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(read_status(&d).unwrap()["ok"], true);
         // The hub took the new table at once.
         assert!(h.usage_report().prices_at_ms > 0);
         let next = f.due().unwrap();
         assert!(
-            next >= again + Duration::from_secs(900),
+            next >= retry + Duration::from_secs(900),
             "about a day (here 1000 s) later"
+        );
+        let kept = std::fs::read_to_string(d.join(CATALOG_FILE)).unwrap();
+        // A truncated answer next time is refused, and the catalog fetched before stays.
+        f.tick(next);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(read_status(&d).unwrap()["error"], "prices.shrunk");
+        assert_eq!(std::fs::read_to_string(d.join(CATALOG_FILE)).unwrap(), kept);
+        let again = f.due().unwrap();
+        assert!(
+            again < next + Duration::from_secs(13),
+            "a failure is tried again soon"
         );
         // Off again: no more fetches.
         set_auto(&d, None).unwrap();
-        f.tick(next + Duration::from_secs(10_000));
+        f.tick(again + Duration::from_secs(10_000));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(f.due(), None);
         let _ = std::fs::remove_dir_all(d);

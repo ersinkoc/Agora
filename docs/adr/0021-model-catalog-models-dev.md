@@ -32,7 +32,7 @@ Built (roadmap M7.6): the catalog bundled with each release, `agora hub prices u
 keeps off until the owner asks: `agora hub prices auto on [--url URL]` writes `<hub dir>/prices-auto`, and the running hub then fetches
 about once a day (spread by chance, sooner after a failure with a doubling wait up to 6 h) over the bounded HTTPS client
 (`agora-hub::deliver::get`: no redirect, a time cap; 64 MiB here), keeps only a catalog with prices and, when automatic, with at least half
-the prices of the one in use, and writes it whole (`crates/agora/src/pricefeed.rs`). The hub-local override table is `<hub dir>/prices.json`,
+the prices of the catalog it fetched before (a guard against a truncated answer, added in the build, not decided here), and writes it whole (`crates/agora/src/pricefeed.rs`). The hub-local override table is `<hub dir>/prices.json`,
 edited with `agora hub prices set|unset` and shown with `agora hub prices show`; it wins over the catalog, also for the bare id an agent
 reports. A running hub takes a change of either file within 5 s. The manifest's `[usage.model_map]` is read (at most 256 entries of at
 most 128 bytes, the value `provider/model`) and the node reports the mapped id with the agent's usage, from a usage file and from an

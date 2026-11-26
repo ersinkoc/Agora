@@ -82,3 +82,6 @@ app's tunnel port, are bound exclusively (`agora_platform::bind_loopback_exclusi
 `SO_REUSEPORT` on Linux and macOS, checked), so no other program can bind beside it while it runs. Not built: the desktop app's own use
 of a stored port, and plain `agora` on such a machine opening the panel by itself (it would hold the terminal for the forwarder).
 Known gap (threat model T27): a fixed, predictable port can still be bound by another local user while the panel is not running.
+To verify on Windows (compile-checked only here): with `SO_EXCLUSIVEADDRUSE`, Windows may keep the port unbindable while connections
+the panel closed are in `TIME_WAIT`, so `agora panel` run again at once after Ctrl+C could report the port taken (and the desktop app
+fall back to another port).
