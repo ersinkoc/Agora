@@ -202,7 +202,8 @@ struct Made {
 /// agent can also rewrite: every command checks that it still names the recorded shared folder ([`links_hold`]), and removal puts
 /// back the recorded `.git`, `commondir` and `gitdir` first. The project comes from here too, not from the worktree's HEAD, which
 /// the agent can move. A node that restarts starts with none of these and falls back to [`crate::sandbox::git_dirs`] (with the
-/// same `commondir` check) and the identity git computes.
+/// same `commondir` check) and the identity git computes; an agent the holder kept is taken up in the project its ledger entry
+/// recorded.
 static MADE: Mutex<Vec<Made>> = Mutex::new(Vec::new());
 
 fn made() -> std::sync::MutexGuard<'static, Vec<Made>> {
@@ -219,8 +220,8 @@ fn record_made(work: &Path, project: Option<ProjectId>) {
         return;
     };
     let (Ok(commondir), Ok(gitdir)) = (
-        std::fs::read(admin.join("commondir")),
-        std::fs::read(admin.join("gitdir")),
+        read_link_file(&admin.join("commondir")),
+        read_link_file(&admin.join("gitdir")),
     ) else {
         return;
     };
@@ -298,13 +299,13 @@ fn pin(dir: &Path) -> Pin {
 /// `GIT_COMMON_DIR` is set (measured with git 2.53, unlike what `git help repository-layout` says): config and objects stay pinned, but HEAD's
 /// branch and every other shared ref would come from the repository it names, and a git process the node's git starts without the
 /// pinning (`git worktree remove` runs a `status` in the worktree) would read that repository's config. Read as git reads it:
-/// trailing line ends dropped, a relative path taken from the admin folder.
+/// trailing line ends dropped, a relative path taken from the admin folder. Read once with [`read_link_file`]: a link, a FIFO or a
+/// long file there is a refusal, never followed, waited on or read whole.
 fn links_hold(admin: &Path, common: &Path) -> bool {
-    let file = admin.join("commondir");
-    if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
-        return false;
-    }
-    let Ok(text) = std::fs::read_to_string(&file) else {
+    let Some(text) = read_link_file(&admin.join("commondir"))
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+    else {
         return false;
     };
     let named = text.trim_end_matches(['\n', '\r']);
@@ -316,6 +317,16 @@ fn links_hold(admin: &Path, common: &Path) -> bool {
         (Ok(named), Ok(common)) => named == common,
         _ => false,
     }
+}
+
+/// The most a git link file (`.git`, `commondir`, `gitdir`) is read: a path (at most 4096 bytes on Linux) and `gitdir: `. An agent may
+/// write these files; anything longer is not one git wrote.
+pub(crate) const LINK_FILE_MAX: u64 = 4096 + 64;
+
+/// A git link file an agent may have rewritten, read as [`agora_platform::read_small_regular_file_no_follow`] reads it: only a plain
+/// file of at most [`LINK_FILE_MAX`] bytes, opened once without following a link or waiting on a FIFO.
+pub(crate) fn read_link_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    agora_platform::read_small_regular_file_no_follow(path, LINK_FILE_MAX)
 }
 
 /// `Err` when `dir` is pinned to Git folders whose `commondir` no longer names the shared one ([`links_hold`]).
@@ -2964,6 +2975,112 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
         assert!(wt.join("sub").join("a.txt").exists(), "removed");
         remove_worktree(&r.dir, &wt, true).expect("forced");
         assert!(!wt.exists());
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// A `commondir` longer than a git link file can be is refused unread, even when its first line names the real shared folder; a
+    /// sparse one costs no disk and is not read either.
+    #[test]
+    fn a_commondir_longer_than_a_link_file_is_refused_unread() {
+        let r = Repo::new(None);
+        let wt = r.wt("links-long");
+        create_worktree(&r.dir, &wt, "links-long", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
+        let mut padded = orig.clone();
+        padded.extend(std::iter::repeat_n(b'\n', 8192));
+        fs::write(&cd, &padded).expect("padded");
+        assert!(!links_hold(&admin, &common), "a padded commondir held");
+        assert!(matches!(status(&wt), Err(GitError::LinksMoved(_))));
+        fs::write(&cd, &orig).expect("reset");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&cd)
+            .expect("open")
+            .set_len(1 << 36)
+            .expect("sparse");
+        let started = std::time::Instant::now();
+        assert!(!links_hold(&admin, &common), "a sparse commondir held");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        fs::remove_file(&cd).expect("unlink");
+        fs::write(&cd, &orig).expect("reset");
+        status(&wt).expect("status once put back");
+        let _ = remove_worktree(&r.dir, &wt, true);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    /// The link check never waits on a FIFO put where `commondir` was, however the swap and the check interleave.
+    #[test]
+    fn the_link_check_never_waits_on_a_fifo_swapped_in() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let r = Repo::new(None);
+        let wt = r.wt("links-fifo");
+        create_worktree(&r.dir, &wt, "links-fifo", None).expect("worktree");
+        let (admin, common) = crate::sandbox::git_dirs(&wt).expect("verified");
+        let cd = admin.join("commondir");
+        let orig = fs::read(&cd).expect("commondir");
+        let fifo = admin.join("fifo-probe");
+        if !Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return; // no FIFOs on this system
+        }
+        let _ = fs::remove_file(&fifo);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (a, o, s) = (admin.clone(), orig.clone(), stop.clone());
+        // Swaps `commondir` between the plain file and a FIFO until told to stop.
+        let swapper = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let f = a.join("plain-probe");
+                fs::write(&f, &o).expect("plain");
+                fs::rename(&f, a.join("commondir")).expect("rename");
+                let p = a.join("fifo-probe");
+                let _ = fs::remove_file(&p);
+                if Command::new("mkfifo")
+                    .arg(&p)
+                    .status()
+                    .is_ok_and(|s| s.success())
+                {
+                    fs::rename(&p, a.join("commondir")).expect("rename");
+                }
+            }
+        });
+        let done = Arc::new(AtomicU32::new(0));
+        let (a, c, d, s) = (admin.clone(), common.clone(), done.clone(), stop.clone());
+        let checker = std::thread::spawn(move || {
+            while !s.load(Ordering::Relaxed) {
+                let _ = links_hold(&a, &c);
+                d.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let mut last = 0;
+        let mut stuck = false;
+        for _ in 0..12 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let now = done.load(Ordering::Relaxed);
+            if now == last {
+                stuck = true;
+                break;
+            }
+            last = now;
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper");
+        // A check that waits on the FIFO is let go: opened for reading and writing, which never waits, it has a writer, which closes.
+        let _ = fs::OpenOptions::new().read(true).write(true).open(&cd);
+        // One stuck on a FIFO that was renamed away cannot be reached: left behind, the test fails below.
+        if !stuck {
+            checker.join().expect("checker");
+        }
+        let _ = fs::remove_file(&cd);
+        fs::write(&cd, &orig).expect("reset");
+        assert!(!stuck, "the link check waited on a FIFO");
+        assert!(last > 0);
+        let _ = remove_worktree(&r.dir, &wt, true);
         let _ = fs::remove_dir_all(&wt);
     }
 }

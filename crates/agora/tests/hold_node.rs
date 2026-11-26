@@ -981,17 +981,30 @@ fn a_held_agent_in_a_node_made_worktree_is_taken_up_again() {
     assert_eq!(pid_of(&node, &id), pid);
 }
 
-/// T8b: the project of a node-made worktree whose branch was given a root commit of its own while no node ran is not the one its
-/// agent was started in; that agent is not taken up as the other project's, it is ended (as a resume would be refused).
+/// T8b: a node-made worktree whose branch was given a root commit of its own while no node ran (by its agent, another agent of the
+/// repository, or an unrelated merge) does not make its running agent another project's, nor end it: it is taken up in the project the
+/// ledger recorded when the node started it.
 #[test]
-fn a_held_agent_whose_worktree_became_another_project_is_ended_not_taken_up() {
+fn a_held_agent_whose_worktree_branch_moved_is_taken_up_in_its_recorded_project() {
     let _serial = serial();
-    let (rig, node, id, pid) = next_node_finds_in_worktree("wt-moved", |wt| {
+    let mut before = String::new();
+    let (_rig, node, id, pid) = next_node_finds_in_worktree("wt-moved", |wt| {
+        before = plain_git(wt, &["rev-list", "--max-parents=0", "HEAD"]);
         let tree = plain_git(wt, &["rev-parse", "HEAD^{tree}"]);
         let root = plain_git(wt, &["commit-tree", &tree, "-m", "another root"]);
         plain_git(wt, &["update-ref", "HEAD", &root]);
     });
-    wait_for("the agent to be ended", || !alive(pid));
-    assert!(!held(&node, &id), "taken up as another project's");
-    wait_for("the holder to end", || !rig.hold_pid_file().exists());
+    assert!(held(&node, &id), "not taken up");
+    assert_eq!(pid_of(&node, &id), pid);
+    assert!(alive(pid));
+    let views = node.supervisor.lock().unwrap().list();
+    let view = views
+        .iter()
+        .find(|v| v.id.as_str() == id)
+        .expect("the agent");
+    assert_eq!(
+        view.project,
+        format!("#{before}"),
+        "taken up as another project's"
+    );
 }

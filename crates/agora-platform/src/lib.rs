@@ -460,6 +460,32 @@ pub fn open_read_no_follow(path: &std::path::Path) -> io::Result<std::fs::File> 
     }
 }
 
+/// The contents of the regular file at `path`, at most `max` bytes, opened once with [`open_read_no_follow`]: a link at the last
+/// component, a FIFO, a device or a folder there is refused (checked on the open handle, so a swap after a look at the path does not
+/// matter), never waited on, and a file longer than `max` (a sparse file costs no disk) is refused without being read past `max`.
+/// For small files another user or an agent may write, such as git's link files.
+pub fn read_small_regular_file_no_follow(path: &std::path::Path, max: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = open_read_no_follow(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    if meta.len() > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too long"));
+    }
+    let mut out = Vec::new();
+    // Grown since the look at its length: one byte past `max` says so.
+    file.take(max.saturating_add(1)).read_to_end(&mut out)?;
+    if out.len() as u64 > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "file too long"));
+    }
+    Ok(out)
+}
+
 /// Whether a file could have been changed by someone other than this user (ADR-0087 item 3): on Unix it belongs to another user or is
 /// writable by its group or by everyone. Elsewhere `false`: the Windows install folder is protected by its owner-only ACL.
 pub fn others_can_write(meta: &std::fs::Metadata) -> bool {
@@ -3736,5 +3762,65 @@ mod accept_timeout_tests {
             slowest < Duration::from_secs(1),
             "slowest accept {slowest:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod small_file_tests {
+    use super::read_small_regular_file_no_follow as read;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("agora-small-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_small_regular_file_is_read_and_a_longer_or_sparse_one_is_refused() {
+        let d = dir("len");
+        let f = d.join("f");
+        std::fs::write(&f, b"../..\n").unwrap();
+        assert_eq!(read(&f, 16).unwrap(), b"../..\n");
+        assert_eq!(read(&f, 6).unwrap(), b"../..\n");
+        assert!(read(&f, 5).is_err());
+        // A sparse file: no disk used, still refused without being read.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&f)
+            .unwrap()
+            .set_len(1 << 36)
+            .unwrap();
+        assert!(read(&f, 4096).is_err());
+        assert!(read(&d, 4096).is_err(), "a folder");
+        assert!(read(&d.join("missing"), 4096).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_link_is_not_followed() {
+        let d = dir("link");
+        let target = d.join("target");
+        std::fs::write(&target, b"x").unwrap();
+        if crate::symlink(&target, &d.join("link")).is_ok() {
+            assert!(read(&d.join("link"), 4096).is_err());
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_waiting() {
+        let d = dir("fifo");
+        let p = d.join("p");
+        let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = p.clone();
+        std::thread::spawn(move || tx.send(read(&q, 4096).is_err()).unwrap());
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
