@@ -193,6 +193,11 @@ describe('the floor and the theme check hold after import', () => {
     expect(importName(';;;', '<<<', 'Imported theme')).toBe('Imported theme');
     expect(importName('x'.repeat(200), '', '')).toHaveLength(60);
     expect(importName(42, '', '')).toBe('—');
+    // Review of audit F2000: cleaning repeats until nothing is left to remove, so a long name is cut first (one removal per pass here).
+    const nested = 'u'.repeat(65_000) + 'rl('.repeat(65_000);
+    const t0 = performance.now();
+    expect(importName(nested, '', '')).toBe('u'.repeat(60));
+    expect(performance.now() - t0).toBeLessThan(1000);
     const r = convertTheme(JSON.stringify({ name: '<img src=x onerror=alert(1)>;', background: '#000000', foreground: '#ffffff' }), 'x.json') as Extract<Converted, { ok: true }>;
     expect(readTheme(r.file).ok).toBe(true);
     expect(r.name).not.toMatch(/[<;]/);

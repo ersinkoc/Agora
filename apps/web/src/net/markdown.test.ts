@@ -51,4 +51,45 @@ describe('agent markdown', () => {
     expect(blocks('first\n- not a list\nsecond')).toEqual([{ kind: 'p', inlines: [{ kind: 'text', text: 'first\n- not a list\nsecond' }] }]);
     expect(blocks('')).toEqual([]);
   });
+  // Audit F2080: what an agent writes reaches `blocks` whole (a reply joins its chunks, up to the node's 256 KiB). A heading, a fence and a
+  // table's separator row with a long run of spaces before one stray character each took seconds (the heading's time grew with the cube of
+  // its length) and froze the window.
+  it('reads a long line of spaces in linear time, and still reads headings, fences and tables as before', () => {
+    const spaces = (n: number) => ' '.repeat(n);
+    for (const line of [`# a${spaces(2000)}b`, `\`\`\`${spaces(48_000)}!`, `| a |\n|-${spaces(48_000)}x|`]) {
+      const start = performance.now();
+      blocks(line);
+      expect(performance.now() - start, line.slice(0, 12)).toBeLessThan(200);
+    }
+    expect(blocks(`# a${spaces(2000)}b`)).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: `a${spaces(2000)}b` }] }]);
+    expect(blocks('  ## Done ##  ')).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: 'Done' }] }]);
+    // A closing run of `#` needs a space before it (CommonMark): `# C#` is the heading "C#".
+    expect(blocks('# C#')).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: 'C#' }] }]);
+    expect(blocks('# C# ##')).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: 'C#' }] }]);
+    expect(blocks(`# a${' '.repeat(48_000)}#x`)).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: `a${' '.repeat(48_000)}#x` }] }]);
+    expect(blocks('# a # b')).toEqual([{ kind: 'heading', inlines: [{ kind: 'text', text: 'a # b' }] }]);
+    expect(blocks('#   ')).toEqual([{ kind: 'heading', inlines: [] }]);
+    expect(blocks('####### seven')).toEqual([{ kind: 'p', inlines: [{ kind: 'text', text: '####### seven' }] }]);
+    expect(blocks('  ~~~  py  \nx\n ~~~ ')).toEqual([{ kind: 'code', lang: 'py', text: 'x' }]);
+    expect(blocks('| a |\n| :-: | --- |')).toMatchObject([{ kind: 'table', head: [[{ text: 'a' }]], rows: [] }]);
+    expect(blocks('| a |\n|---||')).toEqual([{ kind: 'table', text: '| a |\n|---||' }]);
+  });
+  // Audit F2082: three more took time with the square of the line: links looked for in a run of `[`, a list item holding a line separator
+  // (U+2028), and the closing punctuation cut from a web address made of a run of dots.
+  it('reads a run of brackets, an item with a line separator and an address of dots in linear time, as before', () => {
+    for (const line of ['['.repeat(48_000), `- ${' '.repeat(48_000)}a\u2028b`, `https://x${'.'.repeat(48_000)}a`]) {
+      const start = performance.now();
+      blocks(line);
+      expect(performance.now() - start, line.slice(0, 12)).toBeLessThan(200);
+    }
+    expect(inlines('[a[b](https://x.y) [c](https://u.v/w) [d](ftp://e)')).toEqual([
+      { kind: 'link', text: 'a[b', href: 'https://x.y/' }, { kind: 'text', text: ' ' }, { kind: 'link', text: 'c', href: 'https://u.v/w' },
+      { kind: 'text', text: ' [d](ftp://e)' },
+    ]);
+    expect(inlines('see https://a.b/c... and [x](https://d.e)!')).toMatchObject([
+      { kind: 'text', text: 'see ' }, { kind: 'link', text: 'https://a.b/c' }, { kind: 'text', text: '... and ' }, { kind: 'link', text: 'x' }, { kind: 'text', text: '!' },
+    ]);
+    expect(blocks('- a\u2028b')).toEqual([{ kind: 'p', inlines: [{ kind: 'text', text: '- a\u2028b' }] }]);
+    expect(blocks('  12) x\n  13) y\n   - z')).toMatchObject([{ kind: 'list', ordered: true, start: 12, items: [[{ text: 'x' }], [{ text: 'y' }], [{ text: 'z' }]] }]);
+  });
 });

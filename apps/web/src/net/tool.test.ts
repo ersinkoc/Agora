@@ -84,4 +84,17 @@ describe('approval details in words', () => {
     expect(detailText('{not json')).toBe('{not json');
     expect(detailText('{"x":{"y":1}}')).toBe('{"x":{"y":1}}');
   });
+  // Audit F2081: the ask beside Allow is what is decided on (docs/ux/approvals.md), so a command of several lines is shown whole, never
+  // its first line alone. A row in a conversation still shows only the first line (`toolView`).
+  it('shows a command of several lines whole', () => {
+    expect(detailText('{"command":"echo ok\\nrm -rf ~","description":"check"}')).toBe('echo ok\nrm -rf ~');
+    expect(detailText('{"command":["bash","-lc","echo ok\\nrm -rf ~"]}')).toBe('echo ok\nrm -rf ~');
+    expect(detailText('{"command":"echo ok\\nrm -rf ~","description":"a very long descr…')).toBe('echo ok\nrm -rf ~');
+    expect(detailText('{"description":"two\\nlines","file_path":"a.rs"}')).toBe('a.rs');
+    // A cut command is never replaced by a later key: the detail is shown as it came (review of audit F2081).
+    const cut = '{"abs_path":"README.md","command":"rm -rf ~ xxx…';
+    expect(detailText(cut)).toBe(cut);
+    expect(detailText('{"command":["bash","-lc","rm -rf ~"],"path":"a.rs"…')).toBe('{"command":["bash","-lc","rm -rf ~"],"path":"a.rs"…');
+    expect(toolView(call('Bash', '{"command":"echo ok\\nrm -rf ~"}')).subject).toBe('echo ok');
+  });
 });

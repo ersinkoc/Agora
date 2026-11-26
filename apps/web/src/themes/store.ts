@@ -215,8 +215,10 @@ export function createThemeStore(env: ThemeStoreEnv = {}) {
     scheme,
     active,
     apply,
-    // Another tab changed what is stored, or the system switched between dark and light.
+    // Another tab changed what is stored, or the system switched between dark and light. Without storage (safe mode, or a page that
+    // gets none) nothing stored is read, so the choices and themes of this visit stay.
     reload: () => {
+      if (!env.kv) return;
       const next = loadState(env.kv);
       meta = loadMeta(env.kv, next.user).meta;
       removed = removedOf(json(read(env.kv, REMOVED_KEY)));
