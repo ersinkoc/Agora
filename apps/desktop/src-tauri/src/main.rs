@@ -806,12 +806,15 @@ mod tests {
         )));
         // The shell's own screen keeps its commands (the answer is the command's own error, not a refusal) and cannot ask for a
         // notification as the page does.
-        let own = call(&main, "ca_fingerprint", "tauri://localhost/", ca.clone());
+        // The shell's own screen is at the platform's app address (`tauri://localhost` on Linux and macOS, `http://tauri.localhost`
+        // on Windows): taken from the window rather than written here.
+        let local = main.url().unwrap();
+        let own = call(&main, "ca_fingerprint", local.as_str(), ca.clone());
         assert_eq!(own.err(), Some(serde_json::json!("ca")));
         assert!(refused(call(
             &main,
             "notify_agents",
-            "tauri://localhost/",
+            local.as_str(),
             events
         )));
     }

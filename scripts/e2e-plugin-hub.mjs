@@ -84,7 +84,7 @@ try {
   await page.waitForTimeout(2000);
   const placeholder = await page.locator('[data-layout-root]').innerText();
   await plugins();
-  check((await frames()) === 0 && (await row.count()) === 0 && placeholder.includes('plugin.sample-agents.list'),
+  check((await frames()) === 0 && (await row.count()) === 0 && placeholder.includes('This plugin is not added') && !placeholder.includes('plugin.sample-agents.list'),
     'at the next load it is gone from the window, its pane a placeholder');
 
   // The community catalog, signed as the maintainer signs it.
