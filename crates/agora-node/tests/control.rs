@@ -987,13 +987,16 @@ fn input_to_a_program_that_never_reads_does_not_wedge_the_node() {
     // Meanwhile the node answers, and the agent can be stopped.
     let t0 = Instant::now();
     ok(c.call(Cmd::AgentList(v1::AgentList::default())));
+    let listed = t0.elapsed();
     ok(c.call(Cmd::AgentStop(v1::AgentStop {
         agent_id: s.agent_id.clone(),
         stop_helpers: false,
     })));
+    // A node wedged behind the write answers only once the program's `sleep 60` ends, about a minute from here. Both calls take
+    // well under a second on a quiet machine, but a busy Windows runner once took 5.5 s for them; 20 s still tells the two apart.
     assert!(
-        t0.elapsed() < Duration::from_secs(5),
-        "the node waited behind the stuck write: {:?}",
+        t0.elapsed() < Duration::from_secs(20),
+        "the node waited behind the stuck write: list {listed:?}, list and stop {:?}",
         t0.elapsed()
     );
     drop(stuck); // the writer ends when the process is gone

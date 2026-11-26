@@ -80,4 +80,5 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - `agent_spawn::a_helper_acts_without_asking_only_when_the_signed_decision_names_it` on Windows (agent_spawn.rs:1512): the args record
   can be read before it is fully written.
 - `doctor::tests::a_version_probe_that_does_not_end_is_killed_and_counts_as_not_working` on Ubuntu (doctor.rs:1338): timing.
-- Windows `control.rs` timing (two tests, seen on 0.3.40's main runs).
+- Windows `control.rs` timing: one more test seen on 0.3.40's main runs, name not recorded (the stuck-write test's 5 s budget is
+  now 20 s).
