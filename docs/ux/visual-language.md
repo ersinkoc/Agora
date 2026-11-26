@@ -93,6 +93,10 @@ Users see plain words; internal terms stay in code and docs (`glossary.md` lists
 | Unknown | muted | dashed ring | none |
 | Failed | danger red (ADR-0102) | cross in a ring | none |
 
+**Finished, not seen yet** (an agent that finished while the person was not looking at it) is the Finished green and its check, in a
+tinted disc on a row or a tab and a **New** pill on a tile, never amber, a dot on the avatar or a bar; it is not a state of its own and goes
+once the agent is seen ([main-window.md](main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)).
+
 An agent that ended with an error or could not start is **Failed**; one stopped on purpose is not, and stays neutral. The widget kit's
 status pill draws Failed in red, and so do Home's tiles and counts (redesign PR 2) and the phone's lists (PR 13); the screens that still
 draw it in neutral ink (the agent list) switch over as they adopt the kit.

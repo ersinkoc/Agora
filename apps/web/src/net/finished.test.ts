@@ -37,6 +37,11 @@ describe('what changed for the person', () => {
     expect(c.finished).toEqual([]);
   });
 
+  it('says which agents left the list', () => {
+    const s = look(undefined, [agent('a', 'idle'), agent('b', 'idle')]).next;
+    expect(look(s, [agent('b', 'idle')]).gone).toEqual(['a']);
+  });
+
   it('does not count an agent seen for the first time later as a change', () => {
     const s = look(undefined, [agent('a', 'working')]).next;
     expect(look(s, [agent('a', 'working'), agent('new', 'idle')]).events).toEqual([]);
@@ -79,12 +84,12 @@ describe('the finished mark', () => {
 
   it('is cleared when the agent works again or waits on the person, and when it leaves the list', () => {
     const cur = new Set(['a', 'b', 'c']);
-    expect([...nextUnseen(cur, { resumed: ['a'], alive: new Set(['a', 'b']) })]).toEqual(['b']);
+    expect([...nextUnseen(cur, { resumed: ['a'], gone: ['c'] })]).toEqual(['b']);
   });
 
   it('keeps the same set when nothing changed, so nothing redraws', () => {
     const cur = new Set(['a']);
-    expect(nextUnseen(cur, { finished: ['a'], seen: new Set(['x']), alive: new Set(['a']) })).toBe(cur);
+    expect(nextUnseen(cur, { finished: ['a'], seen: new Set(['x']), gone: ['y'] })).toBe(cur);
   });
 
   it('is one store the tiles, rows and tabs read, and tells them when it changes', () => {

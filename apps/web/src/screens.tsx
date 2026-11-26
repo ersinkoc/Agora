@@ -22,6 +22,8 @@ import type { ChatSource } from './net/chat';
 import { demoConversation, demoRichConversation } from './demoChat';
 import { ChatActionsContext } from './components/chatActions';
 import { AgentTile } from './components/AgentTile';
+import { FinishedMark } from './components/FinishedMark';
+import { finishedMarks } from './net/finished';
 import { FleetEmpty } from './components/FleetConsole';
 import { ApprovalCard } from './components/ApprovalCard';
 import { StartAgent, type KindChoice } from './components/StartAgent';
@@ -35,7 +37,7 @@ import type { PairingUi } from './components/Pairing';
 import { Mark, StateBadge } from './components/StateBadge';
 import { KitGallery } from './components/kit/KitGallery';
 import { PolishGallery } from './components/PolishGallery';
-import { Button, Callout, ConfirmDialog, CopyChip, Pill, SegmentedControl, SettingRow, Tag } from './components/kit';
+import { AgentAvatar, Button, Callout, ConfirmDialog, CopyChip, Pill, SegmentedControl, SettingRow, StatusMark, Tag } from './components/kit';
 import { SettingsBlock, SettingsCard, SystemTile } from './components/SettingsCard';
 import { isolated, peerText, systemName } from './components/pairChoice';
 import { NoAskBadge } from './components/NoAskBadge';
@@ -136,6 +138,23 @@ function DemoStart({ onClose }: { onClose: () => void }) {
     onStart={async () => { onClose(); return undefined; }} onClose={onClose} />;
 }
 
+// An agent that finished while the person was away (net/finished.ts): the mark on its tile, and the small one of a row in the agent list
+// and of a tab, until the agent is seen.
+const galleryFinished: AgentTileModel = { ...(demoAgents[1] as AgentTileModel), id: 'gallery/finished', state: 'idle', preview: '', since: undefined, skipsPermissions: false };
+function FinishedUnseenDemo() {
+  useState(() => finishedMarks.apply({ finished: [galleryFinished.id] }));
+  const a = galleryFinished;
+  return (
+    <div data-finished-gallery className="gallery__row items-start">
+      <div className="fleet w-full max-w-sm"><AgentTile agent={a} /></div>
+      <div className="flex w-64 flex-col gap-1 rounded-s border border-line bg-sidebar p-1">
+        <span className="ide-row"><AgentAvatar accent={a.accent} kind={a.kind || a.name} size="s" /><span className="min-w-0 flex-1 truncate">{a.name}</span><FinishedMark agentId={a.id} compact /><StatusMark state={a.state} /></span>
+      </div>
+      <div className="flex border-b border-panebar-line bg-panebar text-panebar-ink"><span className="ide-tab"><AgentAvatar accent={a.accent} kind={a.kind || a.name} size="s" /><span className="truncate">{a.name}</span><FinishedMark agentId={a.id} compact /><StatusMark state={a.state} /></span></div>
+    </div>
+  );
+}
+
 function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => void }) {
   return (
     <section className="theme-panel" data-theme={theme}>
@@ -151,6 +170,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
       </ChatActionsContext.Provider>
       <PolishGallery />
       <div className="fleet"><AgentTile agent={demoHelper} /></div>
+      <FinishedUnseenDemo />
       {/* ADR-0101: "Allow always" beside Allow and Deny, in the place of Allow when it is all the agent offers, and "Asks less". */}
       <div data-always className="grid max-w-3xl grid-cols-1 gap-3">
         <div className="approvals"><ApprovalCard approval={demoAlwaysApproval} onResolve={() => {}} /><ApprovalCard approval={demoAlwaysOnlyApproval} onResolve={() => {}} /></div>

@@ -21,6 +21,8 @@ export interface Changes {
   finished: string[];
   // Agents at work again or waiting on the person: a mark they had is out of date.
   resumed: string[];
+  // Agents that left the list.
+  gone: string[];
   next: Seen;
 }
 
@@ -31,7 +33,7 @@ export function changes(prev: Seen | undefined, agents: readonly AgentTileModel[
   const pairs = new Set<string>();
   for (const it of attention) { const who = askerOf(it); asking.add(who); if (it.kind === 'pair') pairs.add(who); }
   const next: Seen = { states, asking };
-  if (!prev) return { events: [], finished: [], resumed: [], next };
+  if (!prev) return { events: [], finished: [], resumed: [], gone: [], next };
   const events: SoundEvent[] = [];
   const finished: string[] = [];
   const resumed: string[] = [];
@@ -44,22 +46,23 @@ export function changes(prev: Seen | undefined, agents: readonly AgentTileModel[
       events.push({ kind: 'finished', agent: a.id });
     }
   }
+  const gone = [...prev.states.keys()].filter((id) => !states.has(id));
   for (const who of asking) {
     if (prev.asking.has(who)) continue;
     events.push(pairs.has(who) ? { kind: 'needs-you' } : { kind: 'needs-you', agent: who });
   }
-  return { events, finished, resumed, next };
+  return { events, finished, resumed, gone, next };
 }
 
 // ---- The mark ---------------------------------------------------------------------------------------------------------------------------
 
 // The mark's rules: an agent that finished while the person was not looking at it is marked; looking at it, its working again (or waiting
 // on the person), or its leaving the list takes the mark away.
-export function nextUnseen(cur: ReadonlySet<string>, c: { finished?: readonly string[]; resumed?: readonly string[]; seen?: ReadonlySet<string>; alive?: ReadonlySet<string> }): ReadonlySet<string> {
+export function nextUnseen(cur: ReadonlySet<string>, c: { finished?: readonly string[]; resumed?: readonly string[]; gone?: readonly string[]; seen?: ReadonlySet<string> }): ReadonlySet<string> {
   const out = new Set(cur);
   for (const id of c.finished ?? []) if (!c.seen?.has(id)) out.add(id);
-  for (const id of c.resumed ?? []) out.delete(id);
-  for (const id of out) if (c.seen?.has(id) || (c.alive && !c.alive.has(id))) out.delete(id);
+  for (const id of [...(c.resumed ?? []), ...(c.gone ?? [])]) out.delete(id);
+  for (const id of out) if (c.seen?.has(id)) out.delete(id);
   return out.size === cur.size && [...out].every((id) => cur.has(id)) ? cur : out;
 }
 

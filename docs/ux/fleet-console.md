@@ -63,7 +63,8 @@ rendered page for it.
    where it is (the project under a machine, the machine under a project, the branch) and changed files, the acting-without-asking bolt
    and the limit chip when they apply, and how long it has been in this state. **Needs you** is the amber tint with an amber hairline
    (the pulse is only the mark's, in the pill); **failed** is the red Failed pill (ADR-0102); hover is a stronger hairline and a one-pixel
-   lift, never a shadow or a glow. Clicking a tile opens the agent like the agent list does. Most urgent first inside a group;
+   lift, never a shadow or a glow. An agent that finished while the person was not looking at it has a green **New** pill with the check
+   beside its state until they open it ([main-window.md](main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)). Clicking a tile opens the agent like the agent list does. Most urgent first inside a group;
    groups that need you first; an offline machine says when it was last seen and that its agents keep running there.
 
 "What it is doing" is the last line of the agent's terminal when the window has a preview of it, else what it asks, else why it stopped.

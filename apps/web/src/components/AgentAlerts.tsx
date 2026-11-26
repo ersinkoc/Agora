@@ -73,11 +73,12 @@ export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = read
   }, [safe]);
 
   useEffect(() => {
-    if (!ready) { seen.current = undefined; return; }
+    // Not knowing the fleet (signed out, another hub): what was marked belongs to the last look, and the next look starts afresh.
+    if (!ready) { if (seen.current) finishedMarks.set([]); seen.current = undefined; return; }
     const c = changes(seen.current, agents, attention);
     seen.current = c.next;
     const p = where();
-    finishedMarks.apply({ finished: c.finished, resumed: c.resumed, seen: inFront(p) ? onScreen.get().visible : undefined, alive: new Set(agents.map((a) => a.id)) });
+    finishedMarks.apply({ finished: c.finished, resumed: c.resumed, gone: c.gone, seen: inFront(p) ? onScreen.get().visible : undefined });
     const evs = c.events.filter((ev) => audible(ev, soundPrefs.get(), soundPrefs.muted(), p, latest.current.safe));
     if (evs.length > 0) run(gate(gateRef.current, evs, Date.now()));
     // eslint-disable-next-line react-hooks/exhaustive-deps

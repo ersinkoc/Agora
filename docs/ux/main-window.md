@@ -171,6 +171,36 @@ only, default **A card over the window**): a card, a small banner only, or nothi
 
 Screenshots in both themes: `docs/screenshots/needs-you-modal/`. Tests: `apps/web/src/components/AttentionLayer.test.tsx`.
 
+## Sounds, and a finished mark that lasts until seen
+
+Both come from what the window already knows (the agents' states and the Needs you list); no message was added. A sound is never the only
+sign: everything it says is on screen too.
+
+- **Sounds** (This device → **Sounds**, `#/device/sounds`; kept in this browser only, **off until the person turns them on**, so a window
+  never surprises anyone). Two short sounds made in the browser (WebAudio notes, no audio file): **finished** (two soft rising notes) when
+  an agent goes from working to idle or finished, and **needs you** (two short notes at one pitch) when an agent, or a machine asking to
+  join, comes onto the Needs you list. Each can be turned off and tried (**Play**); the volume is Quiet, Medium or Loud. **Mute this
+  agent's sounds** is in the agent's menu (the ⋯ of its pane, its row in the agent list and its phone screen) while sounds are on, and is
+  remembered in this browser. The rules (`net/sounds.ts`):
+  - never in safe mode (ADR-0114), and never for the agent in the focused pane while the window is in front;
+  - only while the window is hidden or not focused, unless **Also while this window is in front** is on;
+  - a burst is one sound: at most one a second, the most urgent of the burst (needs you before finished), decided from the clock, not a
+    timer, so a background tab cannot add one; each agent sounds at most once per change of its state, and an agent with a request open is
+    one thing that needs you however many requests it opens, until it leaves the list;
+  - the first look at the fleet (opening the window, signing in again) is taken as it is: no sound for what was already there. An agent
+    that ended with an error is Failed, not finished, and has no sound.
+  A browser plays sound only after the person has interacted with the page: the first click or key in a visit (or the Sounds switch)
+  starts the audio, and a sound that could not start at once is dropped rather than played late.
+- **Finished, not seen yet.** An agent that finishes while the person is not looking at it keeps a mark on its tile (a green **New** pill
+  with the check), its row in the agent list and its tab (a small green-tinted disc with the check), until they look at it: its own view
+  (the agent or its terminal) in a visible pane while the window is in front, or its full-size view. It also goes when the agent works
+  again or waits on the person, and when it leaves the list. It uses the Finished green and its check only, never amber and never a bar
+  ([visual-language.md](visual-language.md)), so it cannot be read as "needs you", which keeps its amber dot and floor (ADR-0113). Its
+  words, "Finished while you were away. Open it to clear this mark.", are its tooltip and what a screen reader says. The marks are memory
+  only: a reload is a new look at everything. Screens: `docs/ux/screens/finished-mark-{dark,light}.png`,
+  `docs/ux/screens/sounds-settings-{dark,light}.png`. Tests: `net/sounds.test.ts`, `net/finished.test.ts`,
+  `components/agentAlerts.test.tsx`.
+
 ## Top bar
 - Scope selector (all machines or one project); connected node count.
 - Approvals indicator with count; opens the approvals queue (`approvals.md`).
