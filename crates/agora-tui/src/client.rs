@@ -994,6 +994,51 @@ impl Session {
         self.command(node, command, Duration::from_secs(15))
     }
 
+    /// ADR-0090: ends the agent's current turn (`AgentCancelTurn`); the agent itself keeps running. `drop_queue` also throws away the
+    /// prompts waiting behind the turn. Not sent for a viewer, as [`Session::prompt`] is not.
+    pub fn cancel_turn(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        drop_queue: bool,
+    ) -> Result<(), String> {
+        self.viewer_refused()?;
+        self.command(
+            node,
+            command_request::Command::AgentCancelTurn(agora_protocol::v1::AgentCancelTurn {
+                agent_id: agent_id.to_string(),
+                drop_queue,
+            }),
+            Duration::from_secs(15),
+        )
+    }
+
+    /// ADR-0090: sets one of the agent's own settings (`AgentSetConfig`: an option of its last `AgentSessionConfig`, the effort being
+    /// the one of category thought level). The error keeps its parameters: a switch to a value that skips permissions is answered
+    /// `agent.approval_needed { approval_id }` (Amendment A), and the request then waits like any other. Not sent for a viewer.
+    pub fn set_config(
+        &mut self,
+        node: &str,
+        agent_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), ErrorInfo> {
+        self.viewer_refused().map_err(|code| ErrorInfo {
+            code,
+            ..Default::default()
+        })?;
+        self.command_info(
+            node,
+            command_request::Command::AgentSetConfig(agora_protocol::v1::AgentSetConfig {
+                agent_id: agent_id.to_string(),
+                config_id: config_id.to_string(),
+                value: value.to_string(),
+            }),
+            Duration::from_secs(15),
+        )
+        .map(|_| ())
+    }
+
     /// ADR-0106: `auth.forbidden` for a viewer's session, whose window only watches; nothing is sent.
     fn viewer_refused(&self) -> Result<(), String> {
         if self.person_role == PersonRole::Viewer {
@@ -1252,6 +1297,30 @@ impl Session {
                 .into_iter()
                 .find(|k| k.kind == kind)
                 .map(|k| k.launch_options)
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// ADR-0066: the settings a start of `kind` on `node` may give (its manifest's `[[launch.setting]]`s, in order: model, effort, ...),
+    /// as [`crate::launch::usable_specs`] keeps them. An older node sends none, and then a start asks nothing about them.
+    pub fn kind_settings(
+        &mut self,
+        node: &str,
+        kind: &str,
+    ) -> Result<Vec<agora_protocol::v1::LaunchSettingSpec>, String> {
+        let ok = self.command_ok(
+            node,
+            command_request::Command::AgentKinds(agora_protocol::v1::AgentKinds {}),
+            Duration::from_secs(15),
+        )?;
+        let Some(command_ok::Result::AgentKinds(k)) = ok.result else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::launch::usable_specs(
+            k.kinds
+                .into_iter()
+                .find(|k| k.kind == kind)
+                .map(|k| k.settings)
                 .unwrap_or_default(),
         ))
     }

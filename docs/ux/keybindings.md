@@ -8,8 +8,8 @@
 Keys and commands are data (ADR-0068 decision 6). Every action of the web window is a **command** with a stable id, a name and,
 optionally, keys. The command palette (Ctrl K) lists every command with the key it has now, and **Settings > Keyboard** changes the
 keys. The person's changes are one small JSON file, the **keybindings file**, kept in this browser and exported or imported as a file.
-This page is the file's specification and the web window's behaviour. The terminal client has fixed keys and no keybindings file yet;
-its layout keys (rung 5) are in [layout.md](layout.md), "The terminal client".
+This page is the file's specification and the web window's behaviour. The terminal client's commands and how it reads the same file are
+in "The terminal client" below; its layout keys (rung 5) are in [layout.md](layout.md), "The terminal client".
 
 ## Commands
 
@@ -197,7 +197,51 @@ person (ADR-0113 decision 6) and keybindings in theme packs (ADR-0113 decision 5
 In **safe mode** (ADR-0114), the defaults only: the stored file is neither read nor written, so a file that took a key the person needs
 cannot follow them there. A change made in safe mode holds for that visit only.
 
+## The terminal client
+
+The terminal client's keys are commands too (`crates/agora-tui/src/keys/`), and it reads **the same file**: a `keybindings.json` exported
+from the web window, put in the Agora folder (`$AGORA_HOME`, else `~/.agora`), is the terminal client's. **Not wired yet:** the console
+does not read that file when it starts, so the defaults below are in force; the reader, the checks and the keys in force are built and
+tested, and `App::keys` takes them.
+
+- **Reading the file** follows "Reading a file" above exactly (the same limits, the same closed fields, the same refusals, the web's fixed
+  keys and fixed command), so a file is valid in one client exactly when it is valid in the other. It is read only when it is at most
+  64 KiB (asked of the file system first). Each problem is a stable code, said from `locales/<lang>/tui.ftl` (`tui-keys-error-*`); any
+  problem leaves the defaults in force.
+- **A command the terminal client does not have** (a web window's: `go.settings`, `side.place-1`, …) is kept and binds nothing here.
+- **Keys the terminal client keeps:** y, n, Shift+A, Alt+Y, Alt+N and Alt+A answer a request, and Ctrl+], F12, j, k, Home and End move
+  around the window. A file may bind them (the web window has other uses for them); here such a key is left out of the binding and said.
+- **What a terminal can report:** the terminal client hears characters, not key places. A letter with Shift is its capital (`shift+n` is
+  N); Shift with a digit or a sign, Ctrl with Shift, and Meta (⌘) never arrive, so such a binding never acts here. `<` and `>` (the
+  list's width) are not in the key grammar and stay as they are.
+- **Where a key acts:** a command acts in the agent list, in the list and the details, or anywhere. Inside an agent's tab every key is the
+  agent's except a one-stroke **Alt** key of a command that acts anywhere (the palette, the mouse, the tabs); no chord starts there, and a
+  default Alt key the file took from its command goes to the agent again. Outside a tab, a default key the file took from its command
+  does nothing. A chord waits 1.5 s for its second key; Esc drops it.
+
+The terminal client's commands, with their default keys (the keys it had before):
+
+| id | does | default keys | acts |
+| --- | --- | --- | --- |
+| `palette.open` | the commands (palette) | Ctrl+K, Alt+K | anywhere |
+| `attention.next` | the next agent that needs you | Shift+N | the list |
+| `pane.tab-1` … `pane.tab-9` | tab 1 … 9 | Alt+1 … Alt+9 | anywhere |
+| `layout.preset-1x1`, `-2x1`, `-1x2`, `-2x2`, `-focus`, `-3x2` | the layout presets | 1, 2, 3, 4, 5, 6 | list, details |
+| `layout.maximize`, `layout.pane-previous`, `layout.pane-next` | maximize or restore; the pane before or after | z, h, l | list, details |
+| `layout.split-right`, `layout.split-down`, `layout.close-pane`, `layout.swap-next`, `layout.move-next`, `layout.take-out`, `layout.wider`, `layout.narrower`, `layout.taller`, `layout.shorter`, `layout.save-as`, `layout.reset` | the pane in focus; the layout | none | list, details |
+| `window.mouse`, `window.details` | take or release the mouse; show or hide the details | m and Alt+M; i | anywhere (Alt+M); list, details |
+| `tab.close` | close the tab or pane | w | the list |
+| `machines.clean-up`, `app.quit` | clean up old machines; quit | none; q | list, details |
+| `agent.start`, `agent.start-in-folder`, `agent.stop`, `agent.resume`, `agent.start-again`, `agent.review`, `agent.files`, `board.open`, `agent.remove`, `device.ask`, `devices.approve`, `typing.grant`, `machines.pair`, `theme.choose` | the console's letters for the selected agent | s, f, x, u, Shift+U, r, o, b, d, a, v, g, p, t | list, details |
+
+No command answers a request; Ctrl+C still quits from the list (it is a fixed key, so no file can take it). Known gaps: the palette's and
+the footer's words still name the default keys, and the palette does not show a changed key.
+
 ## Tests
+
+`crates/agora-tui/src/keys/`: the key grammar and what a typed key is (`strokes.rs`), every command's id and defaults (`commands.rs`),
+reading and refusing files as the web does (`file.rs`), and the keys in force, chords, Alt keys inside a tab, a default the file took
+(`map.rs`); `app.rs` tests a file moving keys in the shell and inside a tab.
 
 `apps/web/src/keys/`:
 

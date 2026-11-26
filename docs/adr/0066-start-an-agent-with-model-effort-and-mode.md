@@ -41,6 +41,11 @@ Manifest format (`[[launch.setting]]`), schema (`AgentStart`/`AgentLaunch` setti
 - **Remembered choices (web window):** the start window remembers the last model and effort per kind per machine on this device (localStorage; checked against what the machine lists now, so a value it no longer takes is dropped and never sent) and shows what an agent was started with, read-only, in its header. The agent never reports an effort (the adapter protocol carries modes and models only), so there is no effort menu.
 - **`options` on `agent_start` (built, ADR-0059 decision 5):** an agent may name launch options (`skip-permissions`); the card lists them
   with the confirmation, and the decision is signed over `agora-approval-start-v3` (settings, then option ids, before the hash). No grant.
-- **Not built yet:** the TUI's start picker (the card is done, the picker in the TUI's own start flow is not), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
+- **The TUI's start picker, the client part:** `crates/agora-tui/src/launch.rs` asks the kind's settings one at a time in the manifest's
+  order (a numbered list whose first line keeps the tool's default, a typed value for a setting without values, Enter keeps the default,
+  Backspace goes back, Esc cancels) and gives the chosen pairs in that order for `Device::authorize_launch_with_settings`;
+  `Session::kind_settings` reads them from the machine's kind list. The console's start (`start_in_folder` in `crates/agora/src/tuicmd.rs`)
+  does not ask it yet and still sends no settings, and the TUI does not remember the last choice per kind per machine.
+- **Not built yet:** asking the settings in the TUI's own start flow (above), the owner's `start.models` allow-list and the model's price class on the card (decisions 4 and 5: the ADR
   does not specify the policy key's place or the catalog lookup closely enough for a small change), `mode` as a shipped setting, and
   keeping the settings across a resume after a node restart.
