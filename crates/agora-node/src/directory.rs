@@ -41,6 +41,7 @@ pub fn inspect(
         .as_ref()
         .map_or(path.as_path(), |c| c.root.as_path());
     let metadata = root.join(METADATA);
+    clear_leftovers(root);
     if create_identity && !metadata.exists() {
         let mut bytes = [0u8; 16];
         getrandom::getrandom(&mut bytes).map_err(|_| invalid("directory.randomness"))?;
@@ -125,11 +126,14 @@ pub fn inspect(
 }
 
 /// Places `text` at `path` as a new file, whole or not at all, and never over a file (or link) already there: an existing one is
-/// kept and is not an error. It is written and synced beside `path` under a name of its own (`unique`), then linked into place,
-/// which fails rather than replace (#1150: a file created empty and written after, as before, was left empty by a node killed in
-/// between, and refused the folder until someone removed it). Where the file system has no hard links, it is created in place and
-/// written, as before.
+/// kept and is not an error. It is written and synced beside `path` under a name of its own (`unique`, see [`leftover`]), then moved
+/// into place by a rename that refuses to replace ([`agora_platform::rename_no_replace`]), so the file never has two names (#1150:
+/// a file created empty and written after, as before, was left empty by a node killed in between, and refused the folder until
+/// someone removed it). Where that rename is not supported it is linked into place, which never replaces either, and the name beside
+/// it removed; where hard links are not supported or not allowed (FAT, some network shares) it is created in place and written, as
+/// before.
 fn place_new(path: &Path, text: &[u8], unique: &str) -> std::io::Result<()> {
+    use std::io::ErrorKind;
     let create_new = |at: &Path| {
         std::fs::OpenOptions::new()
             .write(true)
@@ -142,22 +146,85 @@ fn place_new(path: &Path, text: &[u8], unique: &str) -> std::io::Result<()> {
     let mut f = create_new(&beside)?;
     let written = f.write_all(text).and_then(|()| f.sync_all());
     drop(f);
-    let linked = written.and_then(|()| std::fs::hard_link(&beside, path));
+    let moved = written.and_then(|()| agora_platform::rename_no_replace(&beside, path));
+    match moved {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::Unsupported => {}
+        Err(e) => {
+            let _ = std::fs::remove_file(&beside);
+            return if e.kind() == ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            };
+        }
+    }
+    // Two names until the one beside is removed; one left by a node killed here is removed by the next look ([`clear_leftovers`]).
+    let linked = std::fs::hard_link(&beside, path);
     let _ = std::fs::remove_file(&beside);
     match linked {
         Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        // No hard links here (FAT, some network shares): created in place and written, as before.
-        Err(_) => match create_new(path) {
-            Ok(mut f) => f
-                .write_all(text)
-                .and_then(|()| f.sync_all())
-                .inspect_err(|_| {
-                    let _ = std::fs::remove_file(path);
-                }),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(e) => Err(e),
-        },
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+        Err(e)
+            if matches!(
+                e.kind(),
+                ErrorKind::Unsupported | ErrorKind::PermissionDenied
+            ) =>
+        {
+            match create_new(path) {
+                Ok(mut f) => f
+                    .write_all(text)
+                    .and_then(|()| f.sync_all())
+                    .inspect_err(|_| {
+                        let _ = std::fs::remove_file(path);
+                    }),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// How old a [`leftover`] must be before [`clear_leftovers`] removes it: older than any placing still under way.
+const LEFTOVER_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether `name` is one [`place_new`] gives the identity file while placing it: `.agent-project.json.<32 lowercase hex>.tmp`.
+fn leftover(name: &str) -> bool {
+    name.strip_prefix(METADATA)
+        .and_then(|r| r.strip_prefix('.'))
+        .and_then(|r| r.strip_suffix(".tmp"))
+        .is_some_and(|hex| {
+            hex.len() == 32
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
+/// #1150: removes from `root` what a node stopped while placing the identity file left there ([`leftover`] names only, regular
+/// files only, never a link, and only once [`LEFTOVER_AGE`] old, so a placing under way keeps its file). Where the file was linked
+/// into place, such a name is a second name of it, which a confined start on Windows refuses (a writable file with more than one
+/// name). Removing a name never touches the file another name keeps.
+fn clear_leftovers(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        if !e.file_name().to_str().is_some_and(leftover) {
+            continue;
+        }
+        let path = e.path();
+        let old = std::fs::symlink_metadata(&path).is_ok_and(|m| {
+            m.is_file()
+                && m.modified()
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= LEFTOVER_AGE)
+        });
+        if old {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -821,6 +888,68 @@ mod tests {
         assert_eq!(std::fs::read(a.join(METADATA)).unwrap(), original);
         let _ = std::fs::remove_dir_all(a);
         let _ = std::fs::remove_dir_all(b);
+    }
+
+    /// #1150 (review of #1234, F1): what a node stopped while placing the identity file left beside it (a second name of the file,
+    /// where it was linked into place) is removed by the next look at the folder: only names of that exact form, only regular files,
+    /// only once a minute old (a placing under way keeps its file), never a link; the identity file itself is untouched.
+    #[test]
+    fn a_leftover_of_placing_the_identity_file_is_removed_by_the_next_look() {
+        let folder = temp("leftover");
+        inspect(folder.to_str().unwrap(), "node-a", true).unwrap();
+        let meta = folder.join(METADATA);
+        let original = std::fs::read(&meta).unwrap();
+        let name = |hex: &str| folder.join(format!("{METADATA}.{hex}.tmp"));
+        let hex = |c: char| c.to_string().repeat(32);
+        let age = |p: &Path, secs: u64| {
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        // A second name of the identity file, an hour old: removed, the file keeps its id.
+        let second = name(&hex('a'));
+        std::fs::hard_link(&meta, &second).unwrap();
+        age(&second, 3600);
+        // One being placed right now: kept.
+        let fresh = name(&hex('b'));
+        std::fs::write(&fresh, b"{}").unwrap();
+        // Not of that form (uppercase hex, short, another file's name): kept, however old.
+        let others = [
+            name(&hex('C')),
+            name("abc"),
+            folder.join(format!("{METADATA}.tmp")),
+            folder.join(format!("notes.{}.tmp", hex('d'))),
+        ];
+        for o in &others {
+            std::fs::write(o, b"x").unwrap();
+            age(o, 3600);
+        }
+        // A link of that form, to a file elsewhere: kept, and so is what it points at.
+        let target = folder.join("elsewhere");
+        std::fs::write(&target, b"keep").unwrap();
+        age(&target, 3600);
+        let link = name(&hex('e'));
+        let linked = agora_platform::symlink(&target, &link).is_ok();
+        let again = inspect(folder.to_str().unwrap(), "node-a", false).unwrap();
+        assert!(again.0.portable);
+        assert!(!second.exists(), "the old second name is removed");
+        assert_eq!(std::fs::read(&meta).unwrap(), original);
+        assert!(fresh.exists(), "a placing under way keeps its file");
+        for o in &others {
+            assert!(o.exists(), "{}", o.display());
+        }
+        if linked {
+            assert!(
+                std::fs::symlink_metadata(&link).is_ok(),
+                "a link is never removed"
+            );
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// #1150 (follow-up of #1231): a new identity file is placed whole. It was created empty and then written, so a node killed in
