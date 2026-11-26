@@ -57,20 +57,7 @@ pub fn inspect(
         );
         let text = serde_json::to_vec_pretty(&serde_json::json!({"project_id": id}))
             .map_err(|_| invalid("directory.metadata"))?;
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&metadata)
-        {
-            Ok(mut f) => {
-                if f.write_all(&text).and_then(|()| f.sync_all()).is_err() {
-                    let _ = std::fs::remove_file(&metadata);
-                    return Err(invalid("directory.metadata"));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(invalid("directory.metadata")),
-        }
+        place_new(&metadata, &text, &h).map_err(|_| invalid("directory.metadata"))?;
     }
     let portable = match std::fs::symlink_metadata(&metadata) {
         Ok(meta) => {
@@ -135,6 +122,43 @@ pub fn inspect(
         },
         project,
     ))
+}
+
+/// Places `text` at `path` as a new file, whole or not at all, and never over a file (or link) already there: an existing one is
+/// kept and is not an error. It is written and synced beside `path` under a name of its own (`unique`), then linked into place,
+/// which fails rather than replace (#1150: a file created empty and written after, as before, was left empty by a node killed in
+/// between, and refused the folder until someone removed it). Where the file system has no hard links, it is created in place and
+/// written, as before.
+fn place_new(path: &Path, text: &[u8], unique: &str) -> std::io::Result<()> {
+    let create_new = |at: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(at)
+    };
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{unique}.tmp"));
+    let beside = path.with_file_name(name);
+    let mut f = create_new(&beside)?;
+    let written = f.write_all(text).and_then(|()| f.sync_all());
+    drop(f);
+    let linked = written.and_then(|()| std::fs::hard_link(&beside, path));
+    let _ = std::fs::remove_file(&beside);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        // No hard links here (FAT, some network shares): created in place and written, as before.
+        Err(_) => match create_new(path) {
+            Ok(mut f) => f
+                .write_all(text)
+                .and_then(|()| f.sync_all())
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_file(path);
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// Persisted owner-confirmed associations. Paths never silently switch logical project after metadata changes.
@@ -797,6 +821,52 @@ mod tests {
         assert_eq!(std::fs::read(a.join(METADATA)).unwrap(), original);
         let _ = std::fs::remove_dir_all(a);
         let _ = std::fs::remove_dir_all(b);
+    }
+
+    /// #1150 (follow-up of #1231): a new identity file is placed whole. It was created empty and then written, so a node killed in
+    /// between left an empty file that refused the folder until someone removed it, and anything reading meanwhile saw it empty. A
+    /// reader watching the folder while identities are created never sees the file without its id.
+    #[test]
+    fn a_new_identity_file_is_never_seen_without_its_id() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let root = temp("placed");
+        let (mut partial, mut seen) = (0, 0);
+        for i in 0..40 {
+            let folder = root.join(format!("f{i}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            let meta = folder.join(METADATA);
+            let done = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let (meta, done) = (meta.clone(), Arc::clone(&done));
+                std::thread::spawn(move || {
+                    let (mut partial, mut seen) = (0, 0);
+                    while !done.load(Ordering::Relaxed) {
+                        if let Ok(bytes) = std::fs::read(&meta) {
+                            seen += 1;
+                            if serde_json::from_slice::<serde_json::Value>(&bytes).is_err() {
+                                partial += 1;
+                            }
+                        }
+                    }
+                    (partial, seen)
+                })
+            };
+            let made = inspect(folder.to_str().unwrap(), "node-a", true);
+            done.store(true, Ordering::Relaxed);
+            let (p, s) = watcher.join().unwrap();
+            assert!(made.unwrap().0.portable);
+            (partial, seen) = (partial + p, seen + s);
+            // Nothing is left beside it.
+            let names: Vec<String> = std::fs::read_dir(&folder)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, [METADATA]);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(partial, 0, "seen without its id {partial} of {seen} times");
     }
     #[test]
     fn a_selected_folder_is_reported_in_the_spelling_programs_can_start_in() {

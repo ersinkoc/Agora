@@ -369,7 +369,8 @@ marks the kind `installed: false` in `AgentKinds`. Older nodes answered `interna
 
 The node canonicalizes and re-inspects before launch; a path or project ID mismatch is refused. It persists confirmed
 path/identity associations; changed metadata requires `accept_identity_change`. Metadata creation is explicit, uses
-create-new semantics and never commits or overwrites `.agent-project.json`. The metadata contains `{"project_id":"UUID"}`;
+create-new semantics and never commits or overwrites `.agent-project.json`; the file is written whole beside it and linked into
+place, so it is never seen, or left by a killed node, empty (#1150; created in place where the file system has no hard links). The metadata contains `{"project_id":"UUID"}`;
 portable domain IDs use `id:<uuid>`. Without metadata, Git discovery remains unchanged; standalone folders use
 `folder:<node>:<canonical path>` without a fabricated root commit. A folder whose canonical path is not valid UTF-8 is
 refused (`directory.path`): the path travels as text, and a lossy spelling would name another folder. Metadata must be a
