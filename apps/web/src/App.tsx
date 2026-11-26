@@ -49,6 +49,7 @@ import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
 import { catalogAskFor, setCatalogSource } from './themes/catalog';
+import { themeSync } from './themes/sync';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
 import { rememberStarted } from './components/launchMemory';
@@ -359,6 +360,14 @@ export function App() {
   // question sent before the link is open is refused), and the demo window has a sample one.
   const viewed = live !== undefined;
   useEffect(() => { setCatalogSource(catalogAskFor(api, viewed, !!hub)); }, [api, viewed, hub]);
+  // ADR-0113 step 4: the person's themes, packs and theme choice, read from this hub once the window has its first view and kept the same
+  // on all their devices; read again whenever the window comes back into view (another device may have changed them).
+  useEffect(() => { themeSync.attach(api && viewed ? (body) => api.command('', body) : undefined, !!hub); }, [api, viewed, hub]);
+  useEffect(() => {
+    const back = () => { if (document.visibilityState === 'visible') void themeSync.refresh(); };
+    document.addEventListener('visibilitychange', back);
+    return () => document.removeEventListener('visibilitychange', back);
+  }, []);
   useEffect(() => {
     if (!hub) return;
     // What was heard of machines and answered here belongs to one connection: another hub, or this one again, starts from nothing.

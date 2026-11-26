@@ -20,6 +20,7 @@ import {
 } from './messages';
 import { type Saved, themeStore } from './store';
 import { ThemeCatalog } from './ThemeCatalog';
+import { SyncedItems } from './SyncPanels';
 import { ExportPack, ImportPack } from './PackDialogs';
 import { isPack } from './pack';
 import { TerminalSample } from './TerminalSample';
@@ -89,6 +90,7 @@ export function ThemeEditor() {
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
       {pack === 'export' && <ExportPack onClose={() => setPack(undefined)} />}
       {pack === 'import' && <ImportPack onClose={() => setPack(undefined)} />}
+      <SyncedItems />
       <ThemeCatalog />
     </section>
   );

@@ -21,6 +21,7 @@ import { fullText, issueText, themeName } from './messages';
 import {
   MAX_PACK_BYTES, type Pack, type PackIssue, deserialisePack, missingPanels, serialisePack, writePack,
 } from './pack';
+import { type KeptPack, type PackStore, packStore } from './kept';
 import { type ThemeStore, themeStore } from './store';
 import { MAX_NAME, schemesOf } from './tokens';
 
@@ -168,11 +169,13 @@ export function ExportPack({ onClose, themes: store = themeStore, keys = keyStor
 type Step = { at: 'read' } | { at: 'preview'; pack: Pack } | { at: 'keys'; pack: Pack } | { at: 'done'; lines: string[] };
 const knownPanel = (id: string) => !!PANEL_INFO.get(id);
 
-export function ImportPack({ onClose, themes: store = themeStore, keys = keyStore, mac = IS_MAC }: {
-  onClose: () => void; themes?: ThemeStore; keys?: KeyStore; mac?: boolean;
+// `kept`: one of the person's kept packs (from this or another of their devices), opened straight at its preview. A pack imported here
+// is kept, so the person's other devices can offer it (ADR-0113 step 4, kept.ts); nothing of it is applied there either until picked.
+export function ImportPack({ onClose, themes: store = themeStore, keys = keyStore, packs = packStore, mac = IS_MAC, kept }: {
+  onClose: () => void; themes?: ThemeStore; keys?: KeyStore; packs?: PackStore; mac?: boolean; kept?: KeptPack;
 }) {
-  const [step, setStep] = useState<Step>({ at: 'read' });
-  const [text, setText] = useState('');
+  const [step, setStep] = useState<Step>(kept ? { at: 'preview', pack: kept.pack } : { at: 'read' });
+  const [text, setText] = useState(() => (kept ? serialisePack(kept.file) : ''));
   const [issues, setIssues] = useState<PackIssue[]>([]);
   const [themes, setThemes] = useState<ReadonlySet<number>>(new Set());
   const [layouts, setLayouts] = useState<ReadonlySet<number>>(new Set());
@@ -208,6 +211,8 @@ export function ImportPack({ onClose, themes: store = themeStore, keys = keyStor
       lines.push(t('pack-done-layouts', { count: r.names.length, names: r.names.join(', ') }));
     }
     if (m) { keys.set(m.file, m.unknown); lines.push(t('pack-done-keys', { count: pack.keys?.file.entries.length ?? 0 })); }
+    // Kept as the file it was (read again with the pack rules), once.
+    try { const file: unknown = JSON.parse(text); if (file && typeof file === 'object' && !Array.isArray(file)) packs.keep(file as Record<string, unknown>); } catch { /* the text was read above */ }
     setStep({ at: 'done', lines });
   };
 

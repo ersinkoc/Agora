@@ -17,6 +17,7 @@ import {
   MAX_PACK_BYTES, type PackIssue, deserialisePack, missingPanels, packLayout, readPack, serialisePack, writePack,
 } from './pack';
 import { ExportPack, ImportPack, packIssueText } from './PackDialogs';
+import { createPackStore } from './kept';
 import { MAX_USER_THEMES, createThemeStore, themeStore, type ThemeStore } from './store';
 import { ThemeEditor } from './ThemeEditor';
 import { BUILT_IN } from './tokens';
@@ -257,7 +258,8 @@ describe('importing a pack in the window', () => {
   });
 
   it('applies only the parts ticked: a theme is added (not chosen), a layout is saved, nothing else is touched (no plugin)', () => {
-    act(() => root.render(<ImportPack onClose={() => {}} themes={themes} keys={keys} mac={false} />));
+    const packs = createPackStore();
+    act(() => root.render(<ImportPack onClose={() => {}} themes={themes} keys={keys} packs={packs} mac={false} />));
     paste(serialisePack(PACK));
     click(button(t('pack-preview-do')));
     const keysBefore = keys.state();
@@ -275,6 +277,8 @@ describe('importing a pack in the window', () => {
     // installed, allowed or enabled.
     expect(Object.keys(localStorage).filter((k) => k !== SAVED_KEY)).toEqual(othersBefore);
     expect(Object.keys(localStorage).some((k) => k.startsWith('agora.plugins'))).toBe(false);
+    // ADR-0113 step 4: the pack is kept as the file it was, once, for the person's other devices.
+    expect(packs.list().map((k) => k.file)).toEqual([PACK]);
   });
 
   it('merges keys only after a step that shows the conflicts, and Back there changes nothing', () => {

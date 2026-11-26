@@ -585,7 +585,7 @@ audit-action-plugin-add = Bir eklenti kurdu
 audit-action-plugin-remove = Bir eklentiyi kaldırdı
 audit-action-plugin-grant = Bir eklentinin neleri görebileceğini seçti
 audit-action-plugin-ungrant = Bir eklentiyi göstermeyi bıraktı
-audit-action-settings-set = Temalarını cihazları için hub'da sakladı
+audit-action-settings-set = Temalarını cihazlarında aynı tuttu
 audit-action-pair-open = Yeni makinelerin katılmak istemesine izin verdi
 audit-action-pair-close = Yeni makinelerin katılmak istemesini kapattı
 audit-action-pair-status = Yeni makinelerin katılmak isteyip isteyemeyeceğine baktı
@@ -1007,6 +1007,46 @@ theme-catalog-refused = Bu tema kullanılamıyor:
 theme-catalog-gone = Bu tema artık katalogda değil.
 theme-catalog-off = Katalog kapatıldı.
 theme-catalog-unavailable = Tema getirilemedi. Yeniden deneyin.
+theme-sync-label = Temalarım tüm cihazlarımda aynı olsun
+theme-sync-syncing = Temalarınız, paketleriniz ve tema seçiminiz oturum açtığınız her cihazda aynı olur.
+theme-sync-synced = Temalarınız, paketleriniz ve tema seçiminiz oturum açtığınız her cihazda aynı olur.
+theme-sync-off = Temalarınız bu tarayıcıda kalır. Diğer cihazlarınızda da olmaları için bunu açın.
+theme-sync-safe = Güvenli mod: cihazlarınızda hiçbir şey eşitlenmez.
+theme-sync-local = Temalarınız bu tarayıcıda kalır. Diğer cihazlarınızda da olmaları için Agora'nızda oturum açın.
+theme-sync-older = Agora'nız henüz temaları saklayamıyor, bu yüzden bu tarayıcıda kalıyorlar.
+theme-sync-too-large = Temalarınız ve paketleriniz Agora'nızda saklanamayacak kadar büyük (en fazla { $max } KB), bu yüzden bu tarayıcıda kalıyorlar. Bir temayı silin ya da bir paketi unutun.
+theme-sync-newer = Agora'nızda saklanan temalar daha yeni bir sürümle kaydedilmiş. Kullanmak için bu pencereyi güncelleyin; o zamana kadar sizinkiler bu tarayıcıda kalır.
+theme-sync-error = Agora'nıza şu an ulaşılamadı. Temalarınız burada duruyor ve bir sonraki değişikliğinizde kaydedilecek.
+theme-synced-title = Paketleriniz ve cihazlarınız
+theme-synced-hint = Burada ve diğer cihazlarınızda içe aktardığınız paketler. Birini açmak içinde ne olduğunu gösterir; parçalarını seçene kadar hiçbir şey değişmez.
+theme-synced-packs = Paketleriniz
+theme-synced-open = Aç…
+theme-synced-forget = Unut
+theme-synced-remove = Cihazlarımdan kaldır
+theme-synced-waiting = { $count ->
+    [one] Diğer cihazlarınızdan 1 tema buraya sığmıyor: en fazla { $max } tema tutabilirsiniz. Yer açmak için kendi temalarınızdan birini silin.
+   *[other] Diğer cihazlarınızdan { $count } tema buraya sığmıyor: en fazla { $max } tema tutabilirsiniz. Yer açmak için kendi temalarınızdan birini silin.
+}
+theme-synced-waiting-packs = { $count ->
+    [one] Diğer cihazlarınızdan 1 paket burada tutulmuyor: en fazla { $max } paket tutulur. Yer açmak için birini unutun.
+   *[other] Diğer cihazlarınızdan { $count } paket burada tutulmuyor: en fazla { $max } paket tutulur. Yer açmak için birini unutun.
+}
+theme-synced-invalid-theme = Diğer cihazlarınızdan gelen "{ $name }" teması burada kullanılamıyor:
+theme-synced-invalid-theme-unnamed = Diğer cihazlarınızdan gelen bir tema burada kullanılamıyor:
+theme-synced-invalid-pack = Diğer cihazlarınızdan gelen "{ $name }" paketi burada kullanılamıyor:
+theme-synced-invalid-pack-unnamed = Diğer cihazlarınızdan gelen bir paket burada kullanılamıyor:
+pack-sync-themes = { $count ->
+    [one] 1 tema
+   *[other] { $count } tema
+}
+pack-sync-layouts = { $count ->
+    [one] 1 kayıtlı yerleşim
+   *[other] { $count } kayıtlı yerleşim
+}
+pack-sync-keys = { $count ->
+    [one] 1 komutun tuşları
+   *[other] { $count } komutun tuşları
+}
 pack-import = Paket içe aktar…
 theme-import-is-pack = Bu bir tema paketi. İçinde ne olduğunu görmek ve neyi kullanacağınızı seçmek için Paket içe aktar…’ı kullanın.
 pack-export = Paket olarak dışa aktar…

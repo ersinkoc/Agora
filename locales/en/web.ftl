@@ -607,7 +607,7 @@ audit-action-plugin-add = Installed a plugin
 audit-action-plugin-remove = Removed a plugin
 audit-action-plugin-grant = Chose what a plugin may see
 audit-action-plugin-ungrant = Stopped showing a plugin
-audit-action-settings-set = Kept their themes on the hub for their devices
+audit-action-settings-set = Kept their themes the same on their devices
 audit-action-pair-open = Let new machines ask to join
 audit-action-pair-close = Stopped new machines from asking to join
 audit-action-pair-status = Checked whether new machines may ask to join
@@ -1035,6 +1035,46 @@ theme-catalog-refused = This theme can't be used:
 theme-catalog-gone = This theme is no longer in the catalog.
 theme-catalog-off = The catalog was turned off.
 theme-catalog-unavailable = The theme could not be fetched. Try again.
+theme-sync-label = Keep my themes the same on my devices
+theme-sync-syncing = Your themes, packs and theme choice are the same on every device where you sign in.
+theme-sync-synced = Your themes, packs and theme choice are the same on every device where you sign in.
+theme-sync-off = Your themes stay in this browser. Turn this on to have them on your other devices too.
+theme-sync-safe = Safe mode: nothing is kept the same on your devices.
+theme-sync-local = Your themes stay in this browser. Sign in to your Agora to have them on your other devices too.
+theme-sync-older = Your Agora can't keep themes yet, so they stay in this browser.
+theme-sync-too-large = Your themes and packs are too large to keep in your Agora (at most { $max } KB), so they stay in this browser. Delete a theme or forget a pack.
+theme-sync-newer = The themes kept in your Agora were saved by a newer version. Update this window to use them; until then yours stay in this browser.
+theme-sync-error = Couldn't reach your Agora just now. Your themes are kept here and will be saved at your next change.
+theme-synced-title = Your packs and devices
+theme-synced-hint = Packs you imported, here and on your other devices. Opening one shows what it holds; nothing changes until you pick its parts.
+theme-synced-packs = Your packs
+theme-synced-open = Open…
+theme-synced-forget = Forget
+theme-synced-remove = Remove from my devices
+theme-synced-waiting = { $count ->
+    [one] 1 theme from your other devices doesn't fit here: you can keep { $max }. Delete one of yours to make room.
+   *[other] { $count } themes from your other devices don't fit here: you can keep { $max }. Delete one of yours to make room.
+}
+theme-synced-waiting-packs = { $count ->
+    [one] 1 pack from your other devices isn't kept here: up to { $max } are. Forget one to make room.
+   *[other] { $count } packs from your other devices aren't kept here: up to { $max } are. Forget one to make room.
+}
+theme-synced-invalid-theme = The theme "{ $name }" from your other devices can't be used here:
+theme-synced-invalid-theme-unnamed = A theme from your other devices can't be used here:
+theme-synced-invalid-pack = The pack "{ $name }" from your other devices can't be used here:
+theme-synced-invalid-pack-unnamed = A pack from your other devices can't be used here:
+pack-sync-themes = { $count ->
+    [one] 1 theme
+   *[other] { $count } themes
+}
+pack-sync-layouts = { $count ->
+    [one] 1 saved layout
+   *[other] { $count } saved layouts
+}
+pack-sync-keys = { $count ->
+    [one] keys for 1 command
+   *[other] keys for { $count } commands
+}
 pack-import = Import pack…
 theme-import-is-pack = This is a theme pack. Use Import pack… to see what it holds and choose what to use.
 pack-export = Export as pack…

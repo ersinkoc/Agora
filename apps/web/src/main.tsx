@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import './design/app.css';
 import { initTheme } from './themes/store';
+import { initKeptPacks } from './themes/kept';
 import { installSafeKey } from './plugins/safe';
 import { pluginStore } from './plugins/store';
 
@@ -10,6 +11,7 @@ import { pluginStore } from './plugins/store';
 // safe mode).
 installSafeKey();
 initTheme();
+initKeptPacks();
 void pluginStore.start();
 
 const root = document.getElementById('root');
