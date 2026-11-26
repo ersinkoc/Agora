@@ -156,7 +156,7 @@ impl DiskEventLog {
 
     /// [`Self::open`], and a log that is not one (its header damaged or missing: a disk fault, a file put there by hand) is set aside
     /// first, never deleted, with its ack (`events.log.unreadable-<unix_secs>`, see `agora_platform::set_aside`), so the node still
-    /// starts, with a fresh log. Returns where the unreadable log went. Herdr G11: a node that could not read its log did not start.
+    /// starts, with a fresh log. Returns where the unreadable log went. Shutdown safety: a node that could not read its log did not start.
     pub fn open_or_set_aside(
         dir: &Path,
         max_bytes: u64,
@@ -739,7 +739,7 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("events.log"), b"this is not an event log at all").unwrap();
         assert!(DiskEventLog::open(&d, 1 << 20).is_err());
-        // Herdr G11: the node's own open sets such a file aside, with its ack, and starts a fresh log.
+        // Shutdown safety: the node's own open sets such a file aside, with its ack, and starts a fresh log.
         fs::write(d.join("ack"), 9u64.to_le_bytes()).unwrap();
         let (mut log, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 77).unwrap();
         assert_eq!(aside, Some(d.join("events.log.unreadable-77")));

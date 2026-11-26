@@ -2378,7 +2378,7 @@ pub fn catch_stop_requests() -> io::Result<()> {
 /// when this is called stays ignored (`nohup`, a background job), and a second request ends the process at once, as the signal would
 /// have without the catch. A request less than a second after the first is that first one reaching the process again, not a second
 /// (#1119 item 4: Ctrl-C on a foreground `agora supervise node` signals the node and its supervisor, which passes its own on), and is
-/// not acted on. Windows (herdr G11): the session's end (a log off, a shutdown, a restart) and the console's closing are the stop
+/// not acted on. Windows: the session's end (a log off, a shutdown, a restart) and the console's closing are the stop
 /// request, and the system is held off while the process stops (a few seconds at most); `agora down` still ends the node outright.
 pub fn catch_stop_requests_once() -> io::Result<()> {
     #[cfg(unix)]
@@ -2403,7 +2403,7 @@ pub fn forward_stop_to(pid: Option<u32>) {
     let _ = pid;
 }
 
-/// Whether [`catch_stop_requests_once`] catches anything here: Unix (the signals), and Windows (the session's end, herdr G11; `agora
+/// Whether [`catch_stop_requests_once`] catches anything here: Unix (the signals), and Windows (the session's end; `agora
 /// down` ends a detached process there with `TerminateProcess`, which cannot be caught).
 pub const STOP_REQUESTS_CAUGHT: bool = cfg!(any(unix, windows));
 
@@ -3786,7 +3786,7 @@ mod atomic_replace_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Herdr G11: a process killed in the middle of a replace (here: its temporary file written half, as a kill or a power cut leaves
+    /// Shutdown safety: a process killed in the middle of a replace (here: its temporary file written half, as a kill or a power cut leaves
     /// it) leaves the old file whole, and the next replace is not stopped by what was left.
     #[test]
     fn a_replace_killed_half_way_leaves_the_old_file_whole_and_the_next_one_goes_through() {
@@ -3805,7 +3805,7 @@ mod atomic_replace_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Herdr G11: a saved file that cannot be read is moved aside, never deleted and never over another one set aside before.
+    /// Shutdown safety: a saved file that cannot be read is moved aside, never deleted and never over another one set aside before.
     #[test]
     fn a_file_set_aside_keeps_its_bytes_and_never_replaces_an_earlier_one() {
         let d = dir("aside");

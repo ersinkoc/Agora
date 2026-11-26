@@ -4144,3 +4144,157 @@ fn two_machines_with_clones_of_one_github_repository_in_two_cases_are_one_shared
     drop(links);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR-0039 on a real hub: the holder's node renews its agent's board lease, so it outlives its TTL while the agent runs (the other
+/// machine's agent is refused all along). When the hub sees the agent end while the node still has it on the mesh (as while the
+/// node's supervisor restarts it), the hub gives the lease back, the node's next renewal is answered `agent.not_found`, and the node
+/// stops renewing it; the other machine then gets the path.
+#[test]
+fn a_shared_lease_is_renewed_by_its_node_and_given_back_when_the_hub_sees_its_agent_end() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use serde_json::{json, Value};
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start = |name: &str, agent: &str, cert: String, key: String| {
+        let dir = tmp(&format!("renew-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: dir.join("manifests"),
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        // The node's renewal schedule, shortened so the test takes seconds: a 2 s TTL is renewed every second.
+        node.mesh
+            .set_lease_renewal_policy(agora_node::lease_renewal::Policy {
+                min_ttl_ms: 2_000,
+                min_gap_ms: 1_000,
+                ..Default::default()
+            });
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        node.events
+            .checkout_discovered(name, "p", Path::new("/work/p"));
+        let id = AgentId::new(agent);
+        node.events.agent_launched(
+            &id,
+            "p",
+            name,
+            Path::new("/work/p"),
+            Path::new("/work/wt"),
+            "agent/x",
+            "shell",
+            true,
+        );
+        let socket = node
+            .mesh
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "shell".into(),
+                node: name.into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut conn = agora_platform::local_connect(&socket).unwrap();
+        mcp(
+            &mut conn,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26"}),
+        );
+        (node, up, id, conn)
+    };
+    let (ca, cb) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (a, _ua, a1, mut ac) = start("alpha", "a1", ca.0, ca.1);
+    let (_b, _ub, _b1, mut bc) = start("beta", "b1", cb.0, cb.1);
+    for (node, agent) in [("alpha", "alpha/a1"), ("beta", "beta/b1")] {
+        wait(&format!("{node} and {agent} to reach the hub"), || {
+            let (v, _) = hub.state.hub.view();
+            v.nodes.get(node).is_some_and(|n| n.online) && v.agents.contains_key(agent)
+        });
+    }
+    let call = |c: &mut agora_platform::LocalStream, name: &str, args: Value| -> (Value, bool) {
+        let r = mcp(c, 9, "tools/call", json!({"name": name, "arguments": args}));
+        let text = r["content"][0]["text"]
+            .as_str()
+            .unwrap_or("null")
+            .to_string();
+        (
+            serde_json::from_str(&text).unwrap_or(Value::Null),
+            r["isError"] == true,
+        )
+    };
+    let ttl_s = 3;
+    let (l, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/x.rs"], "ttl_s": ttl_s}),
+    );
+    assert!(!err, "{l}");
+    let probe = |bc: &mut agora_platform::LocalStream| {
+        call(
+            bc,
+            "lease_acquire",
+            json!({"paths": ["src/x.rs"], "ttl_s": 60}),
+        )
+    };
+    let granted = Instant::now();
+    while granted.elapsed() < Duration::from_secs(ttl_s * 3) {
+        let (held, err) = probe(&mut bc);
+        assert!(
+            err,
+            "the lease ended at {:?} while its agent runs",
+            granted.elapsed()
+        );
+        assert_eq!(held["error"]["code"], "lease.held", "{held}");
+        assert_eq!(held["error"]["params"]["holder_agent_id"], "alpha/a1");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    assert_eq!(a.mesh.renewing(&a1), 1);
+
+    // The hub sees the agent end; the node keeps it on the mesh (a restart is coming), so it would renew.
+    a.events
+        .record_bodies(vec![agora_protocol::v1::event::Body::AgentExited(
+            agora_protocol::v1::AgentExited {
+                agent_id: "a1".into(),
+                exit_code: 1,
+            },
+        )]);
+    wait("the hub to see alpha/a1 end", || {
+        let (v, _) = hub.state.hub.view();
+        v.agents.get("alpha/a1").is_some_and(|x| !x.running)
+    });
+    // What the hub answers that agent's lease call now, as it answers the node's renewal (the same call, as the same agent).
+    let (gone, err) = call(
+        &mut ac,
+        "lease_acquire",
+        json!({"paths": ["src/other.rs"], "ttl_s": ttl_s}),
+    );
+    assert!(err, "{gone}");
+    assert_eq!(gone["error"]["code"], "agent.not_found", "{gone}");
+    wait("the node to stop renewing after agent.not_found", || {
+        a.mesh.renewing(&a1) == 0
+    });
+    let (got, err) = probe(&mut bc);
+    assert!(
+        !err,
+        "the lease of an agent the hub saw end is still held: {got}"
+    );
+}

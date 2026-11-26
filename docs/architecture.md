@@ -234,7 +234,7 @@ ends it about 5 s after the session's end, so a slow stop there can lose the con
 Manager close stops it the same way, and it stays down until the next logon or `agora up`). A shutdown signals the agents
 too: an agent's end the node sees once its stop began is not an end in the ledger, so after the reboot the agent is interrupted and
 offered to Resume (resumed at once with `--resume auto`). Not built: a logind delay lock or a macOS session-end notice, which would let
-the node write before anything else is signalled (herdr does both); under the systemd service the node is stopped before its agents
+the node write before anything else is signalled (comparable agent workspaces do both); under the systemd service the node is stopped before its agents
 are (`KillMode=process`).
 
 ## 10. Cross-cutting concerns

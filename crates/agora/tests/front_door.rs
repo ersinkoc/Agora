@@ -1181,7 +1181,7 @@ fn pid_in(home: &Path, file: &str) -> u32 {
         .unwrap()
 }
 
-/// Herdr gap G11: an OS shutdown or reboot. A login session's end (or launchd's, or systemd's for a node started outside its unit)
+/// Shutdown safety: an OS shutdown or reboot. A login session's end (or launchd's, or systemd's for a node started outside its unit)
 /// signals every process of the session at once: the node's supervisor (which passes it on to the node), the agents and the terminal
 /// holder. An agent's end could then reach the node before it acted on its own stop (it polls for the request), and was recorded as the
 /// agent having ended: after the reboot it was not offered to Resume. The rule itself is pinned by the ledger's unit test (this order

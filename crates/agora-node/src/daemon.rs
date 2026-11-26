@@ -398,7 +398,7 @@ impl EventSink {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        // Herdr G11: a log that cannot be read is set aside, so the node still starts (operational log, not UI text).
+        // Shutdown safety: a log that cannot be read is set aside, so the node still starts (operational log, not UI text).
         let (mut log, unreadable) = DiskEventLog::open_or_set_aside(dir, max_bytes, secs)?;
         if let Some(path) = unreadable {
             eprintln!(
@@ -425,7 +425,7 @@ impl EventSink {
             log = DiskEventLog::open(dir, max_bytes)?;
             set_aside = Some(SetAside { old_id, path });
         }
-        // Replaced whole and synced (herdr G11): a power loss never leaves it empty.
+        // Replaced whole and synced: a power loss never leaves it empty.
         agora_platform::write_private(&dir.join(PRODUCER_FILE), producer.as_bytes())?;
         Ok(Self {
             producer: producer.to_string(),
@@ -440,7 +440,7 @@ impl EventSink {
         })
     }
 
-    /// Herdr G11: makes the events recorded so far last through a power loss (each append only reaches the system). The node calls
+    /// Shutdown safety: makes the events recorded so far last through a power loss (each append only reaches the system). The node calls
     /// it when it stops, as an OS shutdown or reboot may follow.
     pub fn sync(&self) -> io::Result<()> {
         self.log.lock().unwrap_or_else(|e| e.into_inner()).sync()
@@ -1866,7 +1866,7 @@ impl Node {
         )?);
         // ADR-0060: what this node knows of its agents across its own restarts; learns from every event recorded from here on.
         let ledger = Arc::new(crate::ledger::Ledger::open(&cfg.data_dir, now_ms())?);
-        // Herdr G11: an agent's end seen once a stop request reached this process (an OS shutdown signals the agents too) is not an end.
+        // Shutdown safety: an agent's end seen once a stop request reached this process (an OS shutdown signals the agents too) is not an end.
         // Only a process that catches stop requests (`agora node`) ever has one.
         ledger.stops_when(agora_platform::stop_requested);
         events.set_ledger(Arc::clone(&ledger));
@@ -1898,6 +1898,10 @@ impl Node {
         // ADR-0109: the durable inbox opens first, so the reservation below starts above every restored record's number.
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             eprintln!("mesh: durable handoffs unavailable: {e}");
+        }
+        // ADR-0039: before agents are taken up, so each gets back the shared-board leases the last run renewed for it.
+        if let Err(e) = mesh.open_lease_renewals(&cfg.data_dir) {
+            eprintln!("mesh: lease renewals are not kept across a restart: {e}");
         }
         // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
         // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
@@ -2013,6 +2017,8 @@ impl Node {
             let keep: Vec<&str> = taken_up.iter().map(|(id, _)| id.as_str()).collect();
             ledger.forget_kept_except(&keep);
         }
+        // ADR-0039: every agent the holder kept has joined the mesh again and got its renewed leases back; the rest are not taken up.
+        mesh.forget_unadopted_lease_renewals();
         events.node_online(&cfg.node_id);
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
@@ -2946,7 +2952,7 @@ impl Drop for Node {
     fn drop(&mut self) {
         // Before the control server ends (it can take up to its poll time): a command that comes meanwhile is refused, not run.
         self.stop.store(true, Ordering::Release);
-        // Herdr G11: an agent's end seen from here on is the stop's doing, never an end in the ledger.
+        // Shutdown safety: an agent's end seen from here on is the stop's doing, never an end in the ledger.
         self.ledger.stopping();
         drop(self.server.take());
         if self.crashed {
@@ -2955,8 +2961,10 @@ impl Drop for Node {
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
+        // ADR-0039: the lease renewals as they are now, before agents leave the mesh below (the holder keeps them running).
+        self.mesh.freeze_lease_renewals();
         let began = Instant::now();
-        // Herdr G11: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: the usage, the ledger and
+        // Shutdown safety: `agora node`'s stop may be an OS shutdown's, which may not wait for the whole deadline: the usage, the ledger and
         // the event log are written first, and again below with what the drain adds. The conversation keeps its one last batch after
         // the drain (its held-back words are taken whole only then), as before.
         if self.keep_agents {
@@ -3039,7 +3047,7 @@ impl Drop for Node {
 
 impl Node {
     /// ADR-0104 O2: the conversation's last batch (its writer ends first, so the two never write at once), then the usage still being
-    /// gathered, then the ledger and the kept session files, then the event log synced to disk (herdr G11): none needs the supervisor's
+    /// gathered, then the ledger and the kept session files, then the event log synced to disk: none needs the supervisor's
     /// lock, and each is quick local work. Can be called again (with what came since).
     fn write_held(&mut self) {
         if let Some(t) = self.transcript_writer.take() {

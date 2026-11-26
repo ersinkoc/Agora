@@ -12,12 +12,12 @@ is ADR-0113.
 
 ## Context
 
-The maintainer wants community plugins next to community themes, "like herdr".
+The maintainer wants community plugins next to community themes, as the most extensible agent workspaces have.
 
-**What herdr does (research of 2026-11-25, sources in the PR).**
-- **The terminal app:** plugins are programs in any language that call herdr's whole command line and socket API. In herdr's
-  own words they "run as your user… herdr does not review or sandbox plugin code". The marketplace indexes any GitHub repository
-  tagged `herdr-plugin` and says it is not reviewed.
+**What a comparable agent workspace does (research of 2026-11-25, sources in the PR).**
+- **The terminal app:** plugins are programs in any language that call the product's whole command line and socket API. In its
+  own words they "run as your user" and it "does not review or sandbox plugin code". Its marketplace indexes any GitHub
+  repository with its plugin topic and says it is not reviewed.
 - **The desktop app:** "mods" are JavaScript that can run programs, fetch URLs, read files and "run programs on connected
   machines", with no permission prompt. Its security page calls them "trusted JavaScript".
 
@@ -47,10 +47,10 @@ The maintainer wants community plugins next to community themes, "like herdr".
 
 ## Decision
 
-1. **The trade-off: sandboxed plugins, not trusted code.** Plugins get less power than herdr's mods: no programs, no files, no
+1. **The trade-off: sandboxed plugins, not trusted code.** Plugins get less power than that product's mods: no programs, no files, no
    network at first, no signing, ever. In exchange, installing one cannot hand anyone the person's machines.
    - We recommend this because of the key in the window and the agents on the nodes.
-   - A trusted, unsandboxed mode is listed as an alternative and rejected. The power herdr's mods have on a machine already
+   - A trusted, unsandboxed mode is listed as an alternative and rejected. The power such mods have on a machine already
      exists here as agents, manifests and adapters (`docs/architecture.md#integration-levels`), which run on the node under its policy.
 2. **Where plugins run: in the web window (and the desktop app, which loads it), as panels, each in a sandboxed frame.**
    - **The frame:**
@@ -138,7 +138,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
    - **Terminal client:** no plugins (it has no web frame). A plugin panel shows its name and "open in the window".
    - **Phone layout:** the same placeholder in rung 1.
    - **Node:** no plugin runtime. Extending what runs on a machine stays agents-as-data (manifests, ACP, adapters). Automations
-     that run on events (herdr's `[[events]]`) would run code on a machine and need their own ADR.
+     that run on events (event hooks in that product's plugins) would run code on a machine and need their own ADR.
 9. **Threat model: new row T63.**
    - **What a plugin may see:** the read-only, granted, already-redacted views above.
    - **Isolation:** the frame's opaque origin and no network keep it from the key, the hub connection and outside servers. The
@@ -151,7 +151,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
 
 ## Alternatives considered
 
-- **Trusted plugins with full rights** (herdr mods, VS Code, Obsidian): the most power and the easiest to write. Rejected: one
+- **Trusted plugins with full rights** (that product's mods, VS Code, Obsidian): the most power and the easiest to write. Rejected: one
   bad or hijacked plugin could sign approvals and run code on every machine. Review and scanning have not stopped this
   elsewhere.
 - **WASM plugins with a declarative UI** (Zellij, Zed): strong isolation and a clear capability model. A sandboxed frame gives the

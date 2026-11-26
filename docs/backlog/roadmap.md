@@ -1,4 +1,4 @@
-# Roadmap (from 2026-11-21)
+# Roadmap (from 2026-11-21, updated 2026-11-26)
 
 The order the work is done in. One milestone at a time, top to bottom; inside a milestone, the tasks in their order unless a task waits
 on a gate. Each task is one or more PRs; each PR is reviewed independently (and by Codex) before it merges. `docs/capabilities.md` stays
@@ -12,44 +12,40 @@ Gates, written in the task:
 
 Owner: the merger session (Claude, Linux) builds unless the task says otherwise.
 
-Where things stand: 62 capabilities in `docs/capabilities.md`, about 34 built, 18 partly, 10 not built; 42 cite evidence from a real
-machine written down. So the order is: finish what is in flight, prove what exists on real machines, finish what is half built, then the
-new features.
+Where things stand (2026-11-26): 0.3.39 is the latest release; about 40 pull requests merged since it (sandboxed plugin panels,
+theme format 2 and the terminal client's themes and layouts, keybindings and the full command palette, sounds and a lasting "finished"
+mark, CLI scripting, the fleet view, shutdown-safe node state). The order from here: land the open stack (M0), then the community
+milestone (M5), agent coverage (M6), and the half-built and Accepted work (M2, M3), with real-machine proof (M1) alongside.
+The [architecture gap review](../reviews/2026-11-26-architecture-gap-review.md) is the source of M5 and M6; its gap numbers (G1 to G15)
+are cited in the tasks.
 
 ---
 
-## M0. In flight: the kanban board gives a task to an agent (ADR-0095)
+## M0. Land what is open (2026-11-26)
 
-- [x] **M0.1 Schema step** (#882, merged): `TaskDispatch`, `TaskDispatchResult`, `TaskDispatched`, `task.dispatch`, `task.dispatch_limited`.
-- [x] **M0.2 Node handler** (#883, merged)
-  - [x] claim on the node's broker or the hub board as the agent; data-wrapped prompt; `TaskDispatched` with the prompt's SHA-256
-  - [x] never typed over a turn: the structured agents' queue; one held prompt per terminal agent, sent as a bracketed paste
-  - [x] review fixes: stale agent list in `tick`, re-decide after a slow claim, Unknown holds when the kind can say idle, held prompts
-    expire after 15 minutes, reservation tokens, readiness from the live screen, one-task board lookup, explicit stop settles queued tasks,
-    held-prompt checks paced like detection
-  - [x] four independent review rounds and Codex's review clean, CI green on all three OSes; a real Windows 11 run (WHITE, ConPTY):
-    the paste arrives whole and nothing is typed over a working agent
-- [x] **M0.3 Window: "Give to an agent"** (#885)
-  - [x] a card action on the board (Backlog cards only), also in the command palette (a task and an agent are searchable)
-  - [x] the picker lists the project's running agents, helpers under their parent (decision 8); other projects are never offered
-  - [x] the confirmation names agent, project and machine in full, and says "acts without asking" for an agent that skips permissions
-  - [x] the answer: "sent", "waits for the agent's turn to end", or the refusal sentence from `locales/` (all `task.*`, `agent.queue_full`, `task.dispatch_limited`)
-  - [x] `taskDispatch` in `apps/web/src/net/grant.ts` `AGENT_KINDS` (a limited device asks for an agent grant, not a machine grant)
-  - [x] a window without the capability hides the action (`task.dispatch` not negotiated): the window cannot read capabilities, so it
-    hides the action for a machine once it was refused there as `protocol.capability_missing` (`task.dispatch`) or, from a node too old to
-    decode it, `protocol.invalid_message` (`command`); forgotten when that machine goes offline and on every reconnect
-  - [x] tests (unit, and a browser e2e with `agora-fake-agent`, run against a build with #883), screenshots in both themes, 44 px targets, keyboard path
-- [x] **M0.4 Start a new agent for a task** (ADR-0095 step 3; window: #889, merged; terminal client: #893)
-  - [x] "Start a new one" in the picker opens the ordinary start (kind, machine, folder), then dispatches to the new agent
-  - [x] under a parent: the ordinary ADR-0057 helper start (signed approval as an agent-made request): the window has no person-made helper start, so it stays the agent's ADR-0057 path and is not offered in the picker
-  - [x] the TUI: dispatch from its board list (same command): `b` opens the board, Enter or `g` gives a Backlog task
-- [x] **M0.5 Release 0.3.33** (#888, tag `v0.3.33`; 0.3.34 followed, #1002, tag `v0.3.34`; all three machines updated to it: [2026-11-22 follow-ups](../reviews/2026-11-22-real-machine-followups.md))
-  - [x] release notes; tag; the release workflow (five targets, `.sha256` and `.sig`)
-  - [x] the hub machine (blackview) updated, signature checked; its five agents came back after the restart
-  - [x] win updated and reported (0.3.33, `agora doctor` clean)
-  - [x] mac updated and reported ([macOS 2026-11-21](../reviews/2026-11-21-macos-update-0333.md))
-- [x] **M0.6 ADR-0097** (#874, **decision**): the key that can sign approvals is out of the hub-served page's reach (closes T55)
-  - [x] closed, not now (#874 closed 2026-11-22); T55 stays "not mitigated"
+The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3, release 0.3.33) is done; see git history of this file.
+
+- [ ] **M0.1 The schema stack** (**schema**: the maintainer approves; merge in this order; the hub database moves to version 18)
+  - [ ] #1225 the theme catalog the hub fetches (ADR-0113 step 5; migration 15)
+  - [ ] #1226 plugins stored on the hub, with per-person grants (ADR-0114 step 3; migration 16; **decision**: viewers set their own
+    plugin grants, which narrows ADR-0049's "viewers have no commands")
+  - [ ] #1228 theme packs (ADR-0113 step 2; data only, stacked on #1225)
+  - [ ] #1233 my themes, packs and theme choice follow me across devices (ADR-0113 step 4; migration 17)
+  - [ ] #1237 the signed community plugin catalog (ADR-0114 step 4; migration 18); **human**: create the catalog repositories and the
+    catalog signing key
+- [ ] **M0.2 Reviewed, merge on green**
+  - [ ] #1242 the terminal client: Stop turn, effort and settings in the chat, the start picker, a keybindings file (ADR-0090 step 7,
+    ADR-0066, ADR-0068 decision 6; in independent review)
+  - [ ] #1243 the node renews an agent's file leases while it runs (ADR-0039; review fixes in progress)
+  - [ ] #1244 a refusing skip-permissions policy stops an agent that starts in, or switches to, a mode that skips (P2-16; needs an
+    independent review; **decision**: what `allow` does)
+- [ ] **M0.3 Proposed ADRs** (**decision**)
+  - [ ] #1219 ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2
+  - [ ] #1241 ADR-0119 (a helper started on another machine): settles ADR-0057's open route, seven open questions in the PR
+- [ ] **M0.4 Other open PRs**: #1204 (title rules, **human**: real captures), #1188 (input validation, Codex's; the shared checkout's
+  uncommitted edits)
+- [ ] **M0.5 Release 0.3.40**, then the hub (blackview), win and mac updated (**win**: a real `shutdown /r` check of #1231's Windows
+  part, after the maintainer's go)
 
 ## M1. Prove it on real machines
 
@@ -85,7 +81,8 @@ fixes it.
   - [ ] **decision**: an archive reader for `.tar.gz` / `.zip` (a dependency) or binary-only for now
   - [ ] the window's "Add an agent": the signed list, what is installed where, install with the machine's typed approval
   - [ ] update and roll back from the window (the CLI already keeps the previous version)
-- [ ] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode; built for "Start an agent in a folder" (#1242), not yet remembered per machine
+- [ ] **M2.2 Pickers everywhere** (ADR-0066): the terminal client's start picker for model, effort and mode (#1242); remembering the
+  last choice per kind and machine
 - [ ] **M2.3 Confinement** (ADR-0047, ADR-0050, ADR-0083)
   - [ ] per-project and per-kind choice of the level (decision 1)
   - [ ] **win**: measure the Windows sandbox on real agents, then on by default if it holds
@@ -100,7 +97,8 @@ fixes it.
 - [ ] **M2.8 Plan limits for more tools** (ADR-0091): Claude Code's windows, from its own files, read like Codex's
 - [ ] **M2.9 ACP registry** (ADR-0092): the next steps after the conversion (the reviewed list in a release, "Add an agent" reads it)
 - [ ] **M2.10 Preview a local web server** (ADR-0088): node forwarder, hub relay, the Browser pane (schema is in)
-- [ ] **M2.11 Layouts** (ADR-0068): panel registry, keybindings, the terminal client
+- [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
+  the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
 - [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello
   with the hub, none in the snapshot), so it learns that a machine cannot take a task only from a refusal (#885). Carry each node's
   negotiated capabilities in the snapshot (append-only), then hide actions a machine cannot do before anyone tries
@@ -119,7 +117,8 @@ fixes it.
   - [ ] schema: "accepted by a person", parent link, links to conversation, workspace and branch
   - [ ] the Review column; a person moves a task to Done or back; subtasks with their limits
 - [ ] **M3.3 Chat history survives the node** (ADR-0089, **schema**): node writer and paging, resume and purge, pages in the window
-- [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2): Unix lookup, manifest `[match]`, **win** lookup, the label
+- [ ] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3): Unix lookup (`Pty::foreground_pid` exists, nothing
+  calls it), manifest `[match]`, **win** lookup, the label
 - [ ] **M3.5 The diff names every changed file** (ADR-0071, **schema**): `GitDiffResult.paths`, the review screen says what is not shown
 - [ ] **M3.6 A reply keeps its link across machines** (ADR-0074, **schema**): `MeshPost.message_id` / `reply_to`, the broker and hub checks
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap
@@ -139,3 +138,61 @@ fixes it.
 - [ ] **M4.4 First-run**: from a fresh machine to an agent running in under five minutes, measured with people (**human**)
 - [ ] **M4.5 Remote access**: Cloudflare Tunnel tried with a real tunnel (**human**, `docs/guides/remote-hub.md` part C); a phone over mobile data
 - [ ] **M4.6 Guides**: install, add a machine, add an agent, the board, team mode, remote access; each tried by someone who did not write it
+
+## M5. Community: themes and plugins (ADR-0113, ADR-0114; gap review sections 3 and 4)
+
+Built: theme format 2 and its editor (#1206), the terminal client's themes (#1222), the panel registry (#1214), the sandboxed plugin
+frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#1239). The catalogs and sync are M0.1.
+
+- [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2, in
+  the editor and as `agora theme import`; **decision**: which formats first
+- [ ] **M5.2 Starter themes**: well-known palettes ported after a licence check (**decision**: which ones)
+- [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the
+  wrong machine
+- [ ] **M5.4 Plugins can act** (ADR-0114 amendments, **decision** on the order; each one its own amendment, then built)
+  - [ ] P1 UI actions: open a pane, focus an agent, prepare a prompt the person reads and sends
+  - [ ] P2 palette commands and keybindings declared by a plugin (the safe-mode key stays unbindable)
+  - [ ] P3 a status-line segment and notifications the host draws
+  - [ ] P4 link handlers: a declared pattern in terminal output opens the plugin's panel
+  - [ ] P5 window-side events, read-only; node-side automations need their own ADR (**decision**: now or after P5)
+- [ ] **M5.5 A gallery** for the theme and plugin catalogs: previews, sort, one-step install
+- [ ] **M5.6 Distribution** (**decision**): a second, "unreviewed but sandboxed" catalog tier (ADR-0114 decision 7 amendment); members
+  installing sandboxed plugins for themselves (ADR-0114 open question)
+- [ ] **M5.7 Plugin author kit**: reload on save, `agora plugin new` / `check` / `pack` (today `scripts/pack-plugin.mjs`), a typed
+  description of the bridge messages
+- [ ] **M5.8 Chrome per layout block** and more than one icon set (ADR-0113 follow-ups)
+
+## M6. Agent coverage and detection (gap review section 2)
+
+- [ ] **M6.1 More coding tools out of the box** (G1, **human**): L1 manifests with real fixture screens (Gemini CLI, Copilot CLI,
+  Cursor, Amp, Kiro, Droid, Qwen, Cline, ...); the 41 ACP registry kinds checked with real programs. The largest gap.
+- [ ] **M6.2 Detection engine and self-reported state** (G2): ADR-0117 and ADR-0118 (#1219, M0.3), then built; the manifests' `hooks`
+  table runs
+- [ ] **M6.3 A plain terminal shows its agent** (G3): M3.4
+- [ ] **M6.4 A pushed event stream and a published API description** (G9, **decision**): `agora events` polls every 200 ms today
+- [ ] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an
+  agent can write a theme, a layout or a plugin for its person
+- [ ] **M6.6 Images in terminals** (G11, **decision**): kitty graphics and sixel
+- [ ] **M6.7 Notifications outside the web window** (G13): the terminal client's sounds and the desktop app's own notifications
+
+## M7. Accepted, not built (from the 2026-11-26 sweep of every Accepted ADR)
+
+Items already in M2 and M3 are not repeated here.
+
+- [ ] **M7.1 A helper on another machine** (ADR-0057): needs ADR-0119 (M0.3), then several **schema** steps
+- [ ] **M7.2 Leases across a node restart** (ADR-0039): in #1243's review round
+- [ ] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead; the
+  "needs to join again" card (**schema** for the card)
+- [ ] **M7.4 Where am I signed in** (ADR-0067 rung 5): the session list with revoke; the rung-4 banner
+- [ ] **M7.5 Pairing leftovers** (ADR-0065): the owner's devices trusted in the same step, the push notice, discovery over IPv6
+  (**schema**)
+- [ ] **M7.6 Prices and the panel** (ADR-0021, ADR-0056): periodic price-catalog fetch, owner overrides, manifest `model_map`, `agora`
+  opening the browser, an exclusive bind of the panel port
+- [ ] **M7.7 ACP authenticate** (ADR-0092 steps 2 and 3, **human** to verify): the states in the window; the registry update job
+- [ ] **M7.8 Live update** (ADR-0019, ADR-0075; G4): the hub hands out signed node binaries after approval; stable and preview channels
+  (M2.7 is the handoff)
+- [ ] **M7.9 Install channels** (G7, **decision**): a signature-checking install script, a Homebrew tap, a preview channel
+- [ ] **M7.10 Terminal repaint leftovers** (ADR-0100): origin mode and scroll region restored
+- [ ] **M7.11 QUIC and the direct path** (ADR-0011, ADR-0023): measured first (M3.8)
+- [ ] **M7.12 A documentation site** (G14, Q15, **decision**)
+

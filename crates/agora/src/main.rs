@@ -833,7 +833,7 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 /// ADR-0104 O2: from now on a stop request does not end `agora node` at once once its node is up (`up` set): what this returns says
 /// it arrived, so the node stops cleanly, and the process ends anyway [`NODE_STOP_DEADLINE`] after it. Before the node is up there is
 /// nothing to keep, and a request ends the process at once, as a second request always does. `None` where stop requests are not
-/// caught or the watch could not start (Windows: the session's end is the request, herdr G11): a request then ends the process at once, as before.
+/// caught or the watch could not start (Windows: the session's end is the request): a request then ends the process at once, as before.
 fn node_stop_watch(up: Arc<AtomicBool>) -> Option<std::sync::mpsc::Receiver<()>> {
     if !agora_platform::STOP_REQUESTS_CAUGHT {
         return None;
