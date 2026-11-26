@@ -29,7 +29,7 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'components/Inspector.tsx': { uses: 1, why: 'the Needs you list in the side panel' },
   'layout/TabStrip.tsx': { uses: 1, why: 'the dot on a tab whose agent needs you' },
   'layout/Workspace.tsx': { uses: 1, why: "the top ring of a pane whose agent needs you" },
-  'phone/Phone.tsx': { uses: 2, why: 'the Needs you count on the phone list and on its bar (its request cards are ApprovalRequest)' },
+  'phone/Phone.tsx': { uses: 3, why: 'the Needs you count on the phone list and on its bar (its request cards are ApprovalRequest), and the needs tone of a request folded to one line' },
   'phone/phone.css': { uses: 6, why: 'the needs tint and hairline of an agent that waits, the hairline of the start and switch frames, and a request folded to one line on an agent (its tint, hairline and icon)' },
   'screens.tsx': { uses: 1, why: 'Settings: another device of yours waiting for your approval (redesign PR 8)' },
   'components/NetworkView.tsx': { uses: 1, why: 'My machines: the Needs you count in the hub strip, when an agent waits (redesign PR 9)' },

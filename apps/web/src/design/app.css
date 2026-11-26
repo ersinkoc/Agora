@@ -87,16 +87,16 @@
   :root[data-line-height] * { --tw-leading: var(--ui-line-height); }
   :root[data-ligatures='off'] body { font-variant-ligatures: none; }
   /* What needs the person keeps today's text whatever a theme's weight, line height or ligatures say (the floor, ADR-0113). */
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark),
-  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) * { --tw-leading: initial; font-variant-ligatures: normal; }
-  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { line-height: var(--text-sm--line-height); }
-  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark) { font-weight: 400; }
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold),
+  :root:is([data-line-height], [data-ligatures]) :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) * { --tw-leading: initial; font-variant-ligatures: normal; }
+  :root[data-line-height] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) { line-height: var(--text-sm--line-height); }
+  :root[data-weight] :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .plugin-mark, .phone-fold) { font-weight: 400; }
   /* …and the window's own font (the floor rule at the end of this file sets the font variables there). In the base layer, so a utility on
      the same element (a mono code line) still wins. */
   :is(.kit-callout, .approval, .approval-req, .attention-card, .tile--needs-you, .kit-tone-needs, .state--needs-you, .text-needs-you, .plugin-mark) { font-family: var(--font-ui); }
   h1 { @apply text-2xl font-semibold tracking-tight; }
   /* A section title: sentence case at the strong step (visual-language.md type roles), never a small uppercase label. */
-  h2 { @apply font-semibold text-ink; font-size: var(--text-strong); }
+  h2 { @apply font-semibold text-ink; font-size: var(--text-strong); line-height: var(--tw-leading, var(--text-xs--line-height)); }
   button { @apply cursor-pointer; }
   input, select { @apply rounded-s border border-input-line bg-input px-3 py-2 text-input-ink; font: inherit; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

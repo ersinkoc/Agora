@@ -107,7 +107,7 @@ function PhoneRequest({ ask, guard, onResolve, onOpen, onFold }: { ask: PhoneAsk
   const { approval: x, agent, machine, docked } = ask;
   if (ask.folded && onFold) {
     const title = askTitle(x, visible(agent?.name || approvalName(x)));
-    return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-fold">
+    return <div id={`phone-ask-${x.id}`} tabIndex={-1} className="phone-fold kit-tone-needs">
       <button type="button" className="phone-fold__btn" aria-expanded={false} onClick={() => onFold(false)}>
         <span aria-hidden className="phone-fold__chip"><Icon name={ASK_ICON[askKind(x)]} className="size-4" /></span>
         <span className="min-w-0 flex-1 truncate">{title}</span>
