@@ -98,3 +98,41 @@ message PluginGrantSet {
 message PluginGrantRemove {
   string plugin_id = 1;
 }
+
+// ADR-0114 decision 7 (build step 4): the community plugin catalog, read only. The hub's owner pins the catalog's key and fetches its
+// signed index on the hub's machine (`agora hub plugins key set FILE`, `agora hub plugins update`); the hub checks the index's signature
+// before it keeps an entry. Installing from the catalog is the owner's too, on the hub's machine (`agora hub plugins install ID`); no
+// message installs, upgrades or fetches an archive. A window may list the entries so the person sees what is available.
+
+// client -> hub, answered with `PluginCatalogListResult`. Any signed-in person may ask; it names no node.
+message PluginCatalogList {}
+
+// One plugin as the catalog's signed index lists it. All of it is text from the index: shown as text, never as the window's words or
+// as markup.
+message PluginCatalogEntry {
+  // Lowercase letters, digits and `-`, at most 40: the manifest id it installs as.
+  string plugin_id = 1;
+  string name = 2;
+  // `x.y.z`, as the manifest's.
+  string version = 3;
+  string author = 4;
+  // An SPDX licence identifier.
+  string licence = 5;
+  // One line of what it does; empty when the index gives none.
+  string description = 6;
+  // What it asks to see: rung-1 capability names, in the manifest's order.
+  repeated string capabilities = 7;
+  // The archive's SHA-256, lowercase hex, as the signed index gives it.
+  string sha256 = 8;
+  // The archive's size in bytes (at most 2 MiB).
+  uint64 size = 9;
+}
+
+// `on` is false while the owner has not turned the catalog on; `entries` is then empty. With no catalog key pinned, or a key pinned
+// since the last fetch, it is on with no entry. `updated_at_ms` is when the hub last fetched an index it could verify (0: never).
+message PluginCatalogListResult {
+  bool on = 1;
+  // Ordered by name, then `plugin_id`.
+  repeated PluginCatalogEntry entries = 2;
+  uint64 updated_at_ms = 3;
+}

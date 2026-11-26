@@ -244,7 +244,7 @@ pub fn printable(s: &str) -> String {
     out
 }
 
-fn plain_text(s: &str, max: usize) -> bool {
+pub(crate) fn plain_text(s: &str, max: usize) -> bool {
     !s.trim().is_empty()
         && s.chars().count() <= max
         && s.trim() == s
@@ -253,7 +253,7 @@ fn plain_text(s: &str, max: usize) -> bool {
             .any(|c| c.is_control() || agora_core::text::is_hidden(c))
 }
 
-fn valid_id(s: &str) -> bool {
+pub(crate) fn valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_ID
         && s.chars()
@@ -261,7 +261,7 @@ fn valid_id(s: &str) -> bool {
         && !s.starts_with('-')
 }
 
-fn valid_licence(s: &str) -> bool {
+pub(crate) fn valid_licence(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_LICENCE
         && s.chars()
@@ -269,7 +269,7 @@ fn valid_licence(s: &str) -> bool {
         && s.trim() == s
 }
 
-fn valid_sha256(s: &str) -> bool {
+pub(crate) fn valid_sha256(s: &str) -> bool {
     s.len() == 64
         && s.chars()
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
@@ -365,7 +365,7 @@ pub fn read_index<P>(text: &str) -> Result<(Vec<Entry>, Vec<(String, Refusal<P>)
     Ok((entries, refused))
 }
 
-fn io_error(e: &std::io::Error) -> IndexError {
+pub(crate) fn io_error(e: &std::io::Error) -> IndexError {
     match e.kind() {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => IndexError::TimedOut,
         std::io::ErrorKind::InvalidData if e.to_string().contains("too large") => {

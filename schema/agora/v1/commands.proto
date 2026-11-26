@@ -121,6 +121,9 @@ message CommandRequest {
     // signed-in person; they name no node.
     UserSettingsGet user_settings_get = 118;
     UserSettingsSet user_settings_set = 119;
+    // ADR-0114 decision 7 (step 4): the community plugin catalog, read only (plugins.proto). Answered by the hub for any signed-in
+    // person; it names no node.
+    PluginCatalogList plugin_catalog_list = 120;
   }
 }
 
@@ -183,6 +186,8 @@ message CommandOk {
     PluginGrantListResult plugin_grant_list = 37;
     // ADR-0113 decision 6 (step 4): the answer to `UserSettingsGet` and `UserSettingsSet`.
     UserSettingsValue user_settings = 38;
+    // ADR-0114 decision 7 (step 4): the answer to `PluginCatalogList`.
+    PluginCatalogListResult plugin_catalog_list = 39;
   }
 }
 

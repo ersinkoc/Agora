@@ -2185,6 +2185,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PluginGrantList(_) => "plugin.grant_list",
         Cmd::PluginGrantSet(_) => "plugin.grant_set",
         Cmd::PluginGrantRemove(_) => "plugin.grant_remove",
+        Cmd::PluginCatalogList(_) => "plugin_catalog.list",
         // ADR-0113 decision 6 (step 4): a person's settings are the hub's; a node never receives them (refused as unsupported).
         Cmd::UserSettingsGet(_) => "user_settings.get",
         Cmd::UserSettingsSet(_) => "user_settings.set",

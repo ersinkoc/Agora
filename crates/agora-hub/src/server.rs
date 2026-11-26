@@ -2062,8 +2062,9 @@ fn device_command(
     })
 }
 
-/// ADR-0114 decision 6: the plugin commands a window sends, answered here; `None` for any other command. Every signed-in person, owner,
-/// member or viewer, may list the installed plugins, fetch their packages and set or read their own grants: a plugin only reads what its
+/// ADR-0114 decisions 6 and 7: the plugin commands a window sends, answered here; `None` for any other command. Every signed-in person,
+/// owner, member or viewer, may list the installed plugins and the catalog's entries, fetch the installed packages and set or read their
+/// own grants: a plugin only reads what its
 /// person can already see in the window, and choosing what it may see is the person's own (a viewer could use no plugin otherwise). No
 /// message installs or removes a plugin: that is the owner's, on the hub's machine (`agora hub plugin`). A request that names a node is
 /// refused, as for the device commands.
@@ -2089,7 +2090,8 @@ pub(crate) fn plugin_command(
             | C::PluginFetch(_)
             | C::PluginGrantList(_)
             | C::PluginGrantSet(_)
-            | C::PluginGrantRemove(_),
+            | C::PluginGrantRemove(_)
+            | C::PluginCatalogList(_),
         ) if !req.target_node.is_empty() => (
             "",
             Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node")),
@@ -2099,6 +2101,13 @@ pub(crate) fn plugin_command(
             plugins
                 .list()
                 .map(|plugins| command_ok::Result::PluginList(v1::PluginListResult { plugins }))
+                .map_err(internal),
+        ),
+        // ADR-0114 decision 7: the catalog's entries, read only (installing from it is the owner's, on the hub's machine).
+        Some(C::PluginCatalogList(_)) => (
+            "",
+            crate::plugin_catalog::list(hub.store())
+                .map(command_ok::Result::PluginCatalogList)
                 .map_err(internal),
         ),
         Some(C::PluginFetch(f)) => (

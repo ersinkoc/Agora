@@ -406,7 +406,7 @@ fn is_id(s: &str, max: usize) -> bool {
 }
 
 /// `^(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})\.(0|[1-9]\d{0,5})$`.
-fn is_version(s: &str) -> bool {
+pub(crate) fn is_version(s: &str) -> bool {
     let parts: Vec<&str> = s.split('.').collect();
     parts.len() == 3
         && parts.iter().all(|p| {

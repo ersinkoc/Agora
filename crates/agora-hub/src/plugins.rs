@@ -98,6 +98,18 @@ impl<'a> Plugins<'a> {
     /// Checks `package` and installs it for the hub (`agora hub plugin add`), recording it in the audit trail as the owner's, refused or
     /// not. `agora_version` is the hub's own: a plugin that needs a newer Agora is refused, as a window of this release would refuse it.
     pub fn add(&self, package: &[u8], agora_version: &str, now_ms: u64) -> Result<Added, AddError> {
+        self.add_as(package, agora_version, now_ms, "plugin.add")
+    }
+
+    /// [`Plugins::add`] recorded under `action`: `plugin.add` for a file, `plugin_catalog.install` or `plugin_catalog.upgrade` for a
+    /// package from the community catalog (`crate::plugin_catalog`).
+    pub(crate) fn add_as(
+        &self,
+        package: &[u8],
+        agora_version: &str,
+        now_ms: u64,
+        action: &str,
+    ) -> Result<Added, AddError> {
         let result = self.add_checked(package, agora_version, now_ms);
         // The row's place names the plugin (as `user.*` rows name the person); a refused package has none it could name.
         let (target, outcome) = match &result {
@@ -106,13 +118,8 @@ impl<'a> Plugins<'a> {
             Err(AddError::Full) => (String::new(), "plugin.full".to_string()),
             Err(AddError::Store(_)) => (String::new(), "internal".to_string()),
         };
-        let _ = crate::audit::Audit::new(self.store).record(
-            now_ms,
-            "owner",
-            "plugin.add",
-            &target,
-            &outcome,
-        );
+        let _ =
+            crate::audit::Audit::new(self.store).record(now_ms, "owner", action, &target, &outcome);
         result
     }
 
