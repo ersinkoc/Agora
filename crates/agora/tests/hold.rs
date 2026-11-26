@@ -441,7 +441,7 @@ fn an_agent_that_ends_while_no_node_is_attached_keeps_its_status_and_output_unti
     let mut rig = Rig::new("ended");
     // It writes and ends 2 s after it started, when its node is gone and the holder reads its terminal. Written while the node was
     // there (this one never reads it), its output waited in the terminal for nobody, and it failed once on a macOS runner with nothing
-    // kept: by the XNU source (not measured on a Mac), macOS discards output still unread 0.6 s after the last close of the terminal's
+    // kept: macOS (XNU source; measured on a Mac, 2026-11-26: kept at 0.5 s, gone at 0.7 s) discards output still unread 0.6 s after the last close of the terminal's
     // program side (`ptsclose` drains with a 60-tick timeout, then flushes), so a holder that started reading later than that found none.
     let short = script(&rig.home, "short", &[("", 2000), ("bye", 0)]);
     let mut a = helper("node", &rig, Some(&short));
