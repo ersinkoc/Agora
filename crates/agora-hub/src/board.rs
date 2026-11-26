@@ -295,7 +295,7 @@ impl Boards {
                     "id": key, "kind": a.kind, "machine": a.node_id, "state": state_word(a.state),
                     "holds": mesh.holds(&id, now_ms), "task": mesh.claimed_task(&id),
                     "parent": (!a.parent_agent_id.is_empty()).then_some(a.parent_agent_id.as_str()),
-                    "workspace": view.worktrees.get(&a.worktree_id).map_or("", |w| w.path.as_str()),
+                    "workspace": folder_of(view, key, a),
                 })
             })
             .collect();
@@ -917,6 +917,18 @@ fn state_word(s: agora_protocol::v1::AgentState) -> &'static str {
     }
 }
 
+/// The folder an agent runs in on its machine: its worktree's, or for an agent started in a folder (a workspace, ADR-0052, as every
+/// helper is, ADR-0057), which has no worktree, that workspace's (F1820). Empty when the hub knows neither.
+fn folder_of<'a>(view: &'a View, key: &str, a: &'a crate::projection::AgentView) -> &'a str {
+    if let Some(w) = view.worktrees.get(&a.worktree_id) {
+        return &w.path;
+    }
+    view.agent_workspaces
+        .get(key)
+        .and_then(|w| view.workspaces.get(w))
+        .map_or("", |w| w.path.as_str())
+}
+
 /// ADR-0112: at most this many machines and agents in a `fleet_status` answer; past either the answer says `partial: true`.
 pub const FLEET_MAX_MACHINES: usize = 64;
 pub const FLEET_MAX_AGENTS: usize = 200;
@@ -992,7 +1004,7 @@ fn fleet_within(view: &View, agreed: &BTreeSet<String>, max_bytes: usize) -> Val
         let row = json!({
             "agent_id": clean(key, FLEET_ID_MAX), "kind": clean(&a.kind, 64), "machine": clean(node, FLEET_ID_MAX),
             "project": clean(&a.project_id, FLEET_ID_MAX), "state": state_word(a.state),
-            "workspace": view.worktrees.get(&a.worktree_id).map_or(String::new(), |w| clean(&w.path, FLEET_PATH_MAX)),
+            "workspace": clean(folder_of(view, key, a), FLEET_PATH_MAX),
             "parent": parent,
         });
         if agents.len() == FLEET_MAX_AGENTS || !fits(&row) {
@@ -2785,5 +2797,103 @@ mod tests {
             cut.to_string().len()
         );
         assert!(cut["agents"].as_array().unwrap().len() < FLEET_MAX_AGENTS);
+    }
+
+    /// F1820: an agent started in a folder (a workspace the node registered, ADR-0052, as every helper is, ADR-0057) has no worktree;
+    /// its folder is the workspace's. `fleet_status` and `workspace_status` give it as for an agent in a worktree, never empty.
+    #[test]
+    fn an_agent_in_a_folder_has_that_folder_in_the_hubs_answers() {
+        use agora_protocol::v1::{self as v1, Event};
+        let ev = |seq: u64, body: Body| Event {
+            producer_id: "alpha".into(),
+            seq,
+            at_ms: seq,
+            body: Some(body),
+        };
+        let mut v = View::default();
+        v.apply(&ev(
+            1,
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "alpha".into(),
+                hostname: "alpha".into(),
+                ..Default::default()
+            }),
+        ));
+        v.apply(&ev(
+            2,
+            Body::WorktreeCreated(v1::WorktreeCreated {
+                worktree_id: "w1".into(),
+                checkout_id: "c1".into(),
+                path: "/src/tree".into(),
+                branch: "b".into(),
+            }),
+        ));
+        v.apply(&ev(
+            3,
+            Body::AgentStarted(v1::AgentStarted {
+                agent_id: "tree".into(),
+                project_id: "p".into(),
+                node_id: "alpha".into(),
+                worktree_id: "w1".into(),
+                kind: "claude".into(),
+                ..Default::default()
+            }),
+        ));
+        // As the node records a start in a folder: the workspace, the binding, then the start without a worktree.
+        v.apply(&ev(
+            4,
+            Body::WorkspaceRegistered(v1::WorkspaceRegistered {
+                workspace_id: "ws1".into(),
+                node_id: "alpha".into(),
+                project_id: "p".into(),
+                path: "/home/me/folder".into(),
+                ..Default::default()
+            }),
+        ));
+        v.apply(&ev(
+            5,
+            Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
+                agent_id: "helper".into(),
+                workspace_id: "ws1".into(),
+            }),
+        ));
+        v.apply(&ev(
+            6,
+            Body::AgentStarted(v1::AgentStarted {
+                agent_id: "helper".into(),
+                project_id: "p".into(),
+                node_id: "alpha".into(),
+                kind: "claude".into(),
+                ..Default::default()
+            }),
+        ));
+        let f = fleet(&v, &every(&v));
+        let fleet_row = |id: &str| {
+            f["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["agent_id"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(fleet_row("alpha/tree")["workspace"], "/src/tree");
+        assert_eq!(fleet_row("alpha/helper")["workspace"], "/home/me/folder");
+        let Verdict::Done { result, .. } = Boards::new().status(&v, "p", 10).verdict else {
+            panic!("workspace_status is answered");
+        };
+        let st: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let status_row = |id: &str| {
+            st["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(status_row("alpha/tree")["workspace"], "/src/tree");
+        assert_eq!(status_row("alpha/helper")["workspace"], "/home/me/folder");
     }
 }
