@@ -156,6 +156,11 @@ impl<H> Streams<H> {
         self.open.iter_mut().map(|(a, h)| (a.as_str(), h))
     }
 
+    /// Keeps a stream the caller already has (handed over from elsewhere); answers the one it replaces, if any.
+    pub fn insert(&mut self, agent: &str, h: H) -> Option<H> {
+        self.open.insert(agent.to_string(), h)
+    }
+
     /// Drops one stream that ended (closed by the caller already).
     pub fn forget(&mut self, agent: &str) -> Option<H> {
         self.open.remove(agent)

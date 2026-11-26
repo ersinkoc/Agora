@@ -5552,3 +5552,446 @@ mod theme_tests {
         }
     }
 }
+
+/// ADR-0068 rung 5: the layout in the app shell.
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use crate::layout::tree::panes_of;
+    use agora_vt::{AlacrittyTerminal, Size};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal as Tui;
+    use std::fmt::Write as _;
+
+    fn text(id: &str, args: &[(&str, Arg)]) -> String {
+        let mut s = id.to_string();
+        for (k, v) in args {
+            let v = match v {
+                Arg::Num(n) => n.to_string(),
+                Arg::Str(s) => s.clone(),
+                #[allow(unreachable_patterns)]
+                _ => String::new(),
+            };
+            let _ = write!(s, " {k}={v}");
+        }
+        s
+    }
+
+    fn rows(n: usize) -> Vec<Row> {
+        (1..=n)
+            .map(|i| Row {
+                id: format!("mac/agent-{i}"),
+                label: format!("agent{i}"),
+                state: "idle".into(),
+                needs_you: false,
+                terminal: true,
+                header: false,
+                group: false,
+                request: false,
+                request_always: false,
+                approval: String::new(),
+            })
+            .collect()
+    }
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 30,
+    };
+
+    fn cx(rows: &[Row], area: Rect) -> Ctx<'_> {
+        Ctx {
+            rows,
+            area,
+            modes: Modes::default(),
+            prog: ProgramModes::default(),
+            covered: false,
+            t: &text,
+        }
+    }
+
+    fn key(app: &mut App, rows: &[Row], k: Key) -> Vec<Action> {
+        app.handle(Event::Key(k), &cx(rows, AREA))
+    }
+
+    fn click(app: &mut App, rows: &[Row], col: u16, row: u16) -> Vec<Action> {
+        app.handle(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Down,
+                col,
+                row,
+                ..Default::default()
+            }),
+            &cx(rows, AREA),
+        )
+    }
+
+    fn agents(app: &App) -> Vec<String> {
+        panes_of(&app.workspace().layout.root)
+            .iter()
+            .map(|p| p.bound_agent().unwrap_or(&p.panel).to_string())
+            .collect()
+    }
+
+    fn pane_ids(app: &App) -> Vec<String> {
+        panes_of(&app.workspace().layout.root)
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_digit_in_the_list_applies_a_preset_and_one_goes_back_to_the_tabs() {
+        let rows = rows(3);
+        let mut app = App::default();
+        // The tabs open before tiling come first, then the other agents with a terminal.
+        key(&mut app, &rows, Key::Down);
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        assert_eq!(app.tabs, ["mac/agent-2"]);
+        key(&mut app, &rows, Key::Char('4'));
+        assert!(app.tiled.is_some());
+        assert!(app.tabs.is_empty());
+        assert_eq!(
+            agents(&app),
+            ["mac/agent-2", "mac/agent-1", "mac/agent-3", "empty"]
+        );
+        assert_eq!(
+            layout_engine::preset_of(&app.workspace().layout.root),
+            Some(Preset::TwoByTwo)
+        );
+        for (c, preset) in [
+            ('2', Preset::TwoByOne),
+            ('3', Preset::OneByTwo),
+            ('5', Preset::Focus),
+            ('6', Preset::ThreeByTwo),
+        ] {
+            key(&mut app, &rows, Key::Char(c));
+            assert_eq!(
+                layout_engine::preset_of(&app.workspace().layout.root),
+                Some(preset),
+                "{c}"
+            );
+        }
+        // 1x1 is one tab group of agents: the tabs as before layouts.
+        key(&mut app, &rows, Key::Char('1'));
+        assert!(app.tiled.is_none());
+        assert_eq!(app.tabs, ["mac/agent-2", "mac/agent-1", "mac/agent-3"]);
+        // Digits never reach the caller as letters.
+        assert!(!key(&mut app, &rows, Key::Char('2'))
+            .iter()
+            .any(|a| matches!(a, Action::Command(_))));
+    }
+
+    #[test]
+    fn a_click_moves_the_keyboard_to_a_pane_and_enter_shows_an_agent_there() {
+        let rows = rows(3);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Enter);
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Char('2'));
+        // Three agents in two panes: agent-1 alone, agent-2 and agent-3 as tabs in the second.
+        assert_eq!(agents(&app), ["mac/agent-1", "mac/agent-2", "mac/agent-3"]);
+        let placement = app.placement(AREA).unwrap_or_default();
+        assert_eq!(placement.panes.len(), 2);
+        let right = placement.panes[1].body;
+        click(&mut app, &rows, right.x + 2, right.y + 2);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        assert_eq!(app.focus, Focus::Terminal);
+        // A click on the second tab in that pane's bar brings it to the front.
+        let bar = placement.panes[1].bar;
+        let tabs = crate::layout::view::bar_items(
+            &placement.panes[1],
+            &panes_of(&app.workspace().layout.root),
+            &crate::layout::view::Tiles {
+                rows: &rows,
+                terminals: &[],
+                bindings: &Bindings::default(),
+                focus: None,
+                keyboard: false,
+                zoomed: false,
+                t: &text,
+            },
+        );
+        let first = u16::try_from(tabs[0].1.chars().count()).unwrap_or(0);
+        click(&mut app, &rows, bar.x + first + 1, bar.y);
+        assert_eq!(app.active_agent(), Some("mac/agent-3"));
+        // Typing goes to the agent of the pane in focus.
+        assert_eq!(
+            key(&mut app, &rows, Key::Char('x')),
+            vec![Action::Input(b"x".to_vec())]
+        );
+        // Back in the list, the first pane, and Enter on an agent already shown brings it to the front where it is.
+        key(&mut app, &rows, Key::Ctrl(']'));
+        key(&mut app, &rows, Key::Char('h'));
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        app.selected = 1;
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        assert_eq!(agents(&app).len(), 3);
+    }
+
+    #[test]
+    fn enter_fills_the_empty_pane_in_focus_and_w_closes_the_pane() {
+        let rows = rows(4);
+        let mut app = App::default();
+        app.layout_act(layout_engine::Action::Preset {
+            preset: Preset::TwoByTwo,
+            agents: vec!["mac/agent-1".into()],
+        });
+        let ids = pane_ids(&app);
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[3].clone(),
+        });
+        app.selected = 3;
+        key(&mut app, &rows, Key::Enter);
+        assert_eq!(
+            agents(&app),
+            ["mac/agent-1", "empty", "empty", "mac/agent-4"]
+        );
+        assert_eq!(pane_ids(&app), ids, "the pane keeps its id");
+        assert_eq!(app.active_agent(), Some("mac/agent-4"));
+        key(&mut app, &rows, Key::Ctrl(']'));
+        // w closes the pane in focus; the agent keeps running (the caller says so).
+        let acts = key(&mut app, &rows, Key::Char('w'));
+        assert_eq!(acts.first(), Some(&Action::Close("mac/agent-4".into())));
+        assert_eq!(agents(&app), ["mac/agent-1", "empty", "empty"]);
+    }
+
+    #[test]
+    fn z_maximizes_the_pane_in_focus_and_restores_the_layout() {
+        let rows = rows(4);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let before = app.workspace().layout;
+        key(&mut app, &rows, Key::Char('l'));
+        key(&mut app, &rows, Key::Char('z'));
+        let placement = app.placement(AREA).unwrap_or_default();
+        assert_eq!(placement.panes.len(), 1);
+        assert_eq!(app.active_agent(), Some("mac/agent-2"));
+        // The one pane takes the whole middle.
+        assert_eq!(placement.panes[0].body, Rect::new(29, 1, 91, 28));
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(app.workspace().layout, before);
+        assert_eq!(app.placement(AREA).map(|p| p.panes.len()), Some(4));
+    }
+
+    /// ADR-0068 decision 7: only the panes on screen are watched.
+    #[test]
+    fn only_the_panes_on_screen_are_watched() {
+        let rows = rows(5);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let all = |_: &str| true;
+        let watched = |app: &App, area: Rect| -> Vec<String> {
+            app.tile_streams(area, all)
+                .into_iter()
+                .map(|(a, _)| a)
+                .collect()
+        };
+        // agent-5 is a tab behind agent-4.
+        assert_eq!(
+            watched(&app, AREA),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-4"]
+        );
+        let behind = pane_ids(&app)[4].clone();
+        app.layout_act(layout_engine::Action::Activate { pane: behind });
+        assert_eq!(
+            watched(&app, AREA),
+            ["mac/agent-1", "mac/agent-2", "mac/agent-3", "mac/agent-5"]
+        );
+        // Maximized: one.
+        key(&mut app, &rows, Key::Char('z'));
+        assert_eq!(watched(&app, AREA), ["mac/agent-5"]);
+        key(&mut app, &rows, Key::Char('z'));
+        // A window too small to tile: the pane in focus only.
+        let small = Rect::new(0, 0, 50, 12);
+        assert_eq!(watched(&app, small), ["mac/agent-5"]);
+        // An agent with no terminal (a chat) and a pane of another panel are not watched.
+        let first = pane_ids(&app)[0].clone();
+        app.layout_act(layout_engine::Action::Bind {
+            pane: first,
+            bind: None,
+            panel: Some("approvals".into()),
+        });
+        let no_chat = |a: &str| a != "mac/agent-2";
+        let left: Vec<String> = app
+            .tile_streams(AREA, no_chat)
+            .into_iter()
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(left, ["mac/agent-3", "mac/agent-5"]);
+        // The tabs (before any tiling): none; the active tab's terminal is the caller's as before.
+        key(&mut app, &rows, Key::Char('1'));
+        assert!(app.tile_streams(AREA, all).is_empty());
+    }
+
+    #[test]
+    fn save_layout_as_asks_for_a_name_then_saves_under_it() {
+        let rows = rows(2);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('2'));
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-save-as".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert!(key(&mut app, &rows, Key::Enter).is_empty());
+        assert!(app.palette.as_ref().is_some_and(|p| p.naming));
+        // A name that cannot be a file is not saved.
+        key(&mut app, &rows, Key::Char('/'));
+        assert!(key(&mut app, &rows, Key::Enter).is_empty());
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-save-as".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        key(&mut app, &rows, Key::Enter);
+        for c in "Two".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter),
+            vec![Action::SaveLayout("Two".into())]
+        );
+        assert!(app.palette.is_none());
+        // Saved layouts are offered to use and to delete.
+        app.saved_layouts = vec!["Two".into()];
+        key(&mut app, &rows, Key::Ctrl('k'));
+        for c in "cmd-use".chars() {
+            key(&mut app, &rows, Key::Char(c));
+        }
+        assert_eq!(
+            key(&mut app, &rows, Key::Enter),
+            vec![Action::UseLayout("Two".into())]
+        );
+    }
+
+    #[test]
+    fn panes_that_follow_what_needs_you_show_a_different_agent_each() {
+        let mut rows = rows(3);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('2'));
+        let ids = pane_ids(&app);
+        for id in &ids[..2] {
+            app.layout_act(layout_engine::Action::Bind {
+                pane: id.clone(),
+                bind: Some(Bind::Follow(Follow::Attention)),
+                panel: None,
+            });
+        }
+        assert!(!app.settle_layout(&rows));
+        rows[2].needs_you = true;
+        rows[0].needs_you = true;
+        assert!(app.settle_layout(&rows));
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[0].clone(),
+        });
+        assert_eq!(app.active_agent(), Some("mac/agent-1"));
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[1].clone(),
+        });
+        assert_eq!(app.active_agent(), Some("mac/agent-3"));
+    }
+
+    fn screen(text: &str) -> AlacrittyTerminal {
+        let mut vt = AlacrittyTerminal::new(Size { cols: 45, rows: 13 });
+        vt.feed(text.as_bytes());
+        vt
+    }
+
+    /// A 2 × 2 layout drawn: four panes, each with its bar and its own agent's screen, the line between the columns, and a panel this
+    /// client cannot draw shown as a placeholder.
+    #[test]
+    fn a_two_by_two_layout_is_drawn_pane_by_pane() {
+        let rows = rows(4);
+        let mut app = App::default();
+        key(&mut app, &rows, Key::Char('4'));
+        let ids = pane_ids(&app);
+        app.layout_act(layout_engine::Action::Bind {
+            pane: ids[3].clone(),
+            bind: None,
+            panel: Some("files".into()),
+        });
+        app.layout_act(layout_engine::Action::Focus {
+            pane: ids[0].clone(),
+        });
+        let (one, two, three) = (
+            screen("screen one"),
+            screen("screen two"),
+            screen("screen three"),
+        );
+        let tiles: Vec<(&str, &dyn Terminal)> = vec![
+            ("mac/agent-2", &two as &dyn Terminal),
+            ("mac/agent-3", &three as &dyn Terminal),
+        ];
+        let details: Vec<String> = Vec::new();
+        let mut tui = match Tui::new(TestBackend::new(AREA.width, AREA.height)) {
+            Ok(t) => t,
+            Err(e) => panic!("{e}"),
+        };
+        let drawn = tui.draw(|f| {
+            app.draw(
+                f,
+                &Screen {
+                    rows: &rows,
+                    terminal: Some(&one),
+                    details: &details,
+                    notice: "",
+                    no_screen: None,
+                    conversation: None,
+                    dialog: None,
+                    note: None,
+                    tiles: &tiles,
+                    colors: ColorMode::Mono,
+                    t: &text,
+                },
+            );
+        });
+        assert!(drawn.is_ok());
+        let buf = tui.backend().buffer().clone();
+        let line = |y: u16| -> String {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        // The middle starts after the tree (28) and its line; the panes are 45 columns with a line between them at 74, and the 29 rows
+        // above the footer make two rows of panes, 15 and 14 (each a bar, then the screen).
+        let (left, right) = (29usize, 75usize);
+        let cell = |y: u16, x: usize, n: usize| line(y).chars().skip(x).take(n).collect::<String>();
+
+        assert!(cell(0, left, 45).starts_with(" agent1"), "{:?}", line(0));
+        assert!(cell(0, right, 45).starts_with(" agent2"), "{:?}", line(0));
+        assert_eq!(cell(1, left, 12), "screen one  ");
+        assert_eq!(cell(1, right, 12), "screen two  ");
+        assert!(cell(15, left, 45).starts_with(" agent3"), "{:?}", line(15));
+        assert!(
+            cell(15, right, 45).starts_with(" tui-layout-panel-files"),
+            "{:?}",
+            line(15)
+        );
+        assert_eq!(cell(16, left, 12), "screen three");
+        // The panel this client cannot draw: its name and "open in the window".
+        assert!(
+            cell(16, right, 45).starts_with("tui-layout-elsewhere"),
+            "{:?}",
+            line(16)
+        );
+        assert!(
+            cell(17, right, 45).starts_with("panel=tui-layout-panel-files"),
+            "{:?}",
+            line(17)
+        );
+        // The tree marks the agents shown.
+        assert!(line(0).starts_with("• agent1") && line(3).starts_with("  agent4"));
+        for y in 0..29 {
+            assert_eq!(line(y).chars().nth(74), Some('│'), "row {y}");
+        }
+        // The footer names the layout's keys.
+        assert!(
+            line(29).contains("tui-app-keys-tree-tiled"),
+            "{:?}",
+            line(29)
+        );
+    }
+}

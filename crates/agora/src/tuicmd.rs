@@ -3515,6 +3515,34 @@ fn console(
             c.note.copy = trust_command().filter(|cmd| c.notice.contains(cmd.as_str()));
             redraw = true;
         }
+        // ADR-0068: the keyboard moved to another pane of a tiled layout: the streams change hands instead of closing and opening
+        // again (the agent before stays watched in its own pane while it is on screen; the one now in focus was watched in its pane).
+        if c.app.tiled.is_some() {
+            let active = c.app.active_agent().map(str::to_string);
+            if preview
+                .as_ref()
+                .is_some_and(|p| Some(&p.agent) != active.as_ref())
+            {
+                if let Some(old) = preview.take() {
+                    if let Some((agent, w, h)) = sized.as_ref().filter(|(a, _, _)| *a == old.agent)
+                    {
+                        tile_sized.insert(agent.clone(), (*w, *h));
+                    }
+                    if tiles.get(&old.agent).is_some() {
+                        old.close(session);
+                    } else {
+                        let agent = old.agent.clone();
+                        tiles.insert(&agent, old);
+                    }
+                }
+            }
+            if let Some(a) = active.as_deref().filter(|_| preview.is_none()) {
+                if let Some(p) = tiles.forget(a) {
+                    preview = Some(p);
+                    sized = tile_sized.remove(a).map(|(w, h)| (a.to_string(), w, h));
+                }
+            }
+        }
         if let Some(s) = &c.snapshot {
             follow(
                 session,
@@ -3906,6 +3934,8 @@ fn conversation_lines(say: &Say, c: &Console, p: &ChatPane, pane: Area) -> Vec<S
     lines
 }
 
+// The screens it draws come from three places (the agent in front, its chat, the other panes of a tiled layout): one argument each.
+#[allow(clippy::too_many_arguments)]
 fn draw_console(
     say: &Say,
     c: &mut Console,
