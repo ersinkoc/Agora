@@ -65,6 +65,9 @@ fn hubside(node_id: &str) -> Hubside {
                 "workspace.directory".into(),
                 "directory.list".into(),
                 "agent.launch_settings".into(),
+                // ADR-0090: Stop turn and an agent's settings from the terminal console.
+                "agent.cancel_turn".into(),
+                "agent.set_config".into(),
                 // ADR-0108
                 "agent.forget.local".into(),
                 // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
@@ -593,6 +596,20 @@ fn the_terminal_console_follows_a_chat_agents_conversation_sends_a_request_and_s
             ChatEvent::Quiet => {}
         }
     }
+    // ADR-0090 step 7: Stop turn and a setting reach the machine through the hub (the agent stays).
+    session
+        .cancel_turn("laptop", &s.agent_id, false)
+        .expect("the machine ends the turn");
+    // The fake adapter offers no settings (it does not say `config`), so the machine refuses the setting with the capability it lacks.
+    let set = session
+        .set_config("laptop", &s.agent_id, "effort", "high")
+        .unwrap_err();
+    assert_eq!(set.code, "protocol.capability_missing", "{set:?}");
+    assert_eq!(
+        set.params.get("capability").and_then(|p| p.value.as_ref()),
+        Some(&v1::param_value::Value::Str("agent.set_config".into())),
+        "{set:?}"
+    );
     session.terminal_close(stream);
     session.stop_agent("laptop", &s.agent_id).unwrap();
     // Starting another one from the console: the machine lists what it can start, the project comes from the snapshot.

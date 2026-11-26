@@ -805,10 +805,36 @@ pub fn render_chat(
     entries: &[ChatEntry],
     agent: &str,
     typed: &str,
+    size: (usize, usize),
+    color: bool,
+    t: Text<'_>,
+    watching: bool,
+) -> Vec<String> {
+    render_chat_view(
+        entries,
+        agent,
+        typed,
+        size,
+        color,
+        t,
+        watching,
+        crate::chat::View::default(),
+    )
+}
+
+/// [`render_chat`] as `view` says (ADR-0090 step 7, [`crate::chat::View`]): the thinking shown or not, and with entries kept by
+/// [`crate::chat::merge`] (`view.rich`) a tool call's status, a plan's steps, a permission's outcome and the prompts that wait; the
+/// hint then also names `/stop`, `/effort` and `/set`. A thought is one line saying it is hidden unless `view.thoughts`.
+#[allow(clippy::too_many_arguments)]
+pub fn render_chat_view(
+    entries: &[ChatEntry],
+    agent: &str,
+    typed: &str,
     (cols, rows): (usize, usize),
     color: bool,
     t: Text<'_>,
     watching: bool,
+    view: crate::chat::View,
 ) -> Vec<String> {
     let (bold, dim, reset) = if color {
         (BOLD, DIM, RESET)
@@ -825,7 +851,9 @@ pub fn render_chat(
                 &[("agent", Arg::Str(agent.to_string()))],
             )
         };
+        let rich_body = crate::chat::body(e, view, t);
         let body = match ChatKind::try_from(e.kind).unwrap_or(ChatKind::Unspecified) {
+            _ if rich_body.is_some() => rich_body.unwrap_or_default(),
             // A tool call in words, as the web window says it ("Command cargo test"); text that is not a call is shown as it came.
             ChatKind::ToolCall => match crate::tool::call(&e.text) {
                 Some(c) => tool_line(&c, t),
@@ -864,7 +892,7 @@ pub fn render_chat(
     let hint_id = if watching {
         key!("tui-chat-watching")
     } else {
-        key!("tui-chat-hint")
+        crate::chat::hint_key(view.rich)
     };
     let hint = wrap_row(&t(hint_id, &[]), hint_width, hint_width);
     let input = usize::from(!watching);
