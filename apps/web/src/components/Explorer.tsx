@@ -98,6 +98,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                   <button type="button" className="ide-row flex-1" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${a.machine} · ${a.workspace}`}>
                     <span className="opacity-60"><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span>
                     <span className="min-w-0 flex-1 truncate text-muted">{a.name}</span>
+                    <FinishedMark agentId={a.id} compact />
                     <StatusMark state="finished" />
                   </button>
                   {onResume && <button type="button" className="ide-chip me-1 flex-none hover:text-ink" disabled={resuming === a.id} onClick={() => onResume(a, a.interrupted?.stillRunning ? 'stop' : a.interrupted?.resumable ? 'resume' : 'again')}>
