@@ -1798,6 +1798,10 @@ fn board_for_node(
         return;
     }
     let a = hub.board_call(node_id, call, now_ms());
+    // ADR-0115 (#1150): what restoring the board owes agents (a task of an older board given a new id), whatever the call's answer.
+    for n in &a.notices {
+        board_notice(hub, n);
+    }
     let ok = |shared: bool, result: String, is_error: bool| v1::CommandResponse {
         request_id: rid.to_string(),
         result: Some(command_response::Result::Ok(v1::CommandOk {

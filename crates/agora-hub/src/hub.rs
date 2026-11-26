@@ -732,8 +732,9 @@ impl Hub {
         now_ms: u64,
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
-        let key = self.restore_board(&g.view, project, now_ms);
-        let (events, notices) = self.boards.joined(&g.view, node, project, work, now_ms);
+        let (key, mut notices) = self.restore_board(&mut g, project, now_ms);
+        let (events, joined) = self.boards.joined(&g.view, node, project, work, now_ms);
+        notices.extend(joined);
         if !events.is_empty() {
             if let Some(bytes) = self.boards.snapshot(project, now_ms) {
                 let _ = self.store.set_setting(&key, &bytes);
@@ -777,6 +778,7 @@ impl Hub {
             events: Vec::new(),
             handoff: None,
             fanout: None,
+            notices: Vec::new(),
         };
         let mut g = self.lock();
         // #996: a machine that left while the store refused the record is offline before the board decides anything (a handoff
@@ -791,7 +793,7 @@ impl Hub {
         // ADR-0115: an older node names a repository on a case-insensitive host in its own case; the board is the folded project's.
         let project = agora_core::fold_project_id(&call.project_id);
         let project = project.as_ref();
-        let key = self.restore_board(&g.view, project, now_ms);
+        let (key, notices) = self.restore_board(&mut g, project, now_ms);
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
         // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
         // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
@@ -806,43 +808,21 @@ impl Hub {
             &call.arguments_json,
             now_ms,
         );
+        a.notices.extend(notices);
         if a.events.is_empty() {
             return a;
         }
-        let first = g.hub_seq + 1;
-        let events: Vec<Event> = std::mem::take(&mut a.events)
-            .into_iter()
-            .zip(first..)
-            .map(|(body, seq)| Event {
-                producer_id: RESERVED_HUB_ID.to_string(),
-                seq,
-                at_ms: now_ms,
-                body: Some(body),
-            })
-            .collect();
-        let payloads: Vec<(u64, Vec<u8>)> =
-            events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
-        let snapshot = self.boards.snapshot(project, now_ms);
-        let stored = self.store.append_batch_with_setting(
-            RESERVED_HUB_ID,
-            first,
-            &payloads,
-            snapshot.as_deref().map(|bytes| (key.as_str(), bytes)),
-        );
-        match stored {
-            Ok(positions) => {
-                g.hub_seq = first + events.len() as u64 - 1;
-                // Only now does anyone hear of it: the view, the windows and the nodes.
-                for (pos, event) in positions.into_iter().zip(events) {
-                    Self::publish(&mut g, Delivered { pos, event });
-                }
-                a
-            }
+        let events = std::mem::take(&mut a.events);
+        // Only once stored does anyone hear of it: the view, the windows and the nodes.
+        match self.store_board(&mut g, project, &key, events, &[], now_ms) {
+            Ok(()) => a,
             Err(_) => {
                 if let Some(board) = before {
                     self.boards.restore(project, board);
                 }
-                refused()
+                let mut r = refused();
+                r.notices = a.notices;
+                r
             }
         }
     }
@@ -863,6 +843,7 @@ impl Hub {
             events: Vec::new(),
             handoff: None,
             fanout: None,
+            notices: Vec::new(),
         };
         if !call.project_id.is_empty() {
             return invalid("project_id");
@@ -878,23 +859,31 @@ impl Hub {
         crate::board::fleet_answer(view, agreed)
     }
 
-    /// Restores an uninitialized board and returns its storage key. Callers hold the hub lock so calls and joins cannot
-    /// reload over one another's newer in-memory work.
-    fn restore_board(&self, view: &View, project: &str, now_ms: u64) -> String {
+    /// Restores an uninitialized board and returns its storage key, with the notices the restore owes agents. Callers hold the hub
+    /// lock so calls and joins cannot reload over one another's newer in-memory work.
+    fn restore_board(
+        &self,
+        g: &mut Inner,
+        project: &str,
+        now_ms: u64,
+    ) -> (String, Vec<crate::board::Notice>) {
         let key = format!("board.{project}");
         if self.boards.has(project) {
-            return key;
+            return (key, Vec::new());
         }
         let mut parts = Vec::new();
         if let Ok(Some(bytes)) = self.store.setting(&key) {
             parts.push(bytes);
         }
+        let own = parts.first().cloned();
         // ADR-0115: boards an older hub stored under the project's spellings in another case (one per spelling it saw). Each is
         // merged into the folded project's board once (`board-merged.<spelling>` remembers it, so a restart does not add it twice)
         // and the result is stored under the folded id; the old records are left for a downgrade.
-        let spellings: std::collections::BTreeSet<&str> = view
+        let spellings: std::collections::BTreeSet<String> = g
+            .view
             .spellings_of(project)
             .filter(|s| *s != project)
+            .map(str::to_string)
             .collect();
         let mut merged = Vec::new();
         for spelling in spellings {
@@ -911,23 +900,82 @@ impl Hub {
             (0, _) => {}
             (1, true) => self.boards.load(project, &parts[0], now_ms),
             _ => {
-                self.boards.load(
-                    project,
-                    &crate::board::Boards::merge_snapshots(&parts),
-                    now_ms,
-                );
-                let stored = self
-                    .boards
-                    .snapshot(project, now_ms)
-                    .is_some_and(|bytes| self.store.set_setting(&key, &bytes).is_ok());
-                if stored {
-                    for marker in merged {
-                        let _ = self.store.set_setting(&marker, project.as_bytes());
+                let m = crate::board::Boards::merge_snapshots(&parts);
+                let none = self.boards.checkpoint(project);
+                self.boards.load(project, &m.bytes, now_ms);
+                // #1150: the window learns what the merge changed (a task with a new id, and the one that kept the id it had), and
+                // the merged board is stored with its markers and those events in one transaction. A board stored without its
+                // markers would be merged again at the next start and its tasks added twice; so if the store refuses, the folded
+                // board is used alone, as it was stored, and the merge is tried again at the next start.
+                let changes = self.boards.task_changes(project, &m.restated);
+                let markers: Vec<(String, Vec<u8>)> = merged
+                    .into_iter()
+                    .map(|marker| (marker, project.as_bytes().to_vec()))
+                    .collect();
+                let stored = self.write_unrecorded(g).is_ok()
+                    && self
+                        .store_board(g, project, &key, changes, &markers, now_ms)
+                        .is_ok();
+                if !stored {
+                    self.boards.restore(project, none);
+                    if let Some(bytes) = own {
+                        self.boards.load(project, &bytes, now_ms);
                     }
+                    return (key, Vec::new());
                 }
+                // As after a join, only an agent running in the project is told (a node that started again lost its agents).
+                let mut notices = m.notices;
+                notices.retain(|n| {
+                    g.view
+                        .agents
+                        .get(&format!("{}/{}", n.to_node, n.to_agent))
+                        .is_some_and(|a| a.running && a.project_id == project)
+                });
+                return (key, notices);
             }
         }
-        key
+        (key, Vec::new())
+    }
+
+    /// Stores `project`'s board under `key` with the hub's events `bodies` and the further `settings`, in one transaction, and
+    /// publishes the events once stored.
+    fn store_board(
+        &self,
+        g: &mut Inner,
+        project: &str,
+        key: &str,
+        bodies: Vec<Body>,
+        settings: &[(String, Vec<u8>)],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let snapshot = self
+            .boards
+            .snapshot(project, now_ms)
+            .ok_or_else(|| StoreError(format!("no board for {project}")))?;
+        let first = g.hub_seq + 1;
+        let events: Vec<Event> = bodies
+            .into_iter()
+            .zip(first..)
+            .map(|(body, seq)| Event {
+                producer_id: RESERVED_HUB_ID.to_string(),
+                seq,
+                at_ms: now_ms,
+                body: Some(body),
+            })
+            .collect();
+        let payloads: Vec<(u64, Vec<u8>)> =
+            events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
+        let all: Vec<(&str, &[u8])> = std::iter::once((key, snapshot.as_slice()))
+            .chain(settings.iter().map(|(k, v)| (k.as_str(), v.as_slice())))
+            .collect();
+        let positions =
+            self.store
+                .append_batch_with_settings(RESERVED_HUB_ID, first, &payloads, &all)?;
+        g.hub_seq += events.len() as u64;
+        for (pos, event) in positions.into_iter().zip(events) {
+            Self::publish(g, Delivered { pos, event });
+        }
+        Ok(())
     }
 
     /// ADR-0115: `req` as `node` should get it: a project it names in the spelling that node last reported for it (an older node
@@ -2403,6 +2451,162 @@ mod tests {
         let again = list(&hub);
         assert_eq!(titles(&again), titles(&first), "{again}");
         drop(hub);
+        remove_db(&path);
+    }
+
+    /// ADR-0115 board, as an older hub stored it.
+    fn board_text(tasks: &[(&str, &str, Option<&str>)]) -> String {
+        let tasks: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|(id, title, owner)| serde_json::json!({"id": id, "title": title, "detail": "", "depends_on": [], "done": false, "owner": owner, "summary": ""}))
+            .collect();
+        serde_json::json!({"next": 3, "tasks": tasks, "leases": []}).to_string()
+    }
+
+    /// The titles `task_list` gives for `project` on `hub`, sorted.
+    fn listed_titles(hub: &Hub, project: &str) -> Vec<String> {
+        match hub
+            .board_call("new", &board_call_0115(project, "task_list", "{}"), 6)
+            .verdict
+        {
+            crate::board::Verdict::Done { result, .. } => {
+                let v: serde_json::Value =
+                    serde_json::from_str(result["content"][0]["text"].as_str().unwrap_or("null"))
+                        .unwrap();
+                let mut t: Vec<String> = v
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["title"].as_str().unwrap().to_string())
+                    .collect();
+                t.sort();
+                t
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// #1150 (ADR-0115 notes 1 and 2): merging an older hub's boards tells the window of each task given a new id and of the task
+    /// that kept the id (it showed both boards' `t-1` as one), and tells the owner of a moved task its new id (`task_moved`, as after
+    /// a join), once.
+    #[test]
+    fn a_board_merge_restates_the_tasks_it_renamed_and_tells_their_owners() {
+        let (hub, path) = hub_on_file("adr0115-merge-events");
+        let (old, folded) = two_spellings(&hub);
+        let put = |spelling: &str, text: String| {
+            hub.store()
+                .set_setting(&format!("board.{spelling}"), text.as_bytes())
+                .unwrap();
+        };
+        put(
+            &folded,
+            board_text(&[("t-1", "folded one", None), ("t-2", "folded two", None)]),
+        );
+        put(&old, board_text(&[("t-1", "cased one", Some("old/a"))]));
+        // Opened again: the agents are still running and their nodes did not start again since (a node that did lost its agents,
+        // and their claims go back as the board loads).
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        for n in ["old", "new"] {
+            let _ = hub.node_link_opened(n, Vec::new(), 5).unwrap();
+            hub.board_join_settled(n, &folded);
+        }
+        let first = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 6);
+        let view = hub.view().0;
+        let task = |title: &str| {
+            view.tasks
+                .iter()
+                .find(|(_, t)| t.title == title)
+                .map(|(k, t)| (k.clone(), t.owner.clone()))
+        };
+        assert_eq!(
+            task("folded one"),
+            Some((format!("{folded}/t-1"), String::new())),
+            "{:?}",
+            view.tasks
+        );
+        let (moved_key, owner) = task("cased one").expect("the moved task is shown");
+        assert_eq!(owner, "old/a", "its owner keeps it under its new id");
+        let moved = moved_key
+            .strip_prefix(&format!("{folded}/"))
+            .unwrap()
+            .to_string();
+        assert_ne!(moved, "t-1");
+        assert!(
+            task("folded two").is_none(),
+            "a task whose id no other board had is not restated"
+        );
+        assert_eq!(
+            first.notices,
+            [crate::board::Notice {
+                to_node: "old".into(),
+                to_agent: "a".into(),
+                body: serde_json::json!({"board": "task_moved", "from": "t-1", "to": moved})
+                    .to_string(),
+            }]
+        );
+        let again = hub.board_call("new", &board_call_0115(&folded, "task_list", "{}"), 7);
+        assert!(again.notices.is_empty());
+        drop(hub);
+        remove_db(&path);
+    }
+
+    /// #1150 (ADR-0115 note 3): the merged board and its `board-merged.<spelling>` markers are stored together. When the store
+    /// refuses the markers, the folded board is used alone (nothing of the merge is stored), a change made meanwhile is kept, and the
+    /// next start merges once: no task is added twice, none is lost.
+    #[test]
+    fn a_board_merge_whose_markers_are_refused_never_adds_tasks_twice() {
+        let (hub, path) = hub_on_file("adr0115-merge-markers");
+        let (old, folded) = two_spellings(&hub);
+        for (spelling, title) in [(&folded, "folded one"), (&old, "cased one")] {
+            hub.store()
+                .set_setting(
+                    &format!("board.{spelling}"),
+                    board_text(&[("t-1", title, None)]).as_bytes(),
+                )
+                .unwrap();
+        }
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch(
+                "CREATE TRIGGER no_markers BEFORE INSERT ON settings WHEN NEW.key LIKE 'board-merged.%'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        for n in ["old", "new"] {
+            hub.board_join_settled(n, &folded);
+        }
+        assert_eq!(listed_titles(&hub, &folded), ["folded one"]);
+        let made = hub.board_call(
+            "new",
+            &board_call_0115(&folded, "task_create", r#"{"title": "made meanwhile"}"#),
+            7,
+        );
+        assert!(
+            matches!(
+                made.verdict,
+                crate::board::Verdict::Done {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "{:?}",
+            made.verdict
+        );
+        other.execute_batch("DROP TRIGGER no_markers;").unwrap();
+        drop(other);
+        drop(hub);
+        for _ in 0..2 {
+            let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+            for n in ["old", "new"] {
+                let _ = hub.node_link_opened(n, Vec::new(), 8).unwrap();
+                hub.board_join_settled(n, &folded);
+            }
+            assert_eq!(
+                listed_titles(&hub, &folded),
+                ["cased one", "folded one", "made meanwhile"]
+            );
+        }
         remove_db(&path);
     }
 

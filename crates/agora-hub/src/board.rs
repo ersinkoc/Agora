@@ -61,6 +61,8 @@ pub struct Answer {
     /// Audit events the call produced, to be published as hub events.
     pub events: Vec<Body>,
     pub handoff: Option<Handoff>,
+    /// Board notices for agents to send with the answer (ADR-0115: the owners of tasks a merge of older boards gave new ids, #1150).
+    pub notices: Vec<Notice>,
 }
 
 fn answer(verdict: Verdict) -> Answer {
@@ -69,6 +71,7 @@ fn answer(verdict: Verdict) -> Answer {
         events: Vec::new(),
         handoff: None,
         fanout: None,
+        notices: Vec::new(),
     }
 }
 
@@ -124,6 +127,27 @@ pub struct Notice {
     pub to_node: String,
     pub to_agent: String,
     pub body: String,
+}
+
+/// A [`Notice`] for the agent `to` names (`<node>/<agent>`); none for an id without a node.
+fn notice_to(to: &str, body: Value) -> Option<Notice> {
+    let (to_node, to_agent) = to.split_once('/')?;
+    Some(Notice {
+        to_node: to_node.to_string(),
+        to_agent: to_agent.to_string(),
+        body: body.to_string(),
+    })
+}
+
+/// What [`Boards::merge_snapshots`] made of several boards (ADR-0115, #1150).
+pub struct Merged {
+    /// The merged board, as [`Boards::snapshot`] text.
+    pub bytes: Vec<u8>,
+    /// For the owner of each task given a new id: `task_moved`, as after a join.
+    pub notices: Vec<Notice>,
+    /// Each task given a new id, and each task that kept an id another board also had: a window keys a task by project and id, so
+    /// it showed the boards' tasks with one id as one, and each is stated again.
+    pub restated: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -424,53 +448,97 @@ impl Boards {
 
     /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
     /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
-    /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows), and
-    /// a lease on a path already held is dropped (the first holder keeps it). A damaged one is left out.
-    pub fn merge_snapshots(parts: &[Vec<u8>]) -> Vec<u8> {
+    /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
+    /// its owner is told, as `task_moved` after a join), and a lease on a path already held is dropped (the first holder keeps it).
+    /// A dependency on a task its own board no longer has stays unmet: when another board's task has that id, it is given an id of
+    /// its own that no task has or will have, instead of naming that task (#1150). A damaged one is left out.
+    pub fn merge_snapshots(parts: &[Vec<u8>]) -> Merged {
         let boards: Vec<Value> = parts
             .iter()
             .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
             .filter(Value::is_object)
             .collect();
+        let tasks_of =
+            |b: &Value| -> Vec<Value> { b["tasks"].as_array().cloned().unwrap_or_default() };
+        let id_of = |t: &Value| t["id"].as_str().unwrap_or("").to_string();
         let task_number = |id: &str| id.strip_prefix("t-").and_then(|n| n.parse::<u64>().ok());
+        // Above every id any of them names, a dependency's included: a new id never meets one.
         let mut next = boards
             .iter()
             .map(|b| b["next"].as_u64().unwrap_or(1))
             .chain(boards.iter().flat_map(|b| {
-                b["tasks"]
-                    .as_array()
+                tasks_of(b)
                     .into_iter()
-                    .flatten()
-                    .filter_map(|t| t["id"].as_str().and_then(task_number))
+                    .flat_map(|t| {
+                        let deps = t["depends_on"].as_array().cloned().unwrap_or_default();
+                        std::iter::once(t["id"].clone()).chain(deps)
+                    })
+                    .filter_map(|id| id.as_str().and_then(task_number))
                     .map(|n| n + 1)
             }))
             .max()
             .unwrap_or(1);
-        let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
+        // Each board's new ids, and every id the merged board holds.
         let mut taken = BTreeSet::<String>::new();
-        let mut held = BTreeSet::<String>::new();
-        for board in boards {
-            let mine: Vec<Value> = board["tasks"].as_array().cloned().unwrap_or_default();
-            let mut renamed = std::collections::BTreeMap::<String, String>::new();
+        let mut renames = Vec::<BTreeMap<String, String>>::new();
+        let mut restated = BTreeSet::<String>::new();
+        let mut notices = Vec::new();
+        for board in &boards {
+            let mine = tasks_of(board);
+            let mut renamed = BTreeMap::<String, String>::new();
             for t in &mine {
-                let id = t["id"].as_str().unwrap_or("").to_string();
+                let id = id_of(t);
                 if taken.contains(&id) {
-                    renamed.insert(id, format!("t-{next}"));
+                    let to = format!("t-{next}");
                     next += 1;
+                    if let Some(owner) = t["owner"].as_str() {
+                        notices.extend(notice_to(
+                            owner,
+                            json!({"board": "task_moved", "from": id, "to": to}),
+                        ));
+                    }
+                    restated.insert(id.clone());
+                    restated.insert(to.clone());
+                    renamed.insert(id, to);
                 }
             }
+            for t in &mine {
+                let id = id_of(t);
+                taken.insert(renamed.get(&id).cloned().unwrap_or(id));
+            }
+            renames.push(renamed);
+        }
+        let (mut tasks, mut leases) = (Vec::<Value>::new(), Vec::<Value>::new());
+        let mut held = BTreeSet::<String>::new();
+        for (board, renamed) in boards.iter().zip(&renames) {
+            let mine = tasks_of(board);
+            let own: BTreeSet<String> = mine.iter().map(id_of).collect();
+            let mut unmet = BTreeMap::<String, String>::new();
             for mut t in mine {
                 let rename = |id: &str| renamed.get(id).cloned().unwrap_or_else(|| id.to_string());
-                let id = rename(t["id"].as_str().unwrap_or(""));
-                t["id"] = Value::String(id.clone());
+                t["id"] = Value::String(rename(&id_of(&t)));
                 if let Some(deps) = t["depends_on"].as_array_mut() {
                     for d in deps.iter_mut() {
-                        if let Some(x) = d.as_str() {
-                            *d = Value::String(rename(x));
-                        }
+                        let Some(x) = d.as_str() else {
+                            continue;
+                        };
+                        let to = if own.contains(x) {
+                            rename(x)
+                        } else if taken.contains(x) {
+                            // Another board's task has this id: an id no task has keeps it unmet, as it was on its own board.
+                            unmet
+                                .entry(x.to_string())
+                                .or_insert_with(|| {
+                                    next += 1;
+                                    format!("t-{}", next - 1)
+                                })
+                                .clone()
+                        } else {
+                            x.to_string()
+                        };
+                        *d = Value::String(to);
                     }
                 }
-                taken.insert(id);
                 tasks.push(t);
             }
             for l in board["leases"].as_array().cloned().unwrap_or_default() {
@@ -479,9 +547,41 @@ impl Boards {
                 }
             }
         }
-        json!({"next": next, "tasks": tasks, "leases": leases})
-            .to_string()
-            .into_bytes()
+        Merged {
+            bytes: json!({"next": next, "tasks": tasks, "leases": leases})
+                .to_string()
+                .into_bytes(),
+            notices,
+            restated,
+        }
+    }
+
+    /// ADR-0115 (#1150): `TaskChanged` for each of `ids` the project's board holds, as the board says it when the task changes: what
+    /// a window must be told again after a merge.
+    pub fn task_changes(&self, project: &str, ids: &BTreeSet<String>) -> Vec<Body> {
+        use agora_mesh::broker::TaskStatus;
+        let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = g.get(project) else {
+            return Vec::new();
+        };
+        let (_, tasks) = mesh.export_tasks();
+        tasks
+            .iter()
+            .filter(|t| t.project == project && ids.contains(t.id.as_str()))
+            .map(|t| {
+                Body::TaskChanged(agora_protocol::v1::TaskChanged {
+                    task_id: t.id.as_str().to_string(),
+                    project_id: project.to_string(),
+                    title: t.title.clone(),
+                    claimed_by_agent_id: t
+                        .owner
+                        .as_ref()
+                        .map(|o| o.as_str().to_string())
+                        .unwrap_or_default(),
+                    done: t.status == TaskStatus::Done,
+                })
+            })
+            .collect()
     }
 
     /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
@@ -718,6 +818,7 @@ impl Boards {
             events,
             handoff,
             fanout: None,
+            notices: Vec::new(),
         }
     }
 }
@@ -1036,6 +1137,64 @@ mod tests {
     use super::*;
     use crate::projection::{AgentView, NodeView};
     use agora_protocol::v1::AgentState;
+
+    /// #1150 (ADR-0115 note 4): a dependency on a task its own board no longer has stays unmet after a merge. It never names another
+    /// board's task with that id, whichever board came first; its new id is one no task has, and new tasks never get it.
+    #[test]
+    fn a_merged_dependency_never_names_another_boards_task() {
+        let board = |next: u64, tasks: Value| {
+            json!({"next": next, "tasks": tasks, "leases": []})
+                .to_string()
+                .into_bytes()
+        };
+        let task = |id: &str, title: &str, deps: &[&str]| json!({"id": id, "title": title, "detail": "", "depends_on": deps, "done": false, "owner": null, "summary": ""});
+        // The later board's `t-3` waits for its own `t-1`, gone; the first board's `t-5` waits for its own `t-2`, gone, which the
+        // later board has (and keeps: no earlier board had it).
+        let first = board(
+            6,
+            json!([
+                task("t-1", "first one", &[]),
+                task("t-5", "first five", &["t-2"])
+            ]),
+        );
+        let later = board(
+            4,
+            json!([
+                task("t-2", "later two", &[]),
+                task("t-3", "later three", &["t-1"])
+            ]),
+        );
+        let m = Boards::merge_snapshots(&[first, later]);
+        let v: Value = serde_json::from_slice(&m.bytes).unwrap();
+        let tasks = v["tasks"].as_array().unwrap();
+        let by_title = |t: &str| tasks.iter().find(|x| x["title"] == t).unwrap();
+        let ids: BTreeSet<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert_eq!(by_title("later two")["id"], "t-2");
+        assert_eq!(by_title("first one")["id"], "t-1");
+        let next = v["next"].as_u64().unwrap();
+        for (title, gone) in [("later three", "t-1"), ("first five", "t-2")] {
+            let dep = by_title(title)["depends_on"][0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert_ne!(dep, gone, "{title} names another board's task: {v}");
+            assert!(!ids.contains(dep.as_str()), "{title} waits for a task: {v}");
+            let n: u64 = dep.strip_prefix("t-").unwrap().parse().unwrap();
+            assert!(n < next, "a new task could get {dep}: {v}");
+        }
+        assert!(
+            m.notices.is_empty() && m.restated.is_empty(),
+            "no id was taken twice"
+        );
+        // Loaded, both still wait.
+        let b = Boards::default();
+        b.load("p", &m.bytes, 0);
+        let entries = b.by_project.lock().unwrap()["p"].export_tasks().1;
+        for title in ["later three", "first five"] {
+            let e = entries.iter().find(|e| e.title == title).unwrap();
+            assert!(e.depends_on.iter().all(|d| !ids.contains(d.as_str())));
+        }
+    }
 
     fn view(online: &[&str]) -> View {
         let mut v = View::default();
