@@ -150,8 +150,8 @@ impl Agent {
     /// Whether the holder must read this agent's terminal so that it can exit: it is being ended, has not been reaped for
     /// [`ENDING_GRACE`] (a node that reads its terminal would have let it go), no reader of ours runs, and no live node may read it
     /// (`node_may_read`: a node whose link dropped still holds its copy). macOS keeps a process that exits with unread terminal
-    /// output in the exiting state until that output is read (at the last close of the terminal's program side, for 0.6 s only: then
-    /// the output is discarded; `docs/specs/holder-link.md` decision 5).
+    /// output in the exiting state until that output is read (at the last close of the terminal's program side, by the XNU source, for
+    /// 0.6 s only: then the output is discarded; `docs/specs/holder-link.md` decision 5).
     fn must_drain_to_end(&self, now: Instant, node_may_read: bool) -> bool {
         !node_may_read
             && self.exit.is_none()

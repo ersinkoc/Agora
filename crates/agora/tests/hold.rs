@@ -439,24 +439,26 @@ fn the_holders_own_read_ends_before_the_handover() {
 #[test]
 fn an_agent_that_ends_while_no_node_is_attached_keeps_its_status_and_output_until_collected() {
     let mut rig = Rig::new("ended");
-    // It writes and ends 2 s after it started, when its node is long gone and the holder reads its terminal. Written while the node
-    // was there (which never reads it), its output would wait in the terminal for nobody; macOS discards a terminal's output that is
-    // still unread 0.6 s after the last close of its program's side (`ptsclose` drains with a 60-tick timeout, then flushes), so on a
-    // slow runner, where the holder took longer than that to start reading, the agent ended with nothing kept.
+    // It writes and ends 2 s after it started, when its node is gone and the holder reads its terminal. Written while the node was
+    // there (this one never reads it), its output waited in the terminal for nobody, and it failed once on a macOS runner with nothing
+    // kept: by the XNU source (not measured on a Mac), macOS discards output still unread 0.6 s after the last close of the terminal's
+    // program side (`ptsclose` drains with a 60-tick timeout, then flushes), so a holder that started reading later than that found none.
     let short = script(&rig.home, "short", &[("", 2000), ("bye", 0)]);
     let mut a = helper("node", &rig, Some(&short));
     rig.lock_for(a.id());
     say_go(&mut a);
-    let _ = helper_line(&mut a);
+    let pid: u32 = helper_line(&mut a)
+        .strip_prefix("started ")
+        .and_then(|p| p.parse().ok())
+        .expect("a pid");
     a.kill().expect("kill the node");
     a.wait().expect("wait");
-    // The agent ends on its own while no node is there (`run/hold.pid` counts it in, then out); the holder keeps running.
+    // The agent ends on its own while no node is there: gone once the holder collected it, which `run/hold.pid` then counts out.
+    // The holder keeps running.
     let end = Instant::now() + Duration::from_secs(20);
-    for want in [1, 0] {
-        while running_in_holder(&rig.home) != Some(want) {
-            assert!(Instant::now() < end, "the holder never said {want} running");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+    while alive(pid) || running_in_holder(&rig.home) != Some(0) {
+        assert!(Instant::now() < end, "the agent did not end");
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(rig.holder_running());
 
