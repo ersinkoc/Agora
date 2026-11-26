@@ -182,6 +182,11 @@ Settings has a **Keyboard** card (`#/device/keyboard`; also **Keyboard settings*
 - **Keys that stay as they are:** the fixed keys, grouped by why, and how a terminal keeps its keys.
 - The commands a file names that this window does not have, kept and listed.
 
+**Import…** opens a one-column dialog: paste the file, or choose one, then **Import**.
+
+![The import dialog, dark](screens/keybindings-import-dark.png)
+![The import dialog, light](screens/keybindings-import-light.png)
+
 ## Storage and safe mode
 
 This browser's `localStorage` key `agora.keybindings.v1` holds the file's text (removed when there are no changes). Reads and writes
