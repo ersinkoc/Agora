@@ -987,6 +987,53 @@ theme-export = Dışa aktar
 theme-delete = Temayı sil
 theme-reset = Varsayılanlara dön
 theme-import-hint = Temalar bu tarayıcıda saklanır. Başka bir tarayıcıda kullanmak için dışa aktarın; Varsayılanlara dön, Açık ve Koyu'yu geri getirir ve temalarınızı korur.
+theme-import-other = Başka bir uygulamadan içe aktar…
+theme-import-title = Başka bir uygulamadan içe aktar
+theme-import-intro = iTerm2 (.itermcolors), Alacritty (.toml veya .yml), Ghostty (tema dosyası), Windows Terminal (renk şeması) ve VS Code (renk teması) renklerini okur. Temayı ekle'yi seçene kadar hiçbir şey eklenmez.
+theme-import-from = { $format } kaynağından: { $name }
+theme-import-palette = Terminalin renkleri
+theme-import-notes = Aktarırken değişenler
+theme-import-refused = Bu tema eklenemez:
+theme-import-warnings = Eklenebilir, ancak bazı yerlerde yazılar veya denetimler zor görünür:
+theme-import-add = Temayı ekle
+theme-import-cancel = Vazgeç
+theme-import-default-name = İçe aktarılan tema
+theme-import-and-more = { $list } ve { $count } tane daha
+theme-import-format-iterm2 = iTerm2
+theme-import-format-alacritty = Alacritty
+theme-import-format-ghostty = Ghostty
+theme-import-format-windows-terminal = Windows Terminal
+theme-import-format-vscode = VS Code
+theme-import-error-too-large = Bu dosya { $max } KiB'tan büyük; bir renk dosyası çok daha küçüktür.
+theme-import-error-unknown-format = Bu, iTerm2, Alacritty, Ghostty, Windows Terminal veya VS Code renk dosyası değil.
+theme-import-error-unreadable = Bu dosya bir renk dosyasına benziyor ama okunamıyor.
+theme-import-error-entities = Bu dosya kendi XML varlıklarını tanımlıyor; bir renk dosyasının buna hiç ihtiyacı olmaz, bu yüzden okunmadı.
+theme-import-error-no-colours = Bu dosyada terminal rengi bulunamadı.
+theme-import-note-scheme = { $scheme ->
+    [light] Arka planı açık, bu yüzden açık temanız olur. Koyu temanız olduğu gibi kalır.
+   *[dark] Arka planı koyu, bu yüzden koyu temanız olur. Açık temanız olduğu gibi kalır.
+  }
+theme-import-note-derived = Pencerenin renkleri (arka planlar, yazı, vurgu ve durumlar) terminalin renklerinden yapıldı; her biri kolay okunacak şekilde denetlendi.
+theme-import-note-derived-kept = Bu renklerden kolay okunan pencere renkleri yapılamadı; pencere Agora'nın kendi renklerini korur, terminal dosyadakileri alır.
+theme-import-note-missing = Dosyada yok, Agora'nın kendi renkleri kullanılır: { $keys }.
+theme-import-note-ignored = Alınmadı, temada bunların yeri yok: { $keys }.
+theme-import-note-unreadable = Bu renkler okunamadı, Agora'nın kendi renkleri kullanılır: { $keys }.
+theme-import-note-alpha = Dosyada saydam, bu yüzden arka planın üzerine karıştırıldı: { $keys }.
+theme-import-note-background-alpha = Dosyada arka plan saydam; pencere onu düz çizer.
+theme-import-note-selection-alpha = Seçimin saydamlığı alınmadı: Agora seçimi zaten saydam çizer.
+theme-import-note-colour-space = { $space ->
+    [p3] Renkler Display P3'ten sRGB'ye dönüştürüldü.
+   *[other] Bazı renkler sRGB veya Display P3 dışında bir renk uzayında; sRGB olarak okundu, biraz farklı görünebilir.
+  }
+theme-import-note-variant = { $used ->
+    [light] Dosyada ayrı açık ve koyu renkler var; açık olanlar kullanıldı.
+   *[dark] Dosyada ayrı açık ve koyu renkler var; koyu olanlar kullanıldı.
+  }
+theme-import-note-first-scheme = Dosyada { $count } renk şeması var; ilki içe aktarıldı.
+theme-import-note-window-colours = VS Code'un { $count } pencere rengi alınmadı: pencerenin renkleri terminalin renklerinden yapılır.
+theme-import-note-include = Bu tema başka bir dosyanın üzerine kurulu (include); o dosya okunmadı, yalnızca bu dosyadaki renkler kullanıldı.
+theme-import-note-fallback = Dosyada { $key } yok, bu yüzden { $from } değerinden alındı.
+theme-import-note-syntax = { $count } kod rengi temanın simge renklerinden alındı.
 theme-name-dark = Koyu
 theme-name-light = Açık
 theme-name-high-contrast = Yüksek karşıtlık

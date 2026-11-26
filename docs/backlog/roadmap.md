@@ -144,8 +144,9 @@ fixes it.
 Built: theme format 2 and its editor (#1206), the terminal client's themes (#1222), the panel registry (#1214), the sandboxed plugin
 frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#1239). The catalogs and sync are M0.1.
 
-- [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2, in
-  the editor and as `agora theme import`; **decision**: which formats first
+- [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2
+  - [x] in the web window's editor: all five formats ([themes](../ux/themes.md#import-from-another-app))
+  - [ ] as `agora theme import` (not built: the maintainer asked for the web window only)
 - [ ] **M5.2 Starter themes**: well-known palettes ported after a licence check (**decision**: which ones)
 - [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the
   wrong machine

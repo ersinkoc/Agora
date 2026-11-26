@@ -1,0 +1,33 @@
+# Harbour, for Alacritty before 0.13 (YAML, with an anchor as old configs had)
+schemes:
+  harbour: &harbour
+    primary:
+      background: '0x0b1016'
+      foreground: "0xd8e1ea"
+    cursor:
+      text: '0x0b1016'
+      cursor: '0x5cc8c2'
+    normal:
+      black: '0x1b2430'
+      red: '0xf2777a'
+      green: '0x8fd18a'
+      yellow: '0xe8c46a'
+      blue: '0x6fb3f2'
+      magenta: '0xc99cf0'
+      cyan: '0x5cc8c2'
+      white: '0xc8d3de'
+    bright:
+      black: '0x637387'
+      red: '0xff9c9e'
+      green: '0xb4ecb0'
+      yellow: '0xf5dc98'
+      blue: '0x9fd0ff'
+      magenta: '0xe0c4ff'
+      cyan: '0x93e3de'
+      white: '0xf3f7fb'
+
+colors: *harbour
+font:
+  size: 12
+key_bindings:
+  - { key: V, mods: Control, action: Paste }

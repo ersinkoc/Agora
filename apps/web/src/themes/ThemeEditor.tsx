@@ -10,6 +10,9 @@ import { Icon } from '../components/Icon';
 import { SegmentedControl } from '../components/kit/SegmentedControl';
 import { Toggle } from '../components/kit/Toggle';
 import { FONT_TOKENS, MAX_FILE_BYTES, SHAPE_TOKENS, readTheme, regionColour, serialise, terminalColour, withScheme, writeTheme } from './file';
+import { type Converted, convertTheme } from './import/convert';
+import { ImportDialog } from './ImportDialog';
+import { TerminalSample } from './TerminalSample';
 import {
   ANSI_NAMES, CHROME, CHROME_NAMES, FLOOR_ITEMS, LINE_HEIGHT, MIN_BASE_TEXT, REGIONS, REGION_PARTS, SYNTAX_KEYS, WEIGHTS,
   type Chrome, type ChromeName, type RegionName, type RegionPart, type SyntaxKey, type TerminalKey, type TextStyle, type Weight,
@@ -30,6 +33,9 @@ export function ThemeEditor() {
   const scheme = themeStore.scheme();
   const [problems, setProblems] = useState<string[]>([]);
   const file = useRef<HTMLInputElement>(null);
+  const other = useRef<HTMLInputElement>(null);
+  // A colour file of another app, converted and waiting in the import dialog for Add or Cancel.
+  const [imported, setImported] = useState<Converted>();
   // An imported theme for the scheme not on screen has no Readability shown, so its warnings are said here; one on screen lists
   // them in its own Readability section.
   const report = (r: Saved) => setProblems(r.ok
@@ -63,6 +69,7 @@ export function ThemeEditor() {
 
       <div className="flex flex-wrap gap-2">
         <button type="button" className="button" onClick={() => file.current?.click()}>{t('theme-import')}</button>
+        <button type="button" className="button" onClick={() => other.current?.click()}>{t('theme-import-other')}</button>
         <button type="button" className="button" onClick={() => download(serialise(writeTheme(theme, themeName(theme))))}>{t('theme-export')}</button>
         {!theme.builtIn && <button type="button" className="button" onClick={() => { themeStore.remove(theme.id); setProblems([]); }}>{t('theme-delete')}</button>}
         <button type="button" className="button" onClick={() => { themeStore.reset(); setProblems([]); }}>{t('theme-reset')}</button>
@@ -73,7 +80,18 @@ export function ThemeEditor() {
             // A file over the cap is refused before it is read at all.
             if (f) report(f.size > MAX_FILE_BYTES ? { ok: false, issues: [{ code: 'too-large', max: MAX_FILE_BYTES / 1024 }] } : themeStore.import(await f.text()));
           }} />
+        {/* No `accept`: a Ghostty theme file has no extension. Any file is size-capped, then read as text and never run. */}
+        <input ref={other} type="file" className="hidden" aria-hidden tabIndex={-1} data-import-other
+          onChange={async (e) => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            if (!f) return;
+            setProblems([]);
+            // A file over the cap is refused before it is read at all.
+            setImported(f.size > MAX_FILE_BYTES ? { ok: false, error: 'too-large' } : convertTheme(await f.text(), f.name, t('theme-import-default-name')));
+          }} />
       </div>
+      {imported && <ImportDialog result={imported} onClose={() => setImported(undefined)} onAdded={(r) => { setImported(undefined); report(r); }} />}
       <p className="muted m-0 text-xs">{t('theme-import-hint')}</p>
     </section>
   );
@@ -383,19 +401,6 @@ function Preview({ look, scheme }: { look: Look; scheme: Scheme }) {
         <div className="flex h-6 items-center gap-2 border-t border-statusline-line bg-statusline px-2 text-statusline-ink" data-preview="status-line">{t('theme-preview-status')}</div>
       </div>
     </div>
-  );
-}
-
-// A few lines of a terminal in the theme's palette (its colours were checked when the theme was read: #rrggbb only).
-function TerminalSample({ look, scheme }: { look: Look; scheme: Scheme }) {
-  const c = (k: TerminalKey) => terminalColour(look, scheme, k);
-  return (
-    <pre className="m-0 overflow-hidden rounded-s p-2 font-mono text-xs leading-5" style={{ background: c('background'), color: c('foreground') }} data-terminal-sample>
-      <span style={{ color: c('bright-black') }}>{t('theme-preview-sample-command')}</span>{'\n'}
-      <span style={{ color: c('green') }}>{t('theme-preview-sample-pass')}</span>{'  '}<span style={{ color: c('red') }}>{t('theme-preview-sample-fail')}</span>{'\n'}
-      <span style={{ color: c('yellow') }}>{t('theme-preview-sample-note')}</span>{' '}<span style={{ color: c('blue') }}>src/</span><span style={{ color: c('magenta') }}>lib</span><span style={{ color: c('cyan') }}>.rs</span>
-      <span className="inline-block w-[0.6em]" style={{ background: c('cursor') }}>{' '}</span>
-    </pre>
   );
 }
 
