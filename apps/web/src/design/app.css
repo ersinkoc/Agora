@@ -578,6 +578,9 @@
   .kit-pill .state__mark { @apply size-2.5; }
   .kit-mark { @apply inline-flex flex-none items-center; color: var(--kit-fg); }
   .kit-mark .state__mark { @apply size-3; }
+  /* Finished, not seen yet (main-window.md): the Finished green's tint and hairline as a small disc with the check, never amber and never a bar. */
+  .unseen-mark { @apply inline-grid size-4 flex-none place-items-center rounded-full; background: var(--tint-finished); box-shadow: inset 0 0 0 1px var(--line-finished); color: var(--state-finished); }
+  .unseen-mark .state__mark { @apply size-2.5; }
   .kit-tag { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-xs bg-surface-2 text-muted; height: 1.25rem; padding-inline: 0.4375rem; font-size: var(--text-caption); }
   .kit-tag--mono { @apply font-mono; }
   /* The acts-without-asking sign beside Mode in the chat composer: the bolt alone on the danger tint, as tall as the menus beside it. */

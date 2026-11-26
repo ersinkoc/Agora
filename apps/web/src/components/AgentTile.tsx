@@ -9,6 +9,7 @@ import { AgentAvatar, StatusPill, Tag } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
 import { LimitChip } from './Quota';
+import { FinishedMark, useFinishedUnseen } from './FinishedMark';
 
 // What the fleet console adds to a tile: where it is drawn (the group already names the machine or the project, so the tile names the
 // other one), what the agent asks for, and the time. Without it the tile is the plain one of the gallery.
@@ -41,6 +42,7 @@ function Head({ agent, failed }: { agent: AgentTileModel; failed: boolean }) {
     <span className="tile__head">
       <AgentAvatar accent={agent.accent} kind={kindOf(agent)} />
       <span className="tile__name">{agent.name}</span>
+      <FinishedMark agentId={agent.id} />
       <StatusPill state={agent.state} failed={failed} />
     </span>
   );
@@ -48,15 +50,17 @@ function Head({ agent, failed }: { agent: AgentTileModel; failed: boolean }) {
 
 function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id: string) => void; context?: TileContext }) {
   const failed = endedWithError(agent);
-  // The same word as the pill, so the tile's name holds what it shows.
+  // The same word as the pill, so the tile's name holds what it shows, and the finished mark's words while it has one.
   const stateWord = t(failed ? 'fleet-failed' : `state-${agent.state}`);
+  const unseen = useFinishedUnseen(agent.id);
+  const said = unseen ? `${stateWord}, ${t('finished-unseen')}` : stateWord;
   if (!context) {
     return (
       <button
         type="button"
         className={`tile tile--${failed ? 'failed' : agent.state}`}
         onClick={() => onOpen?.(agent.id)}
-        aria-label={`${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
+        aria-label={`${agent.name}, ${said}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}`}
       >
         <Head agent={agent} failed={failed} />
         <NoAskBadge agent={agent} nested />
@@ -84,7 +88,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
       type="button"
       className={`tile tile--compact tile--${failed ? 'failed' : agent.state}${agent.closed ? ' tile--closed' : ''}`}
       onClick={() => onOpen?.(agent.id)}
-      aria-label={t('fleet-open-for', { name: `${agent.name}, ${stateWord}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
+      aria-label={t('fleet-open-for', { name: `${agent.name}, ${said}${agent.skipsPermissions ? `, ${t('agent-does-not-ask')}` : ''}` })}
     >
       <Head agent={agent} failed={failed} />
       {line ? <span className="tile__activity" dir="auto">{line}</span> : null}

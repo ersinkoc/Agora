@@ -39,6 +39,7 @@ const PATHS = {
   step: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4z',
   // The right panel's rail: what needs you, what changed, the shared board, messages, what was spent; plus a check, a down chevron, a clock.
   bell: 'M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3zM6.5 13.5a1.5 1.5 0 0 0 3 0',
+  volume: 'M2.5 6h2.5l3.5-3v10L5 10H2.5zM11 5.8a3 3 0 0 1 0 4.4M12.8 4a5.5 5.5 0 0 1 0 8',
   diff: 'M5 2.5v7M5 12.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM11 13.5V6.5M11 3.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM8 4.5h-1M7.5 4.5L9 3M7.5 4.5L9 6',
   board: 'M2.5 3h3.5v10H2.5zM6.5 3H10v6H6.5zM10.5 3H14v8h-3.5z',
   chat: 'M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z',

@@ -1,4 +1,5 @@
 import { AttentionSettings } from './components/AttentionSettings';
+import { SoundSettings } from './components/SoundSettings';
 import { StartApproval, type StartChoice } from './components/StartApproval';
 import { HelperGrants } from './components/HelperGrants';
 import { DeviceRequest } from './components/DeviceRequest';
@@ -385,6 +386,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
       { id: 'device', label: 'settings-device', icon: 'monitor', show: !!device },
       { id: 'appearance', label: 'device-appearance', icon: 'palette', show: true },
       { id: 'notifications', label: 'attention-settings-title', icon: 'bell', show: true },
+      { id: 'sounds', label: 'sounds-title', icon: 'volume', show: true },
       { id: 'passkeys', label: 'settings-passkeys', icon: 'key', show: !!onAddPasskey },
       { id: 'lock', label: 'password-title', icon: 'lock', show: !!security },
       { id: 'devices', label: 'device-others', icon: 'globe', show: !!others && others.length > 0, count: others?.filter((d) => !d.removed).length },
@@ -473,6 +475,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
               <SettingRow label={t('language-label')}>{() => <LanguagePicker compact />}</SettingRow>
             </SettingsCard>
             <div {...anchor('notifications')}><AttentionSettings /></div>
+            <SoundSettings />
             {onAddPasskey && (
               <SettingsCard id="passkeys" icon="key" title={t('settings-passkeys')} description={t('device-passkey-intro')} end={passkeyNeedsPassword ? undefined : addButton}>
                 {passkeyNeedsPassword && (

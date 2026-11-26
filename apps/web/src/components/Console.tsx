@@ -33,6 +33,7 @@ import type { StartChoice } from './StartApproval';
 import type { HelperGrant } from './HelperGrants';
 import { type Action, findPane, reduce, tabsOf, visiblePanes, workspaceOf } from '../layout/engine';
 import { loadWorkspace, saveWorkspace } from '../layout/store';
+import { useOnScreen } from '../net/onScreen';
 import { agentOf, assignAttention } from '../layout/streams';
 import { LAYOUT_VERSION, bindOf, followOf, panesOf } from '../layout/tree';
 import { Workspace } from '../layout/Workspace';
@@ -199,6 +200,10 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   const shownAgents = [...new Set(allPanes.map((p) => agentOf(p, bindings)).filter((x): x is string => !!x))];
   const focusedPane = findPane(ws.layout, ws.focus);
   const current = focusedPane ? fleet.find((a) => a.id === agentOf(focusedPane, bindings)) : undefined;
+  // What is on screen for the sounds and the finished mark: the agents whose own view (the agent or its terminal) is in a visible pane, and
+  // the focused pane's agent when that pane is one of them.
+  const viewPanes = visiblePanes(ws, narrow).filter((p) => p.panel === 'agent' || p.panel === 'terminal');
+  useOnScreen(focusedPane && viewPanes.some((p) => p.id === focusedPane.id) ? agentOf(focusedPane, bindings) : undefined, viewPanes.map((p) => agentOf(p, bindings)).filter((x): x is string => !!x));
   // The tools (Terminal, Changes, Files, File manager) as panes beside the agent in focus. A pane that already shows that tool for that
   // agent comes to the front instead of a second one; a terminal for an agent that is already on screen brings that agent forward.
   const openTool = (panel: ToolPanel, agentId?: string) => {

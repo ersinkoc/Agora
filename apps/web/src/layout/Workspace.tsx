@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon';
 import { AgentAvatar, StatusMark } from '../components/kit';
 import { StateMark } from '../components/StateBadge';
 import { NoAskBadge } from '../components/NoAskBadge';
+import { FinishedMark } from '../components/FinishedMark';
 import { type Action, type Place, type Workspace as WorkspaceState, displayRoot, visiblePanes } from './engine';
 import { type Divider, type Frame, type Rect, arrange, dragDelta, dropPlace } from './geometry';
 import { Menu, type MenuItem } from './Menu';
@@ -201,6 +202,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
                   <PaneName text={label(p)} />
                   {panels.get(p.panel)?.plugin && <PluginMark dev={!!panels.get(p.panel)?.plugin?.dev} />}
                   {pa && <NoAskBadge agent={pa} nested bare />}
+                  {pa && <FinishedMark agentId={pa.id} compact />}
                   {pa && <StatusMark state={pa.state} failed={endedWithError(pa)} />}
                   <button type="button" tabIndex={-1} aria-hidden className="ide-iconbtn size-5 opacity-60 group-hover:opacity-100" onClick={(e) => { e.stopPropagation(); dispatch({ type: 'close', pane: p.id }); }} title={t('ide-close-tab', { name: label(p) })}><Icon name="close" className="size-3" /></button>
                 </div>
@@ -212,6 +214,7 @@ export function Workspace({ ws, dispatch, fleet, bindings, narrow, panels, state
             {a ? <span className="flex flex-none" title={label(front)}><AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" /></span> : <Icon name="layout" className="size-3.5 flex-none text-muted" />}
             <PaneName text={label(front)} className="font-medium" />
             {a && <NoAskBadge agent={a} bare />}
+            {a && <FinishedMark agentId={a.id} compact />}
             {a && <StatusMark state={a.state} failed={endedWithError(a)} />}
             {a && <span className="hidden flex-none text-xs text-muted @lg:inline">{a.machine}</span>}
             {followOf(front) && <span className="ide-chip flex-none">{t(`layout-follows-${followOf(front)}`)}</span>}

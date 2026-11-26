@@ -9,6 +9,7 @@ import { bytesLabel, type MachineModel } from '../net/view';
 import { ago, agoShort } from '../net/time';
 import { Icon } from './Icon';
 import { CloseAgentMenu, CloseConfirm } from './CloseAgent';
+import { FinishedMark } from './FinishedMark';
 import { AgentAvatar, Button, StatusMark } from './kit';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ExplorerRows } from './ExplorerRows';
@@ -124,6 +125,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       {a.shared && <span className="hidden flex-none text-xs text-muted @3xs:inline" title={t('workspace-shared')}>{t('ide-shared')}</span>}
       {(a.filesChanged ?? 0) > 0 && <span className="flex-none font-mono text-xs font-normal text-muted" data-files-changed><span aria-hidden>±{a.filesChanged}</span><span className="sr-only">{t('changes-files', { count: a.filesChanged ?? 0 })}</span></span>}
       <NoAskBadge agent={a} nested bare />
+      <FinishedMark agentId={a.id} compact />
       <StatusMark state={a.state} />
     </button>
     {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
