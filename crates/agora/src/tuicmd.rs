@@ -326,7 +326,7 @@ fn approve_device(
             ("machines", Arg::Str(machines.join(", "))),
         ],
     );
-    if ask.key(&lines_of(&card), Duration::from_secs(120)) != Some(b'y') {
+    if ask.answer(&lines_of(&card), Duration::from_secs(120)) != Some(b'y') {
         return String::new();
     }
     match session.endorse_device(&device, &waiting) {
@@ -372,7 +372,7 @@ fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
     // False once a command failed because the link is gone: then no answer is offered.
     let mut link_up = true;
     // Keys typed before the card was on screen answer nothing.
-    while ask.rx().try_recv().is_ok() {}
+    ask.discard();
     loop {
         let width = usize::from(window_area().width).saturating_sub(6).max(20);
         let lines = card_lines(
@@ -388,7 +388,7 @@ fn answer_pair(say: &Say, session: &mut Session, ask: &mut Over<'_>) -> String {
         let key = match ask.key(&lines, PAIR_ASK_FOR) {
             // A key that was already on its way when the screen came up is not an answer to it: the card is shown again.
             Some(k) if too_soon(k, shown.elapsed()) => {
-                while ask.rx().try_recv().is_ok() {}
+                ask.discard();
                 continue;
             }
             // A pause leaves the request pending on the hub.
@@ -545,7 +545,7 @@ fn confirm_skipping_request(
         key!("tui-start-approval-confirm-skip"),
         &[("name", Arg::Str(names))],
     ));
-    ask.key(&question, Duration::from_secs(60)) == Some(b's')
+    ask.answer(&question, Duration::from_secs(60)) == Some(b's')
 }
 
 /// The `agent.start` request y would answer when it does not fit the split view at the terminal's size now and was not read whole in
@@ -1837,7 +1837,7 @@ fn start_in_folder(
     let accept = !info.previous_project_id.is_empty();
     if accept {
         let question = lines_of(&say.text(key!("tui-folder-identity"), &[]));
-        if ask.key(&question, Duration::from_secs(60)) != Some(b'y') {
+        if ask.answer(&question, Duration::from_secs(60)) != Some(b'y') {
             return String::new();
         }
     }
@@ -1887,7 +1887,7 @@ fn start_in_folder(
                 &[("name", Arg::Str(label(o)))],
             ));
             // Confirmed here: signed with the start; the node refuses an option that skips permissions without it.
-            if ask.key(&question, Duration::from_secs(60)) == Some(b'y') {
+            if ask.answer(&question, Duration::from_secs(60)) == Some(b'y') {
                 launch_options.push(o.id.clone());
                 confirmed_launch_options.push(o.id.clone());
             }
@@ -2171,6 +2171,7 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
 
     let mut token: Option<String> = None;
     let mut first = true;
+    let mut code_used = false;
     let mut snapshot: Option<Snapshot> = None;
     let mut notice = String::new();
     let mut selected = String::new();
@@ -2193,13 +2194,17 @@ pub fn tui(say: &Say, o: &Opts) -> ExitCode {
             let t = match &token {
                 Some(t) => t.clone(),
                 None => {
-                    // A code from the flag the first time; on the hub's machine a new one whenever it is needed.
+                    // A code from the flag until it reaches the hub; on the hub's machine a new one whenever it is needed.
                     let code = match (&o.code, local) {
-                        (Some(c), _) if first => c.clone(),
+                        (Some(c), _) if !code_used => c.clone(),
                         (_, true) => new_login_code(&dir).map_err(|_| ClientError::Refused)?,
                         _ => return Err(ClientError::Refused),
                     };
-                    sign_in(&hub, &code)?
+                    let signed = sign_in(&hub, &code);
+                    if !matches!(signed, Err(ClientError::Unreachable)) {
+                        code_used = true;
+                    }
+                    signed?
                 }
             };
             let mut s = Session::connect(&hub, &t)?;
@@ -7214,6 +7219,7 @@ mod skipping_start_tests {
             self.shown.extend_from_slice(lines);
         }
         fn frame(&mut self, _: &[u8]) {}
+        fn discard(&mut self) {}
     }
 
     fn script(keys: &[u8]) -> Script {
@@ -8192,6 +8198,7 @@ mod start_pick_tests {
             self.shown.push(lines.to_vec());
         }
         fn frame(&mut self, _: &[u8]) {}
+        fn discard(&mut self) {}
     }
 
     fn script(keys: &[u8]) -> Script {
@@ -9624,6 +9631,21 @@ mod viewer_console_tests {
         }
     }
 
+    /// `tui`'s sign-in loop cannot be driven without a terminal. A `--code` is spent only once a hub has received it: an unreachable
+    /// hub saw neither the code nor a refusal, so the next retry must offer the flag's code again rather than report it as refused.
+    #[test]
+    fn a_flag_code_is_kept_until_a_hub_receives_it() {
+        let src = include_str!("tuicmd.rs").replace("\r\n", "\n");
+        let t0 = src.find("\npub fn tui(").unwrap();
+        let tui = &src[t0..t0 + src[t0..].find("\n}\n").unwrap()];
+        assert!(tui.contains("(Some(c), _) if !code_used => c.clone(),"));
+        assert!(tui.contains("if !matches!(signed, Err(ClientError::Unreachable))"));
+        assert!(tui.contains("code_used = true;"));
+        assert!(!tui.contains("if first => c.clone(),"));
+        // Once a code was answered, a remote hub gets no new one from the flag.
+        assert!(tui.contains("_ => return Err(ClientError::Refused),"));
+    }
+
     /// The plain list (no console) reads its keys in `tui`'s own loop, which a test cannot drive without a terminal. The loop matches on
     /// [`plain_key`], which decides each key first (#1140): a viewer's key that would change something only says why not, for every byte;
     /// a member's (and an older hub's) does what it did; moving, quitting, asking and opening stay a viewer's.
@@ -9780,6 +9802,7 @@ mod registry_picker_tests {
             self.shown.push(lines.to_vec());
         }
         fn frame(&mut self, _: &[u8]) {}
+        fn discard(&mut self) {}
     }
 
     fn pick(keys: &[u8], kinds: &[(String, String)]) -> (Option<usize>, Vec<Vec<String>>) {

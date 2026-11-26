@@ -979,10 +979,14 @@ async fn finish_unanswered(hub: &Hub, mut inflight: Vec<Inflight>) {
     for item in inflight {
         let Some(id) = item.audit else { continue };
         let audit = crate::audit::Audit::new(hub.store());
-        let _ = match tokio::time::timeout_at(item.deadline, item.reply).await {
-            Ok(Ok(r)) => audit.finish_response(id, &r, item.fresh_command),
-            Ok(Err(_)) => audit.finish(id, ErrorCode::NodeOffline.as_str()),
-            Err(_) => audit.finish(id, ErrorCode::NodeTimeout.as_str()),
+        let _ = match item.answered {
+            Some(Ok(r)) => audit.finish_response(id, &r, item.fresh_command),
+            Some(Err(_)) => audit.finish(id, ErrorCode::NodeOffline.as_str()),
+            None => match tokio::time::timeout_at(item.deadline, item.reply).await {
+                Ok(Ok(r)) => audit.finish_response(id, &r, item.fresh_command),
+                Ok(Err(_)) => audit.finish(id, ErrorCode::NodeOffline.as_str()),
+                Err(_) => audit.finish(id, ErrorCode::NodeTimeout.as_str()),
+            },
         };
     }
 }
@@ -3879,5 +3883,41 @@ mod opening_tests {
         assert!(tokio::time::timeout(OPENING * 4, good.recv())
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn finish_unanswered_uses_already_polled_answer_without_repolling_oneshot() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let hub = Hub::open(store).unwrap();
+        let audit = crate::audit::Audit::new(hub.store());
+        let audit_id = audit
+            .record(1, "owner", "command.ping", "node-1", "sent")
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<v1::CommandResponse>();
+        let resp = v1::CommandResponse {
+            request_id: "r1".into(),
+            result: None,
+        };
+        tx.send(resp).unwrap();
+        let polled = rx.try_recv().map_err(|_| unreachable!());
+        let item = Inflight {
+            client_request_id: "r1".into(),
+            node: "node-1".into(),
+            relay: None,
+            reply: rx,
+            answered: Some(polled),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+            audit: Some(audit_id),
+            fresh_command: false,
+            confined: None,
+        };
+        finish_unanswered(&hub, vec![item]).await;
+        // The answer taken off the channel already is the outcome; awaiting the spent channel again would record `node.offline`.
+        assert_eq!(
+            crate::audit::Audit::new(hub.store())
+                .outcome(audit_id)
+                .as_deref(),
+            Some("ok")
+        );
     }
 }
