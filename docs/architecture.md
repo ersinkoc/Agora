@@ -222,6 +222,19 @@ Main window layout: see `ux/main-window.md`.
 Restore paths, strongest first: live process (never stopped) → native agent resume via session ref →
 layout-only restore with fresh shells in saved directories.
 
+**Shutdown and reboot.** Every file the node needs after a restart is replaced whole (written beside it, synced, renamed over it,
+the folder synced: `agora_platform::write_private`) or appended with a torn last record dropped on read (the event buffer, chat
+transcripts). One that cannot be read at start is set aside (`agora_platform::set_aside`, or the store's own `.unreadable-…` and
+`.rejected` names) and a fresh one starts, so the node always starts; the folder bindings and the directory-approval nonces are the
+exception, kept and failing closed (no confirmation until the file is fixed), as losing them would let a folder change project
+unnoticed or an approval be replayed. An OS shutdown stops the node as `agora down` does (ADR-0104 O2):
+Unix `SIGTERM` (systemd, launchd) or `SIGHUP`, and on Windows the session's end, heard by a hidden window; the node writes the ledger,
+the conversation's last batch, the usage and the event log first and syncs them, and ends within 5 s. A shutdown signals the agents
+too: an agent's end the node sees once its stop began is not an end in the ledger, so after the reboot the agent is interrupted and
+offered to Resume (resumed at once with `--resume auto`). Not built: a logind delay lock or a macOS session-end notice, which would let
+the node write before anything else is signalled (herdr does both); under the systemd service the node is stopped before its agents
+are (`KillMode=process`).
+
 ## 10. Cross-cutting concerns
 
 | Topic | Document |

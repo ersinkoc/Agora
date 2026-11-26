@@ -165,6 +165,28 @@ impl DiskEventLog {
         })
     }
 
+    /// [`Self::open`], and a log that is not one (its header damaged or missing: a disk fault, a file put there by hand) is set aside
+    /// first, never deleted, with its ack (`events.log.unreadable-<unix_secs>`, see `agora_platform::set_aside`), so the node still
+    /// starts, with a fresh log. Returns where the unreadable log went. Herdr G11: a node that could not read its log did not start.
+    pub fn open_or_set_aside(
+        dir: &Path,
+        max_bytes: u64,
+        unix_secs: u64,
+    ) -> io::Result<(Self, Option<PathBuf>)> {
+        match Self::open(dir, max_bytes) {
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                let tag = format!("unreadable-{unix_secs}");
+                let log = agora_platform::set_aside(&dir.join("events.log"), &tag)?;
+                match agora_platform::set_aside(&dir.join("ack"), &tag) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+                Ok((Self::open(dir, max_bytes)?, Some(log)))
+            }
+            r => r.map(|log| (log, None)),
+        }
+    }
+
     /// The number the next appended event will get.
     pub fn next_seq(&self) -> u64 {
         self.first_seq + self.offsets.len() as u64
@@ -227,6 +249,7 @@ impl DiskEventLog {
             f.sync_data()?;
         }
         fs::rename(&tmp, self.dir.join("ack"))?;
+        agora_platform::sync_parent_dir(&tmp);
         self.compact()
     }
 
@@ -426,7 +449,9 @@ fn write_log(path: &Path, first_seq: u64, records: &[u8]) -> io::Result<()> {
         f.write_all(records)?;
         f.sync_data()?;
     }
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    agora_platform::sync_parent_dir(path);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -703,6 +728,24 @@ mod tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("events.log"), b"this is not an event log at all").unwrap();
         assert!(DiskEventLog::open(&d, 1 << 20).is_err());
+        // Herdr G11: the node's own open sets such a file aside, with its ack, and starts a fresh log.
+        fs::write(d.join("ack"), 9u64.to_le_bytes()).unwrap();
+        let (mut log, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 77).unwrap();
+        assert_eq!(aside, Some(d.join("events.log.unreadable-77")));
+        assert_eq!(
+            fs::read(d.join("events.log.unreadable-77")).unwrap(),
+            b"this is not an event log at all"
+        );
+        assert!(d.join("ack.unreadable-77").exists() && !d.join("ack").exists());
+        assert_eq!((log.next_seq(), log.acked()), (1, 0));
+        log.append(b"a").unwrap();
+        drop(log);
+        let (log, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 78).unwrap();
+        assert_eq!((aside, log.next_seq()), (None, 2));
+        // A header cut short (a file of a few bytes) is set aside too.
+        fs::write(d.join("events.log"), b"AGORA").unwrap();
+        let (_, aside) = DiskEventLog::open_or_set_aside(&d, 1 << 20, 79).unwrap();
+        assert_eq!(aside, Some(d.join("events.log.unreadable-79")));
         let mut log = DiskEventLog::open(&dir(), 1 << 20).unwrap();
         let huge = vec![0u8; MAX_PAYLOAD as usize + 1];
         assert!(log.append(&huge).is_err());
