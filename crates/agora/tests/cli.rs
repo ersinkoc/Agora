@@ -1621,3 +1621,71 @@ fn verify_f446_rule_ids_escape_controls_hidden_text_and_line_breaks() {
     }
     println!("FIX VERIFIED: F446 rule ids are inert in checks and decisions");
 }
+
+/// ADR-0064: `agora workspaces` lists the worktree the node made for an agent, and `agora workspaces clean` removes it once the agent
+/// ended, never while it runs and never with work in it.
+#[test]
+fn workspaces_are_listed_and_cleaned_once_their_agent_ended() {
+    if !shell_agents_supported() {
+        return;
+    }
+    let s = setup("workspaces");
+    let (code, out, err) = cli(&s, &["workspaces"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(out.contains("no workspaces"), "{out}");
+    let _node = start_node(&s);
+    let (code, out, err) = cli(
+        &s,
+        &["agent", "start", "shell", "--project", "demo", "--worktree"],
+    );
+    assert_eq!(code, 0, "stderr: {err}");
+    let worktree = PathBuf::from(out.trim().rsplit(" in ").next().unwrap());
+    let state = |s: &Setup| {
+        let (code, out, err) = cli(s, &["workspaces"]);
+        assert_eq!(code, 0, "stderr: {err}");
+        out.lines()
+            .next()
+            .unwrap()
+            .split('\t')
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(state(&s)[1], "in-use");
+    let (code, out, _) = cli(&s, &["workspaces", "clean"]);
+    assert_eq!(code, 0);
+    assert!(!out.contains("Removed"), "{out}");
+    assert!(worktree.is_dir());
+
+    let (code, _, err) = cli(&s, &["agent", "stop", "agent-1"]);
+    assert_eq!(code, 0, "stderr: {err}");
+    let end = Instant::now() + Duration::from_secs(30);
+    while state(&s)[1] == "in-use" {
+        assert!(Instant::now() < end, "the agent never ended in the ledger");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // In its grace period for the node; a person removes it at once.
+    assert_eq!(state(&s)[1], "waiting");
+    std::fs::write(worktree.join("notes.txt"), "mine").unwrap();
+    let (code, out, _) = cli(&s, &["workspaces", "clean"]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("it has changes that are not committed"),
+        "{out}"
+    );
+    assert_eq!(state(&s)[2], "changes");
+    std::fs::remove_file(worktree.join("notes.txt")).unwrap();
+    let (code, out, _) = cli(&s, &["workspaces", "clean", "--dry-run"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Would remove workspace"), "{out}");
+    assert!(worktree.is_dir());
+    let (code, out, _) = cli(&s, &["workspaces", "clean", "--older-than", "7d"]);
+    assert_eq!(code, 0);
+    assert!(!out.contains("Removed"), "{out}");
+    let (code, out, _) = cli(&s, &["workspaces", "clean"]);
+    assert_eq!(code, 0);
+    assert!(out.contains("Removed workspace"), "{out}");
+    assert!(!worktree.exists());
+    assert!(s.repo.join("README.md").is_file());
+    let (code, _, _) = cli(&s, &["workspaces", "clean", "--older-than", "soon"]);
+    assert_eq!(code, 2);
+}

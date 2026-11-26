@@ -236,7 +236,10 @@ fn commits_that_exist_nowhere_else_are_never_removed_until_pushed() {
         &["remote", "add", "origin", remote.to_str().unwrap()],
     );
     run_git(&rig.checkout, &["push", "-q", "origin", &rig.branch]);
-    assert_eq!(rig.clean(&users, T0 + 1000 * H, false), vec![Action::Removed]);
+    assert_eq!(
+        rig.clean(&users, T0 + 1000 * H, false),
+        vec![Action::Removed]
+    );
     assert!(rig.log().contains("\tremoved\tcli\t"), "{}", rig.log());
 }
 
@@ -321,7 +324,11 @@ fn a_rewritten_dot_git_file_cannot_redirect_the_checks() {
     let rig = Rig::new("dotgit");
     fs::write(rig.work.join("new.txt"), "work\n").unwrap();
     let decoy = decoy(&rig);
-    fs::write(rig.work.join(".git"), format!("gitdir: {}\n", decoy.display())).unwrap();
+    fs::write(
+        rig.work.join(".git"),
+        format!("gitdir: {}\n", decoy.display()),
+    )
+    .unwrap();
     assert_eq!(
         rig.clean(&rig.ended(T0), T0 + 1000 * H, false),
         vec![left_behind(Reason::LinksMoved)]
@@ -358,7 +365,14 @@ fn only_worktrees_the_node_made_in_its_worktree_folder_are_recorded() {
     let by_hand = rig.root.join("by-hand");
     run_git(
         &rig.checkout,
-        &["worktree", "add", "-q", "-b", "mine", by_hand.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "mine",
+            by_hand.to_str().unwrap(),
+        ],
     );
     assert!(!rig.ws.record_made(&by_hand, &rig.checkout, "mine", T0));
     // One the node made outside its worktree folder: not recorded either.
@@ -435,9 +449,13 @@ fn older_than_keeps_workspaces_freed_more_recently() {
         older_than_ms: Some(days * 24 * H),
         dry_run: false,
     };
-    let out = rig.ws.clean(&|| users.clone(), T0 + 3 * 24 * H, how(7), &never);
+    let out = rig
+        .ws
+        .clean(&|| users.clone(), T0 + 3 * 24 * H, how(7), &never);
     assert!(matches!(out[0].action, Action::Kept(State::Waiting { .. })));
-    let out = rig.ws.clean(&|| users.clone(), T0 + 8 * 24 * H, how(7), &never);
+    let out = rig
+        .ws
+        .clean(&|| users.clone(), T0 + 8 * 24 * H, how(7), &never);
     assert_eq!(out[0].action, Action::Removed);
 }
 
@@ -449,7 +467,10 @@ fn listing_tells_each_state_and_reason() {
     assert_eq!(listed.len(), 1);
     assert!(matches!(listed[0].state, State::Waiting { .. }));
     assert_eq!(listed[0].branch, rig.branch);
-    assert_eq!(rig.ws.list(&users, T0 + H, false)[0].state, State::Cleanable);
+    assert_eq!(
+        rig.ws.list(&users, T0 + H, false)[0].state,
+        State::Cleanable
+    );
     fs::write(rig.work.join("new.txt"), "x").unwrap();
     assert_eq!(
         rig.ws.list(&users, T0 + H, false)[0].state,
@@ -469,10 +490,7 @@ fn a_workspace_already_gone_is_forgotten() {
         &rig.checkout,
         &["worktree", "remove", "--force", rig.work.to_str().unwrap()],
     );
-    assert_eq!(
-        rig.clean(&rig.ended(T0), T0, true),
-        vec![Action::Forgotten]
-    );
+    assert_eq!(rig.clean(&rig.ended(T0), T0, true), vec![Action::Forgotten]);
     assert!(rig.ws.records().is_empty());
 }
 
@@ -516,7 +534,10 @@ fn build_output_that_is_tracked_or_a_link_is_kept() {
     fs::create_dir_all(rig.work.join("node_modules")).unwrap();
     fs::write(rig.work.join("node_modules/vendored.js"), "x").unwrap();
     // Tracked despite the ignore rule: it is the project's, not build output.
-    run_git(&rig.work, &["add", "-f", "package.json", "node_modules/vendored.js"]);
+    run_git(
+        &rig.work,
+        &["add", "-f", "package.json", "node_modules/vendored.js"],
+    );
     run_git(&rig.work, &["commit", "-q", "-m", "vendored"]);
     fs::write(rig.work.join("Cargo.toml"), "[package]\n").unwrap();
     let elsewhere = rig.top.join("elsewhere");
@@ -553,4 +574,38 @@ fn the_cap_and_free_disk_refuse_a_new_worktree() {
     s.min_free_bytes = u64::MAX;
     rig.ws.set_settings(s);
     assert!(matches!(rig.ws.room(), Err(("free_disk_gb", _))));
+}
+
+#[test]
+fn a_stale_claim_beside_a_newer_record_goes_and_no_longer_refuses_starts() {
+    let rig = Rig::new("claim-twice");
+    let dir = rig.data.join("workspaces");
+    let record = fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|x| x == "json"))
+        .unwrap();
+    let claim = record.with_extension("claim");
+    // A process claimed it and ended mid-way, and the other one's pass wrote the record again meanwhile.
+    fs::copy(&record, &claim).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&claim)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert!(rig.ws.removing(&rig.work));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut busy = Users::default();
+    busy.busy(&rig.work);
+    assert_eq!(
+        rig.clean(&busy, now, false),
+        vec![Action::Kept(State::InUse)]
+    );
+    assert!(!claim.exists());
+    assert!(!rig.ws.removing(&rig.work));
 }

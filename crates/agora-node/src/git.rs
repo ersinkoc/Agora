@@ -261,9 +261,8 @@ impl MadeLinks {
     /// Whether the worktree's `.git`, the admin folder's `commondir` and `gitdir` still hold exactly what was recorded, each read once
     /// without following a link ([`read_link_file`]), and `commondir` still names the recorded shared folder ([`links_hold`]).
     pub fn still_hold(&self) -> bool {
-        let same = |file: PathBuf, recorded: &[u8]| {
-            read_link_file(&file).is_ok_and(|now| now == recorded)
-        };
+        let same =
+            |file: PathBuf, recorded: &[u8]| read_link_file(&file).is_ok_and(|now| now == recorded);
         same(self.work.join(".git"), &self.dotgit)
             && same(self.admin.join("commondir"), &self.commondir)
             && same(self.admin.join("gitdir"), &self.gitdir)
@@ -274,17 +273,14 @@ impl MadeLinks {
 /// The record of the worktree this node made at exactly `work` (not a folder inside one), as [`MadeLinks`].
 pub fn made_links(work: &Path) -> Option<MadeLinks> {
     let work = agora_platform::canonicalize_plain(work).ok()?;
-    made()
-        .iter()
-        .find(|m| m.work == work)
-        .map(|m| MadeLinks {
-            work: m.work.clone(),
-            admin: m.admin.clone(),
-            common: m.common.clone(),
-            dotgit: m.dotgit.clone(),
-            commondir: m.commondir.clone(),
-            gitdir: m.gitdir.clone(),
-        })
+    made().iter().find(|m| m.work == work).map(|m| MadeLinks {
+        work: m.work.clone(),
+        admin: m.admin.clone(),
+        common: m.common.clone(),
+        dotgit: m.dotgit.clone(),
+        commondir: m.commondir.clone(),
+        gitdir: m.gitdir.clone(),
+    })
 }
 
 /// ADR-0064: takes back the record of a worktree this node made before it restarted (from `crate::workspaces`), so its git there is
@@ -2707,6 +2703,7 @@ diff --git a/.ssh/known b/.ssh/known\nold mode 100644\nnew mode 100755\n";
             work: work.to_path_buf(),
             admin: work.join(format!("{tag}-admin")),
             common: work.join(format!("{tag}-common")),
+            dotgit: Vec::new(),
             commondir: Vec::new(),
             gitdir: Vec::new(),
             project: None,

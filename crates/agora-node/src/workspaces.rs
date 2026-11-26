@@ -47,7 +47,8 @@ const CLAIM_STALE_MS: u64 = 60 * 60 * 1000;
 const HOUR_MS: u64 = 60 * 60 * 1000;
 const GB: u64 = 1 << 30;
 /// Build output removed from a left-behind worktree, each only beside its project file (ADR-0064 decision 4's defaults).
-const BUILD_OUTPUT: [(&str, &str); 2] = [("Cargo.toml", "target"), ("package.json", "node_modules")];
+const BUILD_OUTPUT: [(&str, &str); 2] =
+    [("Cargo.toml", "target"), ("package.json", "node_modules")];
 
 /// The owner's settings (policy file `workspaces.*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +123,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len())
@@ -560,7 +561,7 @@ impl Workspaces {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map_or(0, |d| now_ms.saturating_sub(d.as_millis() as u64));
             if age >= CLAIM_STALE_MS {
-                let _ = agora_platform::rename_no_replace(&c, &c.with_extension(RECORD_EXT));
+                give_back(&c, &c.with_extension(RECORD_EXT));
             }
         }
     }
@@ -599,7 +600,9 @@ impl Workspaces {
     fn in_place(&self, r: &Record) -> Result<(), Reason> {
         let work = &r.links.work;
         let meta = std::fs::symlink_metadata(work).map_err(|_| Reason::Moved)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() || agora_platform::is_reparse_point(&meta)
+        if !meta.is_dir()
+            || meta.file_type().is_symlink()
+            || agora_platform::is_reparse_point(&meta)
         {
             return Err(Reason::Moved);
         }
@@ -621,8 +624,7 @@ impl Workspaces {
     }
 
     fn missing(r: &Record) -> bool {
-        std::fs::symlink_metadata(&r.links.work)
-            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+        std::fs::symlink_metadata(&r.links.work).is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
     }
 
     /// Every workspace with its state, changing nothing on disk. `by_node`: as the node's pass sees it (the grace period counts).
@@ -821,7 +823,9 @@ impl Workspaces {
             let dir = work.join(name);
             let real_dir = |d: &Path| {
                 std::fs::symlink_metadata(d).is_ok_and(|m| {
-                    m.is_dir() && !m.file_type().is_symlink() && !agora_platform::is_reparse_point(&m)
+                    m.is_dir()
+                        && !m.file_type().is_symlink()
+                        && !agora_platform::is_reparse_point(&m)
                 })
             };
             if !real_dir(&dir) || !git::ignored_untracked(work, name).unwrap_or(false) {
@@ -838,7 +842,12 @@ impl Workspaces {
         }
         r.build_output_removed = true;
         if !removed.is_empty() {
-            self.log(now_ms, &format!("build-output-removed:{}", removed.join(",")), r, true);
+            self.log(
+                now_ms,
+                &format!("build-output-removed:{}", removed.join(",")),
+                r,
+                true,
+            );
         }
         // Written through the claim's own name, then given back: the record keeps that it was done.
         let _ = self.write_claimed(&claim, r);
@@ -903,7 +912,17 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         if !self.done {
-            let _ = agora_platform::rename_no_replace(&self.claim, &self.record);
+            give_back(&self.claim, &self.record);
+        }
+    }
+}
+
+/// Puts a claimed record back under its own name. When a record was written there meanwhile (the other process's pass wrote what it
+/// saw), that one stays and the claim goes: a claim left in place would refuse starts in that workspace for good.
+fn give_back(claim: &Path, record: &Path) {
+    if let Err(e) = agora_platform::rename_no_replace(claim, record) {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(claim);
         }
     }
 }
@@ -917,11 +936,7 @@ mod tests {
 
     #[test]
     fn in_use_wins_over_everything() {
-        for work in [
-            Ok(None),
-            Ok(Some(Keeps::Changes)),
-            Err(Reason::LinksMoved),
-        ] {
+        for work in [Ok(None), Ok(Some(Keeps::Changes)), Err(Reason::LinksMoved)] {
             assert_eq!(
                 decide(Use::Busy, work, 0, 100 * H, 24 * H, true),
                 State::InUse
@@ -935,7 +950,10 @@ mod tests {
         for (work, reason) in [
             (Ok(Some(Keeps::Changes)), Reason::Changes),
             (Ok(Some(Keeps::Submodules)), Reason::Submodules),
-            (Ok(Some(Keeps::Unmerged("agent/x".into()))), Reason::Unmerged),
+            (
+                Ok(Some(Keeps::Unmerged("agent/x".into()))),
+                Reason::Unmerged,
+            ),
             (Err(Reason::LinksMoved), Reason::LinksMoved),
             (Err(Reason::Moved), Reason::Moved),
             (Err(Reason::GitFailed), Reason::GitFailed),

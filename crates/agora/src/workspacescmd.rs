@@ -19,7 +19,9 @@ use crate::{home, out_line, socket_path, Opts, Say};
 fn paths(o: &Opts) -> (PathBuf, PathBuf) {
     (
         o.data.clone().unwrap_or_else(|| home().join("data")),
-        o.worktrees.clone().unwrap_or_else(|| home().join("worktrees")),
+        o.worktrees
+            .clone()
+            .unwrap_or_else(|| home().join("worktrees")),
     )
 }
 
@@ -124,7 +126,8 @@ pub(crate) fn list(say: &Say, o: &Opts) -> ExitCode {
         return ExitCode::from(1);
     }
     let now = agora_node::grants::now_ms();
-    let listed = w.list(&users(&data, &socket_path(o)), now, false);
+    // As the node's pass sees it: a workspace in its grace period is `waiting` (`agora workspaces clean` removes it all the same).
+    let listed = w.list(&users(&data, &socket_path(o)), now, true);
     if listed.is_empty() {
         say.out(key!("cli-workspaces-empty"), &[]);
         return ExitCode::SUCCESS;
@@ -136,7 +139,7 @@ pub(crate) fn list(say: &Say, o: &Opts) -> ExitCode {
     }
     let cleanable = listed
         .iter()
-        .filter(|l| l.state == State::Cleanable)
+        .filter(|l| matches!(l.state, State::Cleanable | State::Waiting { .. }))
         .count();
     let total: u64 = listed.iter().map(|l| l.size_bytes).sum();
     say.out(

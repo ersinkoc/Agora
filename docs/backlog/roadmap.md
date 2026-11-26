@@ -133,6 +133,10 @@ fixes it.
 - [ ] **M3.5 The diff names every changed file** (ADR-0071, **schema**): `GitDiffResult.paths`, the review screen says what is not shown
 - [ ] **M3.6 A reply keeps its link across machines** (ADR-0074, **schema**): `MeshPost.message_id` / `reply_to`, the broker and hub checks
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap
+  - [x] the node records its worktrees and removes them after the grace period when nothing would be lost; `agora workspaces [clean]`;
+    build output of left-behind worktrees; the cap and the free-disk minimum refuse a new worktree (ADR-0064 "Build status")
+  - [ ] free space and sizes in the node report, "Needs you" when low, the clean-up buttons in the windows (**schema**);
+    `[workspace] clean` in manifests
 - [ ] **M3.8 Direct client ↔ node terminal path** (ADR-0023): measured against the relay first; built only if the budget needs it
 - [ ] **M3.9 Any machine can be the hub** (ADR-0086, staged)
   - [ ] export and import; the signed hub record (**schema**); manual takeover with partition tests; continuous replication with a drill; automatic takeover (3+ machines)

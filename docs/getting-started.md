@@ -145,6 +145,14 @@ before (its turn too quick to see, or not shown yet) counts as finished after 5 
 typed into its running turn) counts as finished once the agent stayed out of Working for 5 s. An agent whose state Agora cannot
 tell (unknown) is waited for until it shows one, so give such waits a `--timeout`.
 
+## Clean up workspaces
+
+An agent started with its own worktree ("Separate worktree") leaves that folder behind when it ends. The node removes it a day later
+when nothing would be lost (no uncommitted change, no commit that is not on another branch or pushed; the branch is kept), and keeps
+the rest. `agora workspaces` lists them with their state (`in-use`, `waiting`, `cleanable`, `left-behind` and why) and size;
+`agora workspaces clean --dry-run` shows what would go, and `agora workspaces clean [--older-than 7d]` removes it now. Folders you
+selected yourself are never removed. `workspaces.clean = off` in the node policy stops the automatic removal.
+
 ## Certificates
 
 Every certificate Agora issues lasts 90 days. A machine renews its own by itself when 30 days are left, while it is connected to a hub that is

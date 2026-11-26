@@ -555,6 +555,12 @@ while the agent runs or is offered for Resume (2 GiB per node in all, the files 
 written later. `agora history purge` removes every transcript. Reading older entries in pages
 (`chat.history`) is ADR-0089's later schema step.
 
+ADR-0064: the node records the worktrees it makes for agents and removes one after its agents ended when nothing would be lost (see
+the ADR's "Build status"), saying `WorktreeRemoved` for it. The node policy `workspaces.clean = auto | off` (default `auto`),
+`workspaces.grace_hours = N` (default 24), `workspaces.max_gb = N` (default 50, 0: no cap) and `workspaces.min_free_gb = N` (default
+3, 0: never) set it; over the cap or under the minimum a start that needs a new worktree is refused with `node.resource_limit`
+(`resource` = `workspaces_gb` or `free_disk_gb`, `limit` in GB). `agora workspaces [clean]` lists and cleans them on the machine.
+
 `MeshPost.refs` (ADR-0035, field 5): the sender's refs as written; the receiving broker qualifies them with the hub-vouched `origin`.
 
 `BoardCall` (command 62, node → hub on the stream-1 request path like `MeshPost`) and `BoardResult` (`CommandOk` field 16), ADR-0039: a mesh tool on a shared
