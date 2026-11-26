@@ -7,7 +7,11 @@ import { demoCatalog } from './catalogDemo';
 import type { CatalogOrigin, Theme } from './tokens';
 
 /** One theme of the catalog, as the window shows it. Every text is the index's: shown as text, never as markup. */
-export interface CatalogEntry { id: string; name: string; version: number; author: string; licence: string; size: number }
+export interface CatalogEntry {
+  id: string; name: string; version: number; author: string; licence: string; size: number;
+  /** ADR-0120: the day the catalog first listed it (`YYYY-MM-DD`, empty when not given) and the popularity it publishes (0: none). */
+  added: string; popularity: number;
+}
 /** The catalog as the hub answered: off (the owner has not turned it on), or its themes. */
 export type CatalogList = { on: false } | { on: true; entries: CatalogEntry[]; updatedAtMs: number };
 
@@ -18,12 +22,16 @@ export type CatalogAsk = (body: Body) => Promise<agora.v1.CommandOk.$Properties>
 const num = (v: unknown) => (typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : typeof v === 'object' && v !== null && 'toNumber' in v ? (v as { toNumber: () => number }).toNumber() : 0);
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 const ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+/** ADR-0120: a day the hub checked, or empty; a popularity from 0 to 1 000 000 000, or 0. */
+export const dayOf = (v: unknown) => (typeof v === 'string' && DAY.test(v) ? v : '');
+export const popularityOf = (v: unknown) => { const n = num(v); return Number.isInteger(n) && n >= 0 && n <= 1_000_000_000 ? n : 0; };
 
 export function entryOf(e: agora.v1.ThemeCatalogEntry.$Properties | null | undefined): CatalogEntry | undefined {
   const id = str(e?.id);
   const version = num(e?.version);
   if (!ID.test(id) || !Number.isInteger(version) || version < 1) return undefined;
-  return { id, name: str(e?.name) || id, version, author: str(e?.author), licence: str(e?.licence), size: num(e?.size) };
+  return { id, name: str(e?.name) || id, version, author: str(e?.author), licence: str(e?.licence), size: num(e?.size), added: dayOf(e?.added), popularity: popularityOf(e?.popularity) };
 }
 
 export function listOf(r: agora.v1.ThemeCatalogListResult.$Properties | null | undefined): CatalogList {

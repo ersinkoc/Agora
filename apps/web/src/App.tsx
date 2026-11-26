@@ -74,6 +74,7 @@ import { keyStore } from './keys/store';
 import { IS_MAC } from './keys/strokes';
 import { ariaKey, commandLabel, shownKey, useKeymap } from './keys/view';
 import { PluginsDialog, SafeModeNote } from './plugins/PluginsDialog';
+import { CatalogGallery } from './gallery/CatalogGallery';
 import { SAFE, safeAddress } from './plugins/safe';
 import { pluginStore } from './plugins/store';
 
@@ -585,7 +586,9 @@ export function App() {
   const screenNow = phoneScreen(hash);
   const phoneDetails = phone && screenNow.kind === 'details' ? screenNow.tab : undefined;
   const settingsDemo = hash === '#/gallery/settings' || hash.startsWith('#/gallery/settings/');
-  const showsHome = current === undefined && hash !== '#/gallery' && !settingsDemo && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone) && !phoneDetails;
+  // ADR-0120: the Gallery of the community catalogs (#/catalog, #/catalog/plugins).
+  const catalogTab = hash === '#/catalog' ? 'themes' as const : hash === '#/catalog/plugins' ? 'plugins' as const : undefined;
+  const showsHome = current === undefined && hash !== '#/gallery' && !catalogTab && !settingsDemo && !isSettingsHash(hash) && !isMachinesHash(hash) && !(hash === '#/audit' && hub) && !(hash === '#/theme' && phone) && !phoneDetails;
   // "Allow a new machine to join": back to Home, where the window for new machines is; its own button asks, this only brings it into view.
   const showPairing = useCallback(() => {
     go('#/');
@@ -620,6 +623,7 @@ export function App() {
     // Plugins loaded from a local file, and safe mode (ADR-0114): the safe-mode key itself is heard before anything else (plugins/safe.ts),
     // so its command is here for the palette and its keys are fixed.
     'plugins.open': { run: () => setPluginsOpen(true) },
+    'gallery.open': SAFE ? false : { run: () => go('#/catalog') },
     'window.safe-mode': SAFE ? false : { run: () => location.assign(safeAddress(location.href)) },
     // Sounds on or off for this browser (never in safe mode or where the browser makes no sound); turning them on is the person's act, so
     // the audio may start.
@@ -675,7 +679,7 @@ export function App() {
     <ChatActionsContext.Provider value={chatActions}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
-      {hash === '#/gallery' ? <Gallery /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
+      {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
         pairing={pairing.ui} onStart={hub && api && live && changes ? (node) => { toWindow(); openStart(node); } : undefined} onNewTerminal={hub && api && live && changes ? (node) => { toWindow(); openStart(node, true); } : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}

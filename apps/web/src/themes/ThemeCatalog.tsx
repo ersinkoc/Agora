@@ -66,6 +66,7 @@ function CatalogSection({ ask }: { ask: CatalogAsk }) {
     <section className="grid gap-2" aria-labelledby="theme-catalog-title" data-theme-catalog>
       <h3 id="theme-catalog-title" className="ide-section m-0 px-0">{t('theme-catalog')}</h3>
       <p className="muted m-0 text-xs">{t('theme-catalog-hint')}</p>
+      <a className="kit-btn kit-btn--ghost kit-btn--sm w-fit" href="#/catalog" data-gallery-link="">{t('catalog-gallery-open')}</a>
       {list.entries.length === 0 ? <p className="muted m-0 text-xs">{t('theme-catalog-empty')}</p>
         : <ul className="m-0 grid list-none gap-2 p-0">
           {list.entries.map((e) => {
@@ -102,7 +103,7 @@ function CatalogSection({ ask }: { ask: CatalogAsk }) {
 
 // A theme of the catalog, drawn in its own colours before it is installed: its panels, text, accent, a working mark and a terminal.
 // Every colour was checked by the theme rules (#rrggbb only) and is set as a style value, never as CSS text.
-function CatalogPreview({ theme, scheme }: { theme: ThemeData; scheme: Scheme }) {
+export function CatalogPreview({ theme, scheme }: { theme: ThemeData; scheme: Scheme }) {
   const look = looksOf(theme)[scheme] as Look;
   const c = look.tokens;
   return (

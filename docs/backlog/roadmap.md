@@ -170,7 +170,8 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   - [ ] P3 a status-line segment and notifications the host draws
   - [ ] P4 link handlers: a declared pattern in terminal output opens the plugin's panel
   - [ ] P5 window-side events, read-only; node-side automations need their own ADR (**decision**: now or after P5)
-- [ ] **M5.5 A gallery** for the theme and plugin catalogs: previews, sort, one-step install
+- [x] **M5.5 A gallery** for the theme and plugin catalogs (ADR-0120): previews, sort by popular, new, name or author, search, plugin
+  screenshots, one-step theme install (a plugin is still installed by the hub's owner)
 - [ ] **M5.6 Distribution** (**decision**): a second, "unreviewed but sandboxed" catalog tier (ADR-0114 decision 7 amendment); members
   installing sandboxed plugins for themselves (ADR-0114 open question)
 - [x] **M5.7 Plugin author kit**: reload on save, `agora plugin new` / `check` / `pack` (today `scripts/pack-plugin.mjs`), a typed

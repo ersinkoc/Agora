@@ -19,8 +19,8 @@ Agora never sends anything out on its own: no telemetry, no install counts repor
 ## Decision
 1. **A Gallery screen in the window** (mockup option A): tabs Themes and Plugins, search, sort, and a grid of cards. A theme card draws
    the theme in its own colours (as Preview does today); a side panel shows it large with its schemes. A plugin card shows its name,
-   author, licence, version, what it asks to see, its first screenshot, and its state. It opens from Settings (Look), the command palette
-   and the Plugins dialog; the theme editor's catalog section becomes a link to it.
+   author, licence, version, what it asks to see, its first screenshot, and its state. It opens from Settings (Look), the command palette,
+   the theme editor's catalog section and the Plugins dialog's catalog list (both stay, with a link to it).
 2. **Sorting.** Popular (the default when any entry has a popularity), New, Name, Author; installed ones are not moved. Ties fall back to
    the name.
 3. **Popularity is published by the catalog, never counted by Agora.** Index format 2 gives each entry an optional `popularity`, a whole
@@ -61,6 +61,9 @@ Agora never sends anything out on its own: no telemetry, no install counts repor
 - **Count installs on the hub** (rejected by the maintainer): small numbers, and it shows people what their colleagues installed.
 - **Images for themes**: unnecessary, the theme draws itself, and a picture could disagree with the file.
 - **A one-step plugin install button for the owner**: needs a signed command; deferred (answer 3).
+
+## Build status
+Built 2026-11-27 on `main`: steps 1 to 3.
 
 ## Build order
 1. This ADR, the schema (fields, command, golden fixtures), the docs' index formats.

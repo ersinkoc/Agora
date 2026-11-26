@@ -13,7 +13,7 @@
 // on. Nothing is installed from a window.
 import type { Capability } from './capabilities';
 import { type GrantRecord, type GrantState, grant, grantState, granted, readGrants } from './grants';
-import { type Catalog, type HubLink, loadHubCatalog, loadHubGrants, loadHubPlugins } from './hub';
+import { type Catalog, type HubLink, loadCatalogScreenshot, loadHubCatalog, loadHubGrants, loadHubPlugins } from './hub';
 import { type CheckedPlugin, type PackageResult, MANIFEST, MAX_PACKAGE_BYTES, checkPackage, readManifest } from './package';
 import { SAFE } from './safe';
 
@@ -166,6 +166,11 @@ export function createPluginStore(env: PluginStoreEnv) {
       hubs = found.map(({ plugin }) => entry(plugin, '', given[plugin.manifest.id], false));
       hubSha = new Map(found.map(({ plugin, info }) => [plugin.manifest.id, info.sha256]));
       show();
+    },
+    /** ADR-0120: screenshot `index` of catalog plugin `id`, from the hub this window follows; undefined without one, in safe mode, or
+     *  when the hub refuses it. */
+    async screenshot(id: string, index: number): Promise<{ src: string; alt: string } | undefined> {
+      return safe || !hub ? undefined : loadCatalogScreenshot(hub, id, index);
     },
     /** The plugins this browser keeps, by their manifests only (nothing is checked or run): what safe mode lists for removal. */
     kept(): { id: string; name: string; version: string }[] {

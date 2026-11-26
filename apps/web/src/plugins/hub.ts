@@ -6,6 +6,8 @@
 import type { agora } from '../gen/agora.js';
 import type { CommandBody } from '../net/live';
 import { num } from '../net/view';
+import { dayOf, popularityOf } from '../themes/catalog';
+import { screenshotAddress } from '../gallery/order';
 import { type Capability, isCapability } from './capabilities';
 import type { GrantRecord } from './grants';
 import { type CheckedPlugin, MAX_PACKAGE_BYTES, checkPackage, sha256Hex } from './package';
@@ -88,6 +90,11 @@ export interface CatalogPlugin {
   /** What it asks to see, as this window knows the names (an unknown one is counted in `unknown`). */
   readonly capabilities: readonly Capability[];
   readonly unknown: number;
+  /** ADR-0120: the day the catalog first listed it (`YYYY-MM-DD`, empty when not given), the popularity it publishes (0: none), and
+   *  one alt text per screenshot the hub kept (fetched by its place with `loadCatalogScreenshot`). */
+  readonly added: string;
+  readonly popularity: number;
+  readonly screenshots: readonly string[];
 }
 /** Off (the owner has not turned it on), or its entries. */
 export type Catalog = { readonly on: false } | { readonly on: true; readonly entries: readonly CatalogPlugin[] };
@@ -106,6 +113,16 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+/** ADR-0120: screenshot `index` of catalog plugin `id`, as an address an `<img>` shows (checked again: a PNG or WebP of the type the hub
+ *  named), with its alt text; undefined when the hub refuses it, the link is down, or it is not such an image. */
+export async function loadCatalogScreenshot(hub: HubLink, id: string, index: number): Promise<{ src: string; alt: string } | undefined> {
+  let r: agora.v1.IPluginCatalogScreenshotResult | null | undefined;
+  try { r = (await hub.command({ pluginCatalogScreenshot: { pluginId: id, index } })).pluginCatalogScreenshot; } catch { return undefined; }
+  const data = r?.data instanceof Uint8Array ? r.data : undefined;
+  const src = data && data.length <= 512 * 1024 ? screenshotAddress(typeof r?.mediaType === 'string' ? r.mediaType : '', data) : undefined;
+  return src ? { src, alt: text(r?.alt, 200) } : undefined;
+}
+
 /** The catalog as the hub keeps it; undefined when the hub cannot say (an older hub refuses the message, or the link is down). */
 export async function loadHubCatalog(hub: HubLink): Promise<Catalog | undefined> {
   let r: agora.v1.IPluginCatalogListResult | null | undefined;
@@ -119,6 +136,8 @@ export async function loadHubCatalog(hub: HubLink): Promise<Catalog | undefined>
     entries.push(Object.freeze({
       id, version, name: text(e.name, 60) || id, author: text(e.author, 100), licence: text(e.licence, 60), description: text(e.description, 300),
       capabilities: Object.freeze(caps.filter(isCapability)), unknown: caps.filter((c) => !isCapability(c)).length,
+      added: dayOf(e.added), popularity: popularityOf(e.popularity),
+      screenshots: Object.freeze((e.screenshots ?? []).slice(0, 4).map((a) => text(a, 200))),
     }));
   }
   return Object.freeze({ on: true as const, entries: Object.freeze(entries) });

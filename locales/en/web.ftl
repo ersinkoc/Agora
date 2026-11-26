@@ -2240,3 +2240,46 @@ keys-cmd-sounds = Turn sounds on or off
 keys-cmd-mute-agent = Mute or unmute the focused agent's sounds
 palette-agent-mute = Mute the sounds of { $name }
 palette-agent-unmute = Unmute the sounds of { $name }
+
+## The Gallery (ADR-0120): both community catalogs on one screen.
+catalog-gallery-title = Gallery
+catalog-gallery-open = Open the gallery
+catalog-gallery-back = Back
+catalog-gallery-show = Show
+catalog-gallery-themes = Themes { $count }
+catalog-gallery-plugins = Plugins { $count }
+catalog-gallery-search-themes = Search themes
+catalog-gallery-search-plugins = Search plugins
+catalog-gallery-sort = Sort
+catalog-gallery-sort-popular = Popular
+catalog-gallery-sort-new = New
+catalog-gallery-sort-name = Name
+catalog-gallery-sort-author = Author
+catalog-gallery-intro = From the catalogs your Agora's owner turned on. Everything shown here is checked by this window before it is drawn.
+catalog-gallery-popularity = { $count ->
+    [one] Popularity 1
+   *[other] Popularity { $count }
+}
+catalog-gallery-popularity-hint = Popularity, as the catalog publishes it. Agora counts nothing itself.
+catalog-gallery-added = Added { $day }
+catalog-gallery-unavailable = The catalog cannot be shown now: the window is not connected to a hub, or the hub is older than the gallery.
+catalog-gallery-no-match = Nothing matches your search.
+catalog-gallery-preview-loading = Loading the preview…
+catalog-gallery-preview-refused = No preview: this window refused the theme.
+catalog-gallery-use = Use
+catalog-gallery-details = Details
+catalog-gallery-close = Close
+catalog-gallery-scheme = Scheme
+catalog-gallery-dark = Dark
+catalog-gallery-light = Light
+catalog-gallery-you-have = You have version { $version }; it changes only when you update.
+catalog-gallery-theme-install-note = Installing copies the theme into your own themes, on every device you sign in on. Nothing in a theme can run code.
+catalog-gallery-plugins-off = The community plugin catalog is off on this hub. Its owner can turn it on with agora hub plugins on.
+catalog-gallery-plugin-not-added = Not added
+catalog-gallery-plugin-newer = { $version } is out (this Agora has { $from })
+catalog-gallery-plugin-added = Added to this Agora
+catalog-gallery-plugin-added-note = This version is added to this Agora. Open Plugins to choose what it may see.
+catalog-gallery-asks = It asks to see
+catalog-gallery-copy-command = Copy the command
+catalog-gallery-copied = Copied
+palette-gallery = Gallery: themes and plugins

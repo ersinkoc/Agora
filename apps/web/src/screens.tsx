@@ -261,7 +261,7 @@ export function Gallery() {
   useEffect(() => { markSkipCapable('demo'); return () => forgetSkipCapable('demo'); }, []);
   return (
     <main className="page gallery">
-      <h1>{t('gallery-title')}</h1>
+      <h1>{t('catalog-gallery-title')}</h1>
       <Themed theme="dark" onStart={() => setStarting(true)} />
       <Themed theme="light" onStart={() => setStarting(true)} />
       {starting && <DemoStart onClose={() => setStarting(false)} />}
@@ -498,6 +498,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
                   <SegmentedControl labelledBy={labelId} value={theme.mode} onChange={(m) => themeStore.setMode(m)}
                     items={THEME_MODES.map((c) => ({ value: c.id, label: t(c.label), title: t(c.title), icon: <Icon name={c.icon} className="size-3.5" /> }))} />
                   {onTheme && <Button variant="ghost" size="sm" onClick={onTheme}>{t('theme-edit')}</Button>}
+                  {onTheme && <a className="kit-btn kit-btn--ghost kit-btn--sm" href="#/catalog" data-gallery-link="">{t('catalog-gallery-open')}</a>}
                 </>}
               </SettingRow>
               <SettingRow label={t('language-label')}>{() => <LanguagePicker compact />}</SettingRow>

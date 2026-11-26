@@ -31,7 +31,7 @@ describe('the hub\'s plugin catalog', () => {
     expect(await loadHubCatalog(hubWith({}).link)).toEqual({ on: false });
     expect(await loadHubCatalog(hubWith(new Error('protocol.unsupported')).link)).toBeUndefined();
     const on = await loadHubCatalog(hubWith({ on: true, entries: [entry()], updatedAtMs: 5 }).link);
-    expect(on).toEqual({ on: true, entries: [{ id: 'demo', name: 'Demo', version: '1.2.0', author: 'Someone', licence: 'MIT', description: 'Lists the agents.', capabilities: ['agents.read'], unknown: 0 }] });
+    expect(on).toEqual({ on: true, entries: [{ id: 'demo', name: 'Demo', version: '1.2.0', author: 'Someone', licence: 'MIT', description: 'Lists the agents.', capabilities: ['agents.read'], unknown: 0, added: '', popularity: 0, screenshots: [] }] });
   });
 
   it('leaves out an entry it cannot use and counts a capability it does not know', async () => {

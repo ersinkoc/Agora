@@ -1,0 +1,1 @@
+- A Gallery screen shows both community catalogs (ADR-0120): themes drawn in their own colours with one-step install, plugins with their screenshots and what they ask to see, search, and sorting by popularity (as the catalog publishes it), newest, name or author. Open it from Settings, the theme editor, the Plugins dialog or the command palette.

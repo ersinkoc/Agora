@@ -781,6 +781,31 @@ catalog of two themes.
 `scripts/e2e-theme-catalog.mjs` runs all of this in a real browser on a real hub: the owner's `update` from a catalog served on the
 machine, nothing shown while off, the list once on, a preview and an install, and no request to any origin but the hub's.
 
+### The gallery
+
+[ADR-0120](../adr/0120-a-gallery-for-the-community-catalogs.md): both community catalogs on one screen, **Gallery** (`#/catalog`,
+`#/catalog/plugins`), opened from Settings (Appearance), the theme editor's catalog section, the Plugins dialog and the command palette
+(`gallery.open`). Not offered in safe mode.
+
+![The Gallery: two themes drawn in their own colours, Harbour's details open (Dark)](../screenshots/adr120-gallery-dark.png)
+![The same in Light](../screenshots/adr120-gallery-light.png)
+![On a phone (Dark)](../screenshots/adr120-gallery-phone-dark.png)
+
+- **Themes** are cards, each drawn in the theme's own colours from its file (fetched from the hub three at a time and checked by the
+  window's rules, as Preview does; a theme the window refuses says so and cannot be installed). **Install** (or **Update to version N**)
+  works in one step as in the editor; an installed one offers **Use**. **Details** opens a side panel with the theme large and, for a
+  theme with both, a Dark / Light switch.
+- **Plugins** are cards with the first screenshot the hub kept (or the name's first letter), what the plugin asks to see, and its state
+  on this hub (not added, added, or a newer version out). **Details** shows every screenshot with its alt text, the description, and the
+  command the hub's owner runs (`agora hub plugins install|upgrade ID`) with **Copy the command**; nothing installs a plugin from the
+  window. A screenshot is shown only as an image: the window checks its first bytes again and draws it from a `data:` address with its
+  fixed type.
+- **Search** matches every typed word in the name, author or description. **Sort**: Popular, New, Name, Author; it opens on Popular when
+  any entry has a popularity, else New when any has a day, else Name. Popularity is the number the catalog publishes (format 2), shown
+  as "Popularity N" with the hint that Agora counts nothing; New uses the day it was first listed.
+- Without a hub (or from a hub older than the gallery) it says the catalog cannot be shown; while a catalog is off it says so. The demo
+  window shows the sample theme catalog.
+
 ### The protocol
 
 `ThemeCatalogList` and `ThemeCatalogGet { id }` (`schema/agora/v1/commands.proto`, [protocol.md](../specs/protocol.md#the-community-theme-catalog-adr-0113)),

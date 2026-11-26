@@ -133,6 +133,7 @@ export function PluginsDialog({ onClose }: { onClose: () => void }) {
                 </li>
               ))}
             </ul>}
+            {!safe && catalog?.on && <a className="kit-btn kit-btn--ghost kit-btn--sm w-fit" href="#/catalog/plugins" onClick={onClose} data-gallery-link="">{t('catalog-gallery-open')}</a>}
             {!safe && catalog?.on && <CatalogList entries={catalog.entries} installed={(id) => [...plugins, ...replaced].find((p) => !p.dev && p.plugin.manifest.id === id)?.plugin.manifest.version} />}
             {!safe && !canWatchFiles() && <p className="m-0 text-xs text-muted" data-plugin-reload-unsupported="">{t('plugin-reload-unsupported')}</p>}
             {screen.error && <p role="alert" className="m-0 text-danger">{screen.error}</p>}

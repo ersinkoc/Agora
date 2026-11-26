@@ -83,7 +83,7 @@ Keyboard.
 | `tool.terminal`, `tool.changes`, `tool.files`, `tool.manager` | none |
 | `machines.allow`, `window.lock` | none |
 | `language.system`, `language.en`, `language.tr` | none |
-| `theme.editor`, `plugins.open` | none |
+| `theme.editor`, `plugins.open`, `gallery.open` | none |
 | `sounds.toggle`, `agent.mute-sounds` | none |
 | `layout.preset-1x1`, `layout.preset-2x1`, `layout.preset-1x2`, `layout.preset-2x2`, `layout.preset-3x2`, `layout.preset-focus` | none |
 | `layout.maximize`, `layout.split-right`, `layout.split-down`, `layout.close-pane`, `layout.reset` | none |

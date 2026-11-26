@@ -274,6 +274,12 @@ words (`plugin-cap-*`), and the command the hub's owner runs on the hub's machin
 plain text to copy. Nothing in a window installs. The window asks the hub with `PluginCatalogList` (`docs/specs/protocol.md`, "Plugins
 (ADR-0114)"); an older hub refuses it and the window shows no catalog; safe mode asks nothing.
 
+### In the gallery
+
+The window's **Gallery** (`#/catalog/plugins`, ADR-0120) shows the catalog's plugins as cards with their screenshots, popularity and
+day, what each asks to see, and the owner's command to copy; see [themes.md, "The gallery"](themes.md#the-gallery). The Plugins
+dialog's catalog list links to it.
+
 ### The catalog's repository (for the maintainer)
 
 The repository does not exist yet; the hub's default address is a placeholder that can never resolve (`plugins.agora.invalid`), so an owner

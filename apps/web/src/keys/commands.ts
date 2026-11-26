@@ -55,6 +55,8 @@ export const COMMANDS: readonly CommandDef[] = [
   ...(['system', 'en', 'tr'] as const).map((l): CommandDef => ({ id: `language.${l}`, label: 'palette-language', args: { name: `language-${l}` }, group: 'appearance', icon: 'globe', context: 'anywhere', keys: [] })),
   { id: 'theme.editor', label: 'palette-theme-editor', group: 'appearance', icon: 'pencil', context: 'anywhere', keys: [] },
   { id: 'plugins.open', label: 'palette-plugins', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: [] },
+  // ADR-0120: the Gallery of the community catalogs.
+  { id: 'gallery.open', label: 'palette-gallery', group: 'appearance', icon: 'palette', context: 'anywhere', keys: [] },
   // The safe-mode key (ADR-0114): heard by the window before anything else (plugins/safe.ts `installSafeKey`), never through this list,
   // and no keybinding can move it or take it (FIXED_KEYS).
   { id: 'window.safe-mode', label: 'palette-safe-mode', group: 'appearance', icon: 'puzzle', context: 'anywhere', keys: ['ctrl+alt+shift+s', 'alt+shift+meta+s'], fixed: true },

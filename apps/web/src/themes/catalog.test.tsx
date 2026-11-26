@@ -144,7 +144,7 @@ describe('the theme catalog', () => {
     expect(listOf({})).toEqual({ on: false });
     const l = listOf({ on: true, updatedAtMs: 5, entries: [entry('ok', 'Ok', 2, '{}'), { id: 'Bad Id', version: 1 }, { id: 'zero', version: 0 }] });
     expect(l.on && l.entries.map((e) => e.id)).toEqual(['ok']);
-    const e = { id: 'night', name: 'Night', version: 3, author: '', licence: '', size: 1 };
+    const e = { id: 'night', name: 'Night', version: 3, author: '', licence: '', size: 1, added: '', popularity: 0 };
     expect(installedOf(e, [])).toEqual({ kind: 'no' });
     const v2 = { ...themeStore.active(), id: 'user-1', catalog: { id: 'night', version: 2 } };
     expect(installedOf(e, [v2])).toMatchObject({ kind: 'older', from: 2 });
