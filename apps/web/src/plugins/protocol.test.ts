@@ -1,7 +1,8 @@
 // The message set (ADR-0114 decision 3 and Verification): the window takes a message only from a frame it made, of a known type and shape,
-// within the size limit and the rate; anything else is ignored and counted. A capability not granted answers "not granted".
+// within the size limit and the rate; anything else is ignored and counted, and a malformed or oversized message stops the frame. A
+// capability not granted answers "not granted".
 import { describe, expect, it } from 'vitest';
-import { BURST, MAX_CAP, RATE, STOP_AFTER, classify, frameFilter, gate, isPlainObject, messageRouter, parseInbound, rateLimiter } from './protocol';
+import { BURST, MAX_CAP, RATE, STOP_AFTER_RATE, classify, frameFilter, gate, isPlainObject, messageRouter, parseInbound, rateLimiter } from './protocol';
 
 const read = (id: number, cap = 'agents.read') => ({ agora: 1, type: 'read', id, cap });
 const take = (f: ReturnType<typeof frameFilter>, data: unknown) => f.take(() => data);
@@ -43,21 +44,50 @@ describe('the message set', () => {
 });
 
 describe('a frame\'s filter', () => {
-  it('ignores and counts an unknown type and an oversized message', () => {
-    const f = frameFilter(() => 0);
-    expect(take(f, { agora: 1, type: 'open-window', url: 'https://example.com' })).toBeUndefined();
-    expect(take(f, { ...read(1), cap: 'x'.repeat(10_000) })).toBeUndefined();
-    expect(take(f, new Uint8Array(1_000_000))).toBeUndefined();
-    expect(take(f, read(2))).toEqual({ type: 'read', id: 2, cap: 'agents.read' });
-    expect(f.counts).toEqual({ type: 2, size: 1, rate: 0 });
+  it('ignores and counts an unknown type, an oversized message and a typed array, each the first and last read of its frame', () => {
+    const cases: [unknown, 'type' | 'size'][] = [[{ agora: 1, type: 'open-window', url: 'https://example.com' }, 'type'], [{ ...read(1), cap: 'x'.repeat(10_000) }, 'size'], [new Uint8Array(1_000_000), 'type']];
+    for (const [bad, why] of cases) {
+      const f = frameFilter(() => 0);
+      expect(take(f, read(2))).toEqual({ type: 'read', id: 2, cap: 'agents.read' });
+      expect(take(f, bad)).toBeUndefined();
+      expect(f.counts[why]).toBe(1);
+      expect(take(f, read(3))).toBeUndefined();
+    }
   });
 
-  it('says once that a frame floods, after STOP_AFTER of its messages are ignored for any reason', () => {
+  it('spends the rate before reading, so well-formed messages over it are cut at the burst', () => {
+    let now = 0;
+    const f = frameFilter(() => now);
+    let taken = 0;
+    for (let i = 0; i < BURST + 10; i++) if (take(f, read(i))) taken++;
+    expect([taken, f.counts.rate]).toEqual([BURST, 10]);
+    now += 1000;
+    taken = 0;
+    for (let i = 0; i < RATE * 3; i++) if (take(f, read(i))) taken++;
+    expect(taken).toBe(RATE);
+  });
+
+  it('stops a frame at its first malformed or oversized message, whatever it is', () => {
+    for (const bad of [new Uint8Array(8), { agora: 1, type: 'nope' }, { ...read(1), cap: 'x'.repeat(MAX_CAP + 1) }, 'x', null]) {
+      let floods = 0;
+      const f = frameFilter(() => 0, () => { floods++; });
+      expect(take(f, read(1))).toBeDefined();
+      expect([floods, f.flooding]).toEqual([0, false]);
+      take(f, bad);
+      expect([floods, f.flooding], JSON.stringify(bad)).toEqual([1, true]);
+      // Nothing more is read from a stopped frame.
+      let reads = 0;
+      f.take(() => { reads++; return read(2); });
+      expect([floods, reads]).toEqual([1, 0]);
+    }
+  });
+
+  it('keeps the rate for well-formed messages, and stops a frame only after STOP_AFTER_RATE over it', () => {
     let floods = 0;
     const f = frameFilter(() => 0, () => { floods++; });
-    for (let i = 0; i < STOP_AFTER - 1; i++) take(f, i % 2 ? new Uint8Array(8) : { agora: 1, type: 'nope' });
-    expect([floods, f.flooding]).toEqual([0, false]);
-    for (let i = 0; i < BURST * 2; i++) take(f, read(i));
+    for (let i = 0; i < BURST + STOP_AFTER_RATE - 1; i++) take(f, read(i));
+    expect([floods, f.flooding, f.counts.rate]).toEqual([0, false, STOP_AFTER_RATE - 1]);
+    take(f, read(0));
     expect([floods, f.flooding]).toEqual([1, true]);
   });
 
@@ -67,20 +97,6 @@ describe('a frame\'s filter', () => {
     for (let i = 0; i < BURST + 25; i++) f.take(() => { reads++; return read(i); });
     expect(reads).toBe(BURST);
     expect(f.counts.rate).toBe(25);
-  });
-
-  it('spends the rate before anything else, so a flood of any kind costs one token each and is cut at the burst', () => {
-    let now = 0;
-    const f = frameFilter(() => now);
-    let taken = 0;
-    for (let i = 0; i < BURST + 10; i++) if (take(f, i % 2 ? read(i) : new Uint8Array(1_000_000))) taken++;
-    expect(taken).toBe(BURST / 2);
-    expect(f.counts.rate).toBe(10);
-    expect(f.counts.type).toBe(BURST / 2);
-    now += 1000;
-    taken = 0;
-    for (let i = 0; i < RATE * 3; i++) if (take(f, read(i))) taken++;
-    expect(taken).toBe(RATE);
   });
 
   it('refills the bucket over time, never past the burst', () => {

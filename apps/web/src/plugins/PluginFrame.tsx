@@ -43,8 +43,8 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   const latest = useRef(view);
   latest.current = view;
   const [dropped, setDropped] = useState(0);
-  // A frame that floods the window with messages is taken away (each message costs the window a copy, read or not); the person can
-  // start it again.
+  // A frame that sends a malformed or oversized message, or floods the window, is taken away (reading a message costs the window as
+  // much as the frame put in it); the person can start it again.
   const [stopped, setStopped] = useState(false);
   const flushNow = useRef<() => void>(() => {});
   const m = plugin.manifest;

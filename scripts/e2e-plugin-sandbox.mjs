@@ -6,7 +6,7 @@
 // address and to a blob page it made), a form post, and reading the window's document; and the frame page opened on its own stays
 // opaque. Network probes are judged from outside the frame: by the two servers' request logs and the browser's finished requests, never
 // by the frame's word alone, and a probe counts only when the frame ran. Then: a granted read answers, one not granted answers "not
-// granted", unknown and oversized messages are ignored and counted, the window's pane bar and marker cannot be covered, `?safe` and the
+// granted", a malformed or oversized message, or a flood, stops the frame without stalling the window, the window's pane bar and marker cannot be covered, `?safe` and the
 // safe-mode key load no plugin and the built-in theme, and a package is loaded through the window's own dialog with the person's grant.
 //
 //   (cd apps/web && npm ci && npm run gen && npm run build)
@@ -75,9 +75,7 @@ const results = [];
 const check = (ok, what) => { results.push([ok, what]); console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) failed++; };
 
 // A fresh window with this storage; the window's messages from frames are kept for the probes to report through.
-// `quiet`: no listener of the test's own reads the window's messages (it would copy every one of them into the window, as the window's
-// own filter does not for a message over the rate).
-async function open(storage, path = '/#/demo', scheme = 'dark', quiet = false) {
+async function open(storage, path = '/#/demo', scheme = 'dark') {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: scheme, locale: 'en-US' });
   // A request the browser refused before sending (a page policy's block) is announced and then fails; only one that finished, or one a
   // server saw, left the frame.
@@ -87,21 +85,32 @@ async function open(storage, path = '/#/demo', scheme = 'dark', quiet = false) {
   ctx.on('requestfailed', (r) => refused.push(`${r.url()} ${r.failure()?.errorText ?? ''}`));
   const pages = [];
   ctx.on('page', (p) => pages.push(p));
-  await ctx.addInitScript(([kv, q]) => {
+  await ctx.addInitScript((kv) => {
     try { localStorage.setItem('agora.attention.mode', 'off'); for (const [k, v] of Object.entries(kv)) localStorage.setItem(k, v); } catch { /* checked below */ }
-    window.__probes = [];
-    if (!q) addEventListener('message', (e) => { if (e.data && typeof e.data === 'object' && 'probe' in e.data) window.__probes.push(e.data); });
-  }, [storage, quiet]);
+  }, storage);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   await page.goto(HUB + path);
   return { ctx, page, requests, refused, pages, errors };
 }
-const report = (page, name, timeout = 6000) => page.waitForFunction((n) => window.__probes.find((p) => p.probe === n)?.result, name, { timeout }).then((h) => h.jsonValue()).catch(() => undefined);
+// A probe keeps its word in its own frame (`window.__probe`), and the test reads it from there: a probe never posts to the window (the
+// window stops a frame at its first malformed message). The test waits with plain timeouts and reads, never with a polling wait,
+// which keeps the frame's timers from running.
+async function report(page, name, timeout = 6000) {
+  for (const end = Date.now() + timeout; Date.now() < end;) {
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue;
+      const v = await f.evaluate(() => window.__probe).catch(() => undefined);
+      if (v !== undefined) return v;
+    }
+    await page.waitForTimeout(100);
+  }
+  return undefined;
+}
 
 // ---- Each must fail -----------------------------------------------------------------------------------------------------------
-const R = (name, body) => `(async function () { var report = function (r) { parent.postMessage({ probe: ${JSON.stringify(name)}, result: String(r) }, '*'); };
+const R = (name, body) => `(async function () { var report = function (r) { if (window.__probe === undefined) window.__probe = String(r); };
   try { ${body} } catch (e) { report('blocked: ' + (e && e.name)); } })();`;
 const probes = [
   { name: 'indexedDB.open', code: "var r = indexedDB.open('x'); r.onsuccess = function () { report('opened'); }; r.onerror = function () { report('blocked: ' + (r.error && r.error.name)); };" },
@@ -116,12 +125,12 @@ const probes = [
   { name: 'an outside font', mark: '/probe/font', host: 'out', code: `var s = document.createElement('style'); s.textContent = "@font-face { font-family: probe; src: url(${OUT}/probe/font.woff2); }"; document.head.appendChild(s); document.fonts.load('16px probe').then(function (f) { report(f.length ? 'loaded' : 'blocked: none'); }, function (e) { report('blocked: ' + e.name); });` },
   { name: 'window.open', mark: '/probe/popup', host: 'out', popup: true, code: `var w = window.open(${JSON.stringify(`${OUT}/probe/popup`)}); report(w ? 'opened' : 'blocked: null');` },
   { name: 'top navigation', mark: '/probe/top', host: 'out', top: true, code: `top.location.href = ${JSON.stringify(`${OUT}/probe/top`)}; report('assigned');` },
-  { name: 'the frame navigating itself away', mark: '/probe/self', host: 'out', self: true, code: `setTimeout(function () { location.href = ${JSON.stringify(`${OUT}/probe/self`)}; }, 50); report('assigned');` },
+  { name: 'the frame navigating itself away', mark: '/probe/self', host: 'out', self: true, code: `setTimeout(function () { location.href = ${JSON.stringify(`${OUT}/probe/self`)}; }, 600); report('assigned');` },
   // A blob page the frame makes itself, with no policy of its own, that tries to load from both hosts: the window's `frame-src 'self'`
   // refuses the navigation, and the page would keep the frame's policies anyway (a blob page keeps its maker's).
   { name: 'the frame navigating itself to a blob page it made', mark: '/probe/blobnav', host: 'both', code: `var html = '<!doctype html><img src="${HUB}/probe/blobnav-hub.png"><img src="${OUT}/probe/blobnav-out.png"><link rel="stylesheet" href="${OUT}/probe/blobnav.css"><script>fetch("${OUT}/probe/blobnav-fetch")<\\/script>';
-    var u = URL.createObjectURL(new Blob([html], { type: 'text/html' })); setTimeout(function () { location.href = u; }, 50); report('assigned');` },
-  { name: 'a form post', mark: '/probe/form', host: 'out', self: true, code: `var f = document.createElement('form'); f.method = 'post'; f.action = ${JSON.stringify(`${OUT}/probe/form`)}; var i = document.createElement('input'); i.name = 'k'; i.value = 'secret'; f.appendChild(i); document.body.appendChild(f); f.submit(); report('submitted');` },
+    var u = URL.createObjectURL(new Blob([html], { type: 'text/html' })); setTimeout(function () { location.href = u; }, 600); report('assigned');` },
+  { name: 'a form post', mark: '/probe/form', host: 'out', self: true, code: `var f = document.createElement('form'); f.method = 'post'; f.action = ${JSON.stringify(`${OUT}/probe/form`)}; var i = document.createElement('input'); i.name = 'k'; i.value = 'secret'; f.appendChild(i); document.body.appendChild(f); report('submitted'); setTimeout(function () { f.submit(); }, 600);` },
   { name: 'reading parent.document', code: "var d = parent.document; report('read: ' + d.title + ' ' + d.cookie);" },
 ];
 for (const p of probes) {
@@ -227,35 +236,35 @@ check(loaderOrigins.length > 0 && loaderOrigins.every((o) => o === ''), `the fra
   tcp.close();
 }
 
-// ---- Large messages and floods ------------------------------------------------------------------------------------------
-// The review's case: four 16 MB arrays, which the window once serialised to measure: refused without a pause. A flood (400 more) is
-// cut off: after STOP_AFTER messages over the rate the window takes the frame away (each message costs the window a copy, read or
-// not, which no filter can avoid), and offers to start it again. A 200,000-field object is measured and only reported.
-for (const [name, code] of [
-  ['four', "var a = new Uint8Array(16e6); for (var i = 0; i < 4; i++) parent.postMessage(a, '*'); parent.postMessage({ agora: 1, type: 'done' }, '*');"],
-  ['flood', "var a = new Uint8Array(16e6); for (var j = 0; j < 400; j++) parent.postMessage(a, '*');"],
-  ['object', "var o = {}; for (var j = 0; j < 200000; j++) o['k' + j] = j; o.agora = 1; o.type = 'read'; parent.postMessage(o, '*'); parent.postMessage({ agora: 1, type: 'done' }, '*');"],
-]) {
-  const id = `big-${name}`;
-  const w = await open(seeded(id, makePackage(id, `(function () { ${code} })();`, []), []), '/#/demo', 'dark', true);
+// ---- Malformed and oversized messages, and floods --------------------------------------------------------------------------
+// Reading a message costs the window as much as the frame put in it (bounded only by memory), and the window's own loader never sends a
+// malformed one: the window stops a frame at its first malformed or oversized message, and offers to start it again. Well-formed
+// messages over the rate are not read, and after a burst of them the frame is stopped too. Each case is judged by the frame being taken
+// away and by the longest pause of the window's own timer.
+const stopCases = [
+  ['an unknown type', "parent.postMessage({ agora: 1, type: 'open-window', url: 'x' }, '*');", 1500],
+  ['an oversized capability name', "parent.postMessage({ agora: 1, type: 'read', id: 99, cap: 'x'.repeat(10000) }, '*');", 1500],
+  ['a 16 MB array, then 299 more', "var a = new Uint8Array(16e6); for (var j = 0; j < 300; j++) parent.postMessage(a, '*');", 2000],
+  ['a 200,000-field object, then 19 more', "var o = {}; for (var j = 0; j < 200000; j++) o['k' + j] = j; o.agora = 1; o.type = 'read'; for (var k = 0; k < 20; k++) parent.postMessage(o, '*');", 3000],
+  ['40 well-formed reads, then 300 16 MB arrays over the rate', "for (var r = 0; r < 40; r++) parent.postMessage({ agora: 1, type: 'read', id: r, cap: 'agents.read' }, '*'); var a = new Uint8Array(16e6); for (var j = 0; j < 300; j++) parent.postMessage(a, '*');", 6000],
+];
+for (const [name, code, budget] of stopCases) {
+  const id = `stop-${stopCases.findIndex((c) => c[0] === name)}`;
+  const w = await open(seeded(id, makePackage(id, `(function () { ${code} })();`, ['agents.read']), ['agents.read']));
   await w.page.evaluate(() => { window.__gaps = []; let last = performance.now(); setInterval(() => { const n = performance.now(); window.__gaps.push(n - last); last = n; }, 50); });
-  await w.page.waitForSelector('iframe[data-plugin-frame]');
-  if (name === 'flood') {
-    const stopped = await w.page.waitForSelector('[data-plugin-stopped]', { timeout: 60000 }).then(() => true, () => false);
-    const frames = await w.page.locator('iframe[data-plugin-frame]').count();
+  // The frame may be gone before it is ever seen: wait for its pane, then for it to be stopped.
+  await w.page.waitForSelector('[data-pane="p1"]');
+  let stopped = false;
+  for (let i = 0; i < 300 && !stopped; i++) { await w.page.waitForTimeout(100); stopped = (await w.page.locator('[data-plugin-stopped]').count()) > 0; }
+  await w.page.waitForTimeout(1500);
+  const frames = await w.page.locator('iframe[data-plugin-frame]').count();
+  const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
+  let back = true;
+  if (name.startsWith('an unknown')) {
     await w.page.getByRole('button', { name: 'Start it again' }).click().catch(() => {});
-    const back = await w.page.waitForSelector('iframe[data-plugin-frame]', { timeout: 10000 }).then(() => true, () => false);
-    const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
-    check(stopped && frames === 0 && back, `a frame flooding the window with messages is stopped, and can be started again (stopped ${stopped}, frames left ${frames}, back ${back}; longest pause while it flooded ${gap.toFixed(0)} ms)`);
-  } else {
-    // The frame's last message (a type the window does not know) is counted when everything before it has arrived.
-    const want = name === 'four' ? 5 : 2;
-    const all = await w.page.waitForFunction((n) => Number(document.querySelector('iframe[data-plugin-frame]')?.dataset.dropped) >= n, want, { timeout: 30000 }).then(() => true, () => false);
-    await w.page.waitForTimeout(1200);
-    const gap = await w.page.evaluate(() => Math.max(0, ...window.__gaps));
-    if (name === 'four') check(all && gap < 1500, `four 16 MB arrays are refused without stalling the window (longest pause ${gap.toFixed(0)} ms)`);
-    else console.log(`info a 200,000-field object: longest pause ${gap.toFixed(0)} ms (the browser's copy of one message within the rate)`);
+    back = await w.page.waitForSelector('iframe[data-plugin-frame]', { timeout: 10000 }).then(() => true, () => false);
   }
+  check(stopped && frames === 0 && back && gap < budget, `${name}: the frame is stopped${name.startsWith('an unknown') ? ' and can be started again' : ''}, the window pauses at most ${gap.toFixed(0)} ms (budget ${budget})`);
   await w.ctx.close();
 }
 
@@ -266,8 +275,6 @@ for (const [name, code] of [
     var names = (await agora.read('agents.read')).agents.map(function (a) { return a.name; });
     var usage = await agora.read('usage.read').then(function () { return 'answered'; }, function (e) { return e.message; });
     var unknown = await agora.read('terminal.read').then(function () { return 'answered'; }, function (e) { return e.message; });
-    parent.postMessage({ agora: 1, type: 'open-window', url: 'x' }, '*');
-    parent.postMessage({ agora: 1, type: 'read', id: 99, cap: 'x'.repeat(10000) }, '*');
     var cover = document.createElement('div');
     cover.style.cssText = 'position:fixed;inset:-2000px;z-index:2147483647;background:rgb(255,0,0);transform:translateY(-500px) scale(5)';
     document.body.appendChild(cover);
@@ -279,9 +286,6 @@ for (const [name, code] of [
   check(Array.isArray(said.names) && said.names.length > 0, `a granted read answers (agents.read: ${JSON.stringify(said.names)})`);
   check(said.usage === 'not-granted', `a capability not granted answers "not granted" (usage.read: ${said.usage})`);
   check(said.unknown === 'unknown-capability', `a capability that is none answers "unknown capability" (terminal.read: ${said.unknown})`);
-  await w.page.waitForTimeout(1500);
-  const dropped = Number(await w.page.locator('iframe[data-plugin-frame]').getAttribute('data-dropped'));
-  check(dropped >= 2, `postMessage of an unknown type and an oversized message is ignored and counted (counted: ${dropped})`);
   const box = await w.page.evaluate(() => {
     const r = (el) => { const b = el.getBoundingClientRect(); return { x: b.x, y: b.y, w: b.width, h: b.height, cx: b.x + b.width / 2, cy: b.y + b.height / 2 }; };
     const frame = document.querySelector('iframe[data-plugin-frame]');
@@ -329,7 +333,7 @@ for (const [name, code] of [
   const frames = await safe.page.locator('iframe').count();
   const plain = await surface(safe.page);
   const placeholder = (await safe.page.locator('[data-pane="p1"]').textContent()) ?? '';
-  check(frames === 0 && placeholder.includes(`plugin.${id}.main`) && !(await safe.page.evaluate(() => window.__probes.length)), `?safe loads no plugin; its pane shows the placeholder (frames: ${frames})`);
+  check(frames === 0 && placeholder.includes(`plugin.${id}.main`), `?safe loads no plugin; its pane shows the placeholder (frames: ${frames})`);
   check(themed !== plain && themed.toLowerCase() === '#0f1419', `?safe shows the built-in theme, not the chosen one (chosen ${themed}, safe ${plain})`);
   await safe.ctx.close();
 

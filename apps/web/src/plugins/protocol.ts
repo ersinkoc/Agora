@@ -12,16 +12,18 @@
 //
 // The window takes a message only from a frame it made (by `event.source`, as an opaque frame's origin is "null"), at most RATE per
 // second (with a burst of BURST), only a plain object of a known type with exactly its fields, a capability name at most MAX_CAP long.
-// Anything else is ignored and counted, without serialising or walking it.
+// Anything else is ignored and counted, without serialising or walking it, and stops the frame (STOP_AFTER_RATE).
 import { type Capability, isCapability } from './capabilities';
 
 export const PROTOCOL_VERSION = 1;
 export const RATE = 20;
 export const BURST = 40;
 export const MAX_WATCHES = 16;
-/** A frame whose messages are ignored this many times (over the rate, of no known type, too long) is stopped: every message costs
- *  the window a copy, and the window's own loader never sends one that is ignored, so only a broken or hostile plugin gets here. */
-export const STOP_AFTER = 20;
+/** A frame is stopped at its first malformed or oversized message (of no known type or shape, or a field over its bound): reading a
+ *  message costs the window as much as the frame put in it (bounded only by memory), and the window's own loader never sends such a
+ *  message, so a working plugin is never stopped. Well-formed messages over the rate are not read and only dropped, until this many,
+ *  then the frame is stopped too (each one still costs the window the browser's copy of it). */
+export const STOP_AFTER_RATE = BURST;
 
 export type Inbound =
   | { type: 'boot' }
@@ -111,22 +113,27 @@ export function gate(cap: string, granted: readonly Capability[]): { ok: true; c
   return { ok: true, cap };
 }
 
-/** One frame's filter: the rate first (every message spends it, so a flood costs the window nothing more), then the shape, which is
+/** One frame's filter: nothing from a stopped frame, then the rate (a message over it is not read), then the shape, which is
  *  cheap whatever is sent. Nothing is serialised to be measured: a message of the right shape is at most a few hundred bytes. */
 export function frameFilter(clock: () => number = () => Date.now(), onFlood: () => void = () => {}) {
   const counts = noCounts();
   const allow = rateLimiter();
   return {
     counts,
-    /** Whether STOP_AFTER of the frame's messages were ignored (its host stops it then). */
-    get flooding() { return counts.rate + counts.type + counts.size >= STOP_AFTER; },
+    /** Whether the frame must be stopped: a malformed or oversized message, or STOP_AFTER_RATE over the rate. */
+    get flooding() { return counts.type + counts.size > 0 || counts.rate >= STOP_AFTER_RATE; },
     /** `read` gives the message's data. It is called only after the rate allows the message: a browser copies a message's data out
      *  only when it is read, so a message over the rate costs the window nothing. */
     take(read: () => unknown): Inbound | undefined {
-      const ignore = (why: DropReason) => { counts[why]++; if (counts.rate + counts.type + counts.size === STOP_AFTER) onFlood(); return undefined; };
-      if (!allow(clock())) return ignore('rate');
+      // A stopped frame's messages still queued are never read: its host takes the frame away a moment later, and every read would
+      // copy what the frame put in the message into the window.
+      if (counts.type + counts.size > 0 || counts.rate >= STOP_AFTER_RATE) { counts.rate++; return undefined; }
+      if (!allow(clock())) { if (++counts.rate === STOP_AFTER_RATE) onFlood(); return undefined; }
       const m = classify(read());
-      return typeof m === 'string' ? ignore(m) : m;
+      if (typeof m !== 'string') return m;
+      counts[m]++;
+      onFlood();
+      return undefined;
     },
   };
 }

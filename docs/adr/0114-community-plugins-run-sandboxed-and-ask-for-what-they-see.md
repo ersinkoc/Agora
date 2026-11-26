@@ -177,7 +177,7 @@ The maintainer wants community plugins next to community themes, "like herdr".
   - `fetch` to the hub and to an outside host, `new WebSocket` to both, an image or font from an outside host;
   - navigating the top window, `window.open`, a form post;
   - reading `parent.document`;
-  - `postMessage` of an unknown type or an oversized message (ignored and counted).
+  - `postMessage` of an unknown type or an oversized message (ignored and counted; since build step 2 the frame is stopped too).
 - **Grants:** a capability not granted answers "not granted". A version that adds a capability is held until granted.
 - **Containment:**
   - In a screenshot test the plugin header is drawn above the frame, and the frame cannot cover it or the approvals area.

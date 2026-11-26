@@ -129,9 +129,10 @@ comes first, at most 20 a second (a burst of 40): a message over it is not even 
 it is read). Then only a plain object is looked at, of a known type with exactly its fields (the scan stops past four) and a capability
 name of at most 64 characters; a typed array, a Map or anything else is refused without being serialised or walked. Anything else is
 ignored and counted; a message from no frame of the window is counted as a stray. The frame element carries its count
-(`data-dropped`). A frame whose messages are ignored 20 times is **stopped**: every message costs the window a copy, read or not, and the
-window's loader never sends one that is ignored, so only a broken or hostile plugin gets there. The pane says so, with **Start it
-again**.
+(`data-dropped`). The frame is **stopped** at its first malformed or oversized message, and nothing more it sent is read: reading a
+message costs the window as much as the frame put in it, bounded per message only by memory, and the window's own loader never sends
+such a message, so a working plugin is never stopped. Well-formed messages over the rate are dropped unread, and after 40 of them the
+frame is stopped too. The pane says so, with **Start it again**.
 
 In the frame the loader gives the plugin `agora`: `agora.read(cap)` (a Promise, rejected with an `Error` whose message is the code),
 `agora.watch(cap, onData, onError)` (returns a function that stops it), `agora.file(name)`, `agora.granted`, `agora.plugin`,
@@ -210,7 +211,8 @@ runs.
   `scripts/hub-headers.mjs`): every probe of ADR-0114's Verification list fails from inside a frame, and so do a fetch to a hub endpoint
   and the frame going to a blob page it made, judged by the servers' request logs; WebRTC to a STUN and a TURN server reaches neither
   (judged by a UDP and a TCP listener), the `RTC…` constructors are gone for good and no frame the plugin makes hands one back; four
-  16 MB arrays are refused without stalling the window and a flood stops the frame; a plugin taking the focus cannot keep it, and the
+  malformed or oversized message (an unknown type, a long name, a 16 MB array, a 200,000-field object) stops the frame at once, as do
+  40 well-formed messages over the rate, without stalling the window; a plugin taking the focus cannot keep it, and the
   pane's menu opens safe mode, whose plugins dialog removes a kept plugin; the marker stays whole in a narrow pane; the frame page
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a
