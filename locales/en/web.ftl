@@ -1325,6 +1325,7 @@ phone-offline = offline
 phone-no-agents = No agents on this machine.
 phone-needs = Needs you · { $count }
 phone-answer-below = Answer with the buttons at the bottom of the screen.
+phone-ask-fold = Fold this request to one line
 phone-next = Next · { $count }
 # The one trust notice at the top of the phone's requests (redesign PR 13), naming every machine that asks and has said it does not trust this device.
 phone-untrusted-title = This device is not trusted yet

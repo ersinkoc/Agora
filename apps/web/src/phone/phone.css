@@ -191,6 +191,25 @@ body {
 
 /* What the agent changed and its files, one tap each (they open the review screen and the file browser full-screen). */
 .phone-tools { display: flex; flex: none; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-2) var(--space-2) 0; }
+.phone-fold { border-radius: var(--radius-m); outline: none; }
+/* A request folded to one line on an agent's screen: the needs tint and hairline, its kind's icon chip, the ask's title and a chevron. The
+   whole line is the target; it opens the card in place. */
+.phone-fold__btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--line-needs);
+  border-radius: var(--radius-m);
+  background: var(--tint-needs);
+  color: var(--text);
+  font-weight: 600;
+  text-align: start;
+}
+.phone-fold__chip { display: inline-grid; place-items: center; flex: none; width: 1.75rem; height: 1.75rem; border-radius: var(--radius-s); color: var(--state-needs-you); background: var(--surface-1); }
+.phone-fold__back { display: flex; justify-content: flex-end; }
 .phone-asks { display: grid; gap: var(--space-2); padding: var(--space-2); max-height: 50%; overflow-y: auto; flex: none; }
 .phone-pane { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: var(--space-1); padding-bottom: calc(env(safe-area-inset-bottom) + var(--space-1)); }
 .phone-pane .terminal-host { border: 0; }

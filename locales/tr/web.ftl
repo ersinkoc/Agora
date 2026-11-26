@@ -1280,6 +1280,7 @@ phone-offline = çevrim dışı
 phone-no-agents = Bu makinede ajan yok.
 phone-needs = Sizi bekleyenler · { $count }
 phone-answer-below = Yanıtı ekranın altındaki düğmelerle verin.
+phone-ask-fold = Bu isteği tek satıra indir
 phone-next = Sıradaki · { $count }
 phone-untrusted-title = Bu cihaz henüz güvenilir değil
 phone-untrusted-machines = { $count ->
