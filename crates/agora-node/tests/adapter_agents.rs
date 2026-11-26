@@ -963,3 +963,94 @@ fn an_adapter_without_the_capability_or_without_the_report_is_read_as_before() {
     assert!(cuts.is_empty(), "{cuts:?}");
     assert!(leak.is_some(), "a piece beside an unreported cut");
 }
+
+/// ADR-0090 (audit F2020): a prompt sent at once whose call fails ends the turn it never began, and a prompt queued behind it while
+/// that call was made (another client's, while the lock was let go) goes next: the next tick sends it, it is never lost and the agent
+/// is not left busy with a turn nothing began. The first call is held un-run until the second prompt is queued.
+#[test]
+fn a_prompt_queued_behind_a_failed_send_is_sent_not_lost() {
+    use agora_node::supervisor::Submit;
+    let e = env("sendfail");
+    let mut s = supervisor();
+    s.register(
+        Manifest::parse(&format!(
+            "kind = \"fake-turns\"\ndisplay_name = \"F\"\nversion = \"1\"\nmin_engine = 1\n[adapter]\ncommand = [{:?}, \"--adapter\", \"--turns\"]\n",
+            fake_agent()
+        ))
+        .unwrap(),
+    );
+    let id = s
+        .start(
+            &StartRequest {
+                kind: "fake-turns".into(),
+                checkout: e.repo.clone(),
+                worktree_root: e.dir.join("worktrees"),
+                name: "sendfail".into(),
+                base: None,
+            },
+            Instant::now(),
+        )
+        .expect("start");
+    settle(&mut s, &id, AgentState::Idle);
+    let Ok(Submit::Send(call)) = s.adapter_submit(&id, "prompt-error", |_| panic!("queued")) else {
+        panic!("the first prompt to a free agent is sent at once");
+    };
+    let generation = call.generation();
+    assert!(matches!(
+        s.adapter_submit(&id, "behind", |_| 7),
+        Ok(Submit::Queued { queue_len: 1 })
+    ));
+    assert!(call.run().is_err(), "the adapter refuses `prompt-error`");
+    s.adapter_send_failed(&id, generation);
+    // Every event until the queued prompt's send ended, it was answered and its turn ended (several may come in one tick; the send's
+    // outcome comes from its own thread, so it may be read after the answer).
+    let answered = |ev: &[SupervisorEvent]| {
+        ev.iter().any(|e| matches!(e, SupervisorEvent::Adapter { event: AdapterEvent::Chat { item: ChatItem::Text(t), .. }, .. } if t == "behind"))
+    };
+    let ended = |ev: &[SupervisorEvent]| {
+        ev.iter().any(|e| match e {
+            SupervisorEvent::PromptDequeued { tag, .. } => *tag == 7,
+            SupervisorEvent::PromptsDropped { tags, .. } => tags.contains(&7),
+            _ => false,
+        })
+    };
+    let end = Instant::now() + Duration::from_secs(15);
+    let mut ev = Vec::new();
+    while Instant::now() < end
+        && !(ended(&ev)
+            && answered(&ev)
+            && s.list()
+                .iter()
+                .any(|v| v.id == id && v.state == AgentState::Idle))
+    {
+        ev.extend(s.tick(Instant::now()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let about_7: Vec<&SupervisorEvent> = ev
+        .iter()
+        .filter(|e| match e {
+            SupervisorEvent::PromptSending { tag, .. }
+            | SupervisorEvent::PromptDequeued { tag, .. } => *tag == 7,
+            SupervisorEvent::PromptsDropped { tags, .. } => tags.contains(&7),
+            _ => false,
+        })
+        .collect();
+    assert!(
+        matches!(
+            about_7.as_slice(),
+            [
+                SupervisorEvent::PromptSending { .. },
+                SupervisorEvent::PromptDequeued { sent: true, .. }
+            ]
+        ),
+        "the queued prompt is sent, once: {ev:#?}"
+    );
+    // It was answered, and the turn it began ended as any turn does: the next prompt is sent at once again.
+    assert!(answered(&ev), "{ev:#?}");
+    assert!(matches!(
+        s.adapter_submit(&id, "after", |_| panic!("queued")),
+        Ok(Submit::Send(_))
+    ));
+    let _ = s.stop(&id);
+    let _ = std::fs::remove_dir_all(&e.dir);
+}

@@ -1034,6 +1034,9 @@ struct AdapterRich {
     /// applied to another.
     epoch: u64,
     queue: VecDeque<Queued>,
+    /// Audit F2020: a waiting prompt that became the turn when a prompt sent at once failed ([`Supervisor::adapter_send_failed`],
+    /// outside the tick); the next poll sends it.
+    due: Option<Next>,
 }
 
 impl AdapterRich {
@@ -1181,7 +1184,10 @@ impl AdapterRich {
         self.turn = Turn::Idle;
         self.generation += 1;
         self.epoch += 1;
-        self.queue.drain(..).map(|q| q.tag).collect()
+        let due = self.due.take().map(|(q, _)| q.tag);
+        due.into_iter()
+            .chain(self.queue.drain(..).map(|q| q.tag))
+            .collect()
     }
 }
 
@@ -2878,6 +2884,12 @@ impl Supervisor {
             if letting_go && !e.adapter.as_ref().is_some_and(Adapter::is_held) {
                 continue;
             }
+            // Audit F2020: the prompt that became the turn when a prompt sent at once failed.
+            if !letting_go {
+                if let Some(next) = e.rich.due.take() {
+                    sends.push((id.clone(), next));
+                }
+            }
             // ADR-0090: a cancelled turn the adapter never ended is over after the grace.
             if let Some(next) = e.rich.expire(now).filter(|_| !letting_go) {
                 sends.push((id.clone(), next));
@@ -3379,13 +3391,15 @@ impl Supervisor {
         }
     }
 
-    /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free (and what waits goes next, at
-    /// the next poll's `idle`: nothing waits when a prompt was sent at once).
+    /// ADR-0090: the call of a [`Submit::Send`] failed: its turn never began, so the agent is free, and a prompt queued behind it while
+    /// the call was made becomes the turn and is sent by the next poll (audit F2020).
     /// `generation` is the call's ([`AdapterCall::generation`]): a failure that comes back after the adapter restarted, or after
     /// another turn began, changes nothing.
     pub fn adapter_send_failed(&mut self, id: &AgentId, generation: u64) {
         if let Some(e) = self.adapters.get_mut(id) {
-            let _ = e.rich.send_result(false, generation, Instant::now());
+            if let (_, Some(next)) = e.rich.send_result(false, generation, Instant::now()) {
+                e.rich.due = Some(next);
+            }
         }
     }
 
