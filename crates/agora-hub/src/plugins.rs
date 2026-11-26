@@ -13,7 +13,7 @@
 
 use agora_protocol::v1::{PluginFetchResult, PluginGrant, PluginGrantSet, PluginInfo};
 use agora_protocol::{Error, ErrorCode};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 
 use crate::plugin_package::{self, Refused};
 use crate::store::{write_tx, SqliteStore, StoreError};
@@ -101,9 +101,9 @@ impl<'a> Plugins<'a> {
         self.add_as(package, agora_version, now_ms, "plugin.add")
     }
 
-    /// [`Plugins::add`] recorded under `action`: `plugin.add` for a file, `plugin_catalog.install` or `plugin_catalog.upgrade` for a
-    /// package from the community catalog (`crate::plugin_catalog`).
-    pub(crate) fn add_as(
+    /// [`Plugins::add`] recorded under `action` (`plugin.add` for a file). The community catalog keeps its packages through
+    /// [`Plugins::add_guarded`] and records its own rows (`crate::plugin_catalog::commit`).
+    fn add_as(
         &self,
         package: &[u8],
         agora_version: &str,
@@ -129,19 +129,36 @@ impl<'a> Plugins<'a> {
         agora_version: &str,
         now_ms: u64,
     ) -> Result<Added, AddError> {
+        self.add_guarded(package, agora_version, now_ms, |_, _| Ok(()))
+    }
+
+    /// Checks and keeps a package as [`Plugins::add`] does, with `guard` run inside the write transaction before anything is written,
+    /// given the version installed now (`None` when the id is not installed): when it refuses, nothing is kept. Records nothing in the
+    /// audit trail; the caller does (`crate::plugin_catalog::commit` re-checks there what the owner was asked about).
+    pub(crate) fn add_guarded<E: From<AddError>>(
+        &self,
+        package: &[u8],
+        agora_version: &str,
+        now_ms: u64,
+        guard: impl FnOnce(&Transaction<'_>, Option<&str>) -> Result<(), E>,
+    ) -> Result<Added, E> {
         let checked = plugin_package::check(package, agora_version).map_err(AddError::Refused)?;
         let m = &checked.manifest;
-        let mut conn = self.store.lock()?;
-        let tx = write_tx(&mut conn)?;
+        let mut conn = self.store.lock().map_err(AddError::from)?;
+        let tx = write_tx(&mut conn).map_err(AddError::from)?;
         let replaced: Option<String> = tx
             .query_row("SELECT version FROM plugins WHERE id = ?1", [&m.id], |r| {
                 r.get(0)
             })
-            .optional()?;
+            .optional()
+            .map_err(AddError::from)?;
+        guard(&tx, replaced.as_deref())?;
         if replaced.is_none() {
-            let n: i64 = tx.query_row("SELECT COUNT(*) FROM plugins", [], |r| r.get(0))?;
+            let n: i64 = tx
+                .query_row("SELECT COUNT(*) FROM plugins", [], |r| r.get(0))
+                .map_err(AddError::from)?;
             if usize::try_from(n).unwrap_or(usize::MAX) >= MAX_PLUGINS {
-                return Err(AddError::Full);
+                return Err(AddError::Full.into());
             }
         }
         tx.execute(
@@ -159,8 +176,9 @@ impl<'a> Plugins<'a> {
                 to_i64(now_ms),
                 package
             ],
-        )?;
-        tx.commit()?;
+        )
+        .map_err(AddError::from)?;
+        tx.commit().map_err(AddError::from)?;
         Ok(Added {
             id: m.id.clone(),
             version: m.version.clone(),

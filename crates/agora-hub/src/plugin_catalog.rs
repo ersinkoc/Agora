@@ -4,12 +4,15 @@
 //! `ssh-keygen -Y sign -n agora-plugin-catalog` (`index.json.sig` beside it). The hub, never the browser, reads it, and only on its
 //! owner's command (`agora hub plugins update`):
 //! - **The key is the owner's to pin** (`agora hub plugins key set FILE`). Without one the catalog cannot be used at all. Pinning
-//!   another key forgets the stored catalog and its serial, and nothing verified under the old key is offered again.
+//!   another key forgets the stored catalog, and nothing verified under the old key is offered again.
 //! - **The signature comes first.** The index's exact bytes are checked against `index.json.sig` under the pinned key before any of
 //!   them is read as JSON; an index that does not verify changes nothing. The index lists each archive's SHA-256 and size, so the
 //!   signature covers every archive it names.
-//! - **No going back.** The index carries a `serial`; one lower than the last accepted is refused whole, so an old signed index (with
-//!   a version since withdrawn) cannot be served again.
+//! - **No going back.** The index carries a `serial`; one lower than the last accepted under the same key, or the same serial with other
+//!   bytes, is refused whole, so an old signed index (with a version since withdrawn) cannot be served again. Each key keeps its own
+//!   floor (the serial and the SHA-256 of the last index accepted under it), checked again in the transaction that keeps a new index,
+//!   so two updates at once cannot lower it; pinning a key again finds its floor where it was, and a key never pinned before starts with
+//!   none (trust on first use, as a rotation starts the serial anywhere).
 //! - **Strict reading.** A format marker, no field it does not know, at most [`MAX_ENTRIES`] entries, each field of a closed kind,
 //!   only the capabilities a window knows; an entry with a problem is refused and reported, the others are kept.
 //! - **Fetching** is `theme_catalog`'s: `https` (plain `http` only to this machine), no redirect, every answer capped and bounded in
@@ -17,8 +20,10 @@
 //! - **Installing and upgrading** (`agora hub plugins install|upgrade ID`) fetch the archive, check its size and SHA-256 against the
 //!   signed entry, check the package as a window does ([`crate::plugin_package`]), check that its manifest says what the signed entry
 //!   says (id, version, name, author, licence, capabilities), and only then keep it through [`crate::plugins::Plugins`]. The command
-//!   line shows what it asks to see (for an upgrade, what changed, capabilities first) and asks before it keeps anything. Nothing is
-//!   ever installed or upgraded on its own.
+//!   line shows what it asks to see (for an upgrade, what changed, capabilities first) and asks before it keeps anything. Once the
+//!   owner says yes, the transaction that keeps it checks again that the catalog is on, still verified under the key pinned now, still
+//!   lists the archive asked about, and that the installed version is the one shown; if anything moved while the owner was asked,
+//!   nothing is kept. Nothing is ever installed or upgraded on its own.
 //!
 //! The catalog is off until the owner turns it on; while it is off a window is told so and gets no entry, and nothing is installed
 //! from it. Every switch, key, update, install and upgrade (refused or not) is a row of the audit trail as the owner's. Nothing here
@@ -65,13 +70,15 @@ pub const STEP: Duration = Duration::from_secs(10);
 pub const DEADLINE: Duration = Duration::from_secs(120);
 
 /// The hub settings: the owner's switch (`on` / `off`, off when missing), the address of the last update, when it was, the serial of
-/// the last accepted index, the pinned key (one OpenSSH line), and the key the stored catalog was verified under.
+/// the stored index (for `status`), the pinned key (one OpenSSH line), the key the stored catalog was verified under, and, per key,
+/// the floor: [`FLOOR_SETTING`] and the key's fingerprint, holding `<serial> <sha256>` of the last index accepted under that key.
 pub const SWITCH_SETTING: &str = "plugin_catalog";
 pub const URL_SETTING: &str = "plugin_catalog_url";
 pub const UPDATED_SETTING: &str = "plugin_catalog_updated_ms";
 pub const SERIAL_SETTING: &str = "plugin_catalog_serial";
 pub const KEY_SETTING: &str = "plugin_catalog_key";
 pub const VERIFIED_KEY_SETTING: &str = "plugin_catalog_verified_key";
+pub const FLOOR_SETTING: &str = "plugin_catalog_floor.";
 
 /// One plugin as the signed index lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,10 +129,14 @@ pub enum UpdateError {
     SignatureFetch(IndexError),
     /// Its signature does not verify under the pinned key.
     Signature(SigError),
-    /// Its serial is lower than the last accepted one.
+    /// Its serial is lower than the last accepted under the pinned key.
     Rollback {
         seen: u64,
         offered: u64,
+    },
+    /// Its serial is the last accepted under the pinned key, but its bytes are not that index's.
+    SerialReused {
+        serial: u64,
     },
     Store(String),
 }
@@ -139,6 +150,7 @@ impl UpdateError {
             UpdateError::SignatureFetch(e) => format!("signature-fetch.{}", e.code()),
             UpdateError::Signature(e) => format!("signature.{}", e.code()),
             UpdateError::Rollback { .. } => "rollback".into(),
+            UpdateError::SerialReused { .. } => "serial-reused".into(),
             UpdateError::Store(_) => "internal".into(),
         }
     }
@@ -150,10 +162,18 @@ impl From<StoreError> for UpdateError {
     }
 }
 
+impl From<rusqlite::Error> for UpdateError {
+    fn from(e: rusqlite::Error) -> Self {
+        UpdateError::Store(e.to_string())
+    }
+}
+
 /// What an accepted index gave. `refused` names each refused entry by its id (or `#n`, its place in the list).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetched {
     pub serial: u64,
+    /// The SHA-256 of the index's bytes (64 lowercase hex): with the serial, the key's floor.
+    pub sha256: String,
     pub entries: Vec<Entry>,
     pub refused: Vec<(String, EntryRefusal)>,
 }
@@ -229,8 +249,10 @@ fn read_entry(v: &Value) -> Result<Entry, EntryRefusal> {
     let version = text("version", &plugin_package::is_version)?;
     let author = text("author", &|s| plain_text(s, MAX_AUTHOR))?;
     let licence = text("licence", &|s| valid_licence(s) && s.len() <= MAX_LICENCE)?;
+    // Optional: missing and empty are the same.
     let description = match o.get("description") {
         None => String::new(),
+        Some(Value::String(d)) if d.is_empty() => String::new(),
         Some(_) => text("description", &|s| plain_text(s, MAX_DESCRIPTION))?,
     };
     let caps = o
@@ -325,9 +347,67 @@ pub fn read_index(text: &str) -> Result<Fetched, IndexError> {
     }
     Ok(Fetched {
         serial,
+        sha256: hex(&Sha256::digest(text.as_bytes())),
         entries,
         refused,
     })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The last index accepted under one key: nothing lower is taken again under that key, nor the same serial with other bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Floor {
+    pub serial: u64,
+    pub sha256: String,
+}
+
+fn floor_setting(key: &PublicKey) -> String {
+    format!("{FLOOR_SETTING}{}", key.fingerprint())
+}
+
+fn setting_in(conn: &rusqlite::Connection, key: &str) -> rusqlite::Result<Option<Vec<u8>>> {
+    conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+/// `key`'s floor, read through `conn` (the store's connection, or a transaction). A value that cannot be read refuses, rather than
+/// reading as no floor.
+fn floor_in(conn: &rusqlite::Connection, key: &PublicKey) -> Result<Option<Floor>, UpdateError> {
+    let Some(v) = setting_in(conn, &floor_setting(key))? else {
+        return Ok(None);
+    };
+    let parsed = std::str::from_utf8(&v).ok().and_then(|t| {
+        let (serial, sha256) = t.split_once(' ')?;
+        let serial: u64 = serial.parse().ok()?;
+        ((1..=MAX_SERIAL).contains(&serial) && valid_sha256(sha256)).then(|| Floor {
+            serial,
+            sha256: sha256.to_string(),
+        })
+    });
+    parsed
+        .map(Some)
+        .ok_or_else(|| UpdateError::Store("plugin catalog floor unreadable".into()))
+}
+
+/// Refuses `fetched` below `floor`: a lower serial, or the same serial with other bytes.
+fn above(floor: Option<&Floor>, fetched: &Fetched) -> Result<(), UpdateError> {
+    match floor {
+        Some(f) if fetched.serial < f.serial => Err(UpdateError::Rollback {
+            seen: f.serial,
+            offered: fetched.serial,
+        }),
+        Some(f) if fetched.serial == f.serial && fetched.sha256 != f.sha256 => {
+            Err(UpdateError::SerialReused {
+                serial: fetched.serial,
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 /// GET within the limits; a status other than 200 (a redirect included) is an error.
@@ -345,11 +425,12 @@ fn fetch_ok(
 }
 
 /// Fetches the index at `url` and its signature, verifies the signature under `key` over the index's exact bytes, and only then reads
-/// it; refuses a serial lower than `last_serial`. Changes nothing; [`save`] keeps the result.
+/// it; refuses one below `floor` (the key's, as read before fetching). Changes nothing; [`save`] keeps the result, and checks the floor
+/// again.
 pub fn fetch(
     url: &Url,
     key: &PublicKey,
-    last_serial: u64,
+    floor: Option<&Floor>,
     limits: Limits,
 ) -> Result<Fetched, UpdateError> {
     let deadline = Instant::now() + limits.deadline;
@@ -365,12 +446,7 @@ pub fn fetch(
     sshsig::verify(key, SIG_NAMESPACE, &body, &sig).map_err(UpdateError::Signature)?;
     let text = String::from_utf8(body).map_err(|_| UpdateError::Index(IndexError::Json))?;
     let fetched = read_index(&text).map_err(UpdateError::Index)?;
-    if fetched.serial < last_serial {
-        return Err(UpdateError::Rollback {
-            seen: last_serial,
-            offered: fetched.serial,
-        });
-    }
+    above(floor, &fetched)?;
     Ok(fetched)
 }
 
@@ -392,17 +468,19 @@ fn setting_u64(store: &SqliteStore, key: &str) -> Result<u64, StoreError> {
         .unwrap_or(0))
 }
 
-/// Replaces the stored catalog with `fetched`, remembers the address, the serial and the key it was verified under, and says when, in
-/// one transaction.
+/// Replaces the stored catalog with `fetched`, remembers the address, the serial and the key it was verified under, and says when, and
+/// raises `key`'s floor to it, in one transaction. The floor is read again inside that transaction, so an update that read an older
+/// floor (two at once) cannot lower it: `fetched` below it is refused and nothing changes.
 pub fn save(
     store: &SqliteStore,
     fetched: &Fetched,
     url: &str,
     key: &PublicKey,
     now_ms: u64,
-) -> Result<(), StoreError> {
+) -> Result<(), UpdateError> {
     let mut conn = store.lock()?;
     let tx = write_tx(&mut conn)?;
+    above(floor_in(&tx, key)?.as_ref(), fetched)?;
     tx.execute("DELETE FROM plugin_catalog", [])?;
     for e in &fetched.entries {
         tx.execute(
@@ -426,6 +504,11 @@ pub fn save(
     put(&tx, URL_SETTING, url.as_bytes())?;
     put(&tx, SERIAL_SETTING, fetched.serial.to_string().as_bytes())?;
     put(&tx, VERIFIED_KEY_SETTING, key.line().as_bytes())?;
+    put(
+        &tx,
+        &floor_setting(key),
+        format!("{} {}", fetched.serial, fetched.sha256).as_bytes(),
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -446,7 +529,8 @@ pub fn update(
     let result = (|| -> Result<Fetched, UpdateError> {
         let key = key(store)?.ok_or(UpdateError::NoKey)?;
         let at = index_url(url).ok_or(UpdateError::Index(IndexError::Address))?;
-        let fetched = fetch(&at, &key, setting_u64(store, SERIAL_SETTING)?, limits)?;
+        let floor = floor_in(&*store.lock()?, &key)?;
+        let fetched = fetch(&at, &key, floor.as_ref(), limits)?;
         save(store, &fetched, url, &key, now_ms)?;
         Ok(fetched)
     })();
@@ -495,8 +579,8 @@ pub enum SetKeyError {
 
 /// `agora hub plugins key set FILE`: pins the catalog's public key from a key file's text. A private key or anything but one
 /// `ssh-ed25519` public key is refused, and nothing of it is kept. Pinning a key that differs from the one pinned forgets the stored
-/// catalog and its serial (nothing verified under another key is offered); pinning the same key again changes nothing else. Recorded
-/// in the audit trail as the owner's, with the key's fingerprint (or the refusal).
+/// catalog (nothing verified under another key is offered); pinning the same key again changes nothing else. Each key's floor is kept:
+/// pinning a key again finds the floor it had. Recorded in the audit trail as the owner's, with the key's fingerprint (or the refusal).
 pub fn set_key(store: &SqliteStore, text: &str, now_ms: u64) -> Result<PublicKey, SetKeyError> {
     let parsed = PublicKey::parse(text);
     let result = parsed.map_err(SetKeyError::Key).and_then(|k| {
@@ -681,6 +765,9 @@ pub enum InstallError {
     Full,
     /// The owner said no.
     Declined,
+    /// What the owner was asked about moved before the answer (`catalog`: the stored entry is no longer the archive fetched;
+    /// `installed`: the installed version is no longer the one shown).
+    Changed(&'static str),
     Store(String),
 }
 
@@ -702,6 +789,7 @@ impl InstallError {
             InstallError::Mismatch(f) => format!("mismatch.{f}"),
             InstallError::Full => "plugin.full".into(),
             InstallError::Declined => "declined".into(),
+            InstallError::Changed(f) => format!("changed.{f}"),
             InstallError::Store(_) => "internal".into(),
         }
     }
@@ -710,6 +798,22 @@ impl InstallError {
 impl From<StoreError> for InstallError {
     fn from(e: StoreError) -> Self {
         InstallError::Store(e.to_string())
+    }
+}
+
+impl From<rusqlite::Error> for InstallError {
+    fn from(e: rusqlite::Error) -> Self {
+        InstallError::Store(e.to_string())
+    }
+}
+
+impl From<AddError> for InstallError {
+    fn from(e: AddError) -> Self {
+        match e {
+            AddError::Refused(r) => InstallError::Package(r),
+            AddError::Full => InstallError::Full,
+            AddError::Store(s) => InstallError::Store(s),
+        }
     }
 }
 
@@ -823,11 +927,7 @@ fn prepare_checked(
     if u64::try_from(package.len()).unwrap_or(u64::MAX) != entry.size {
         return Err(InstallError::Size);
     }
-    let hash: String = Sha256::digest(&package)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    if hash != entry.sha256 {
+    if hex(&Sha256::digest(&package)) != entry.sha256 {
         return Err(InstallError::Hash);
     }
     let checked = plugin_package::check(&package, agora_version).map_err(InstallError::Package)?;
@@ -877,25 +977,65 @@ fn prepare_checked(
 }
 
 /// Keeps a prepared archive once the owner agreed, through the hub's plugin storage (recorded as `plugin_catalog.install` or
-/// `.upgrade`).
+/// `.upgrade`). The owner may have answered long after [`prepare`]; inside the transaction that keeps it, everything the owner was asked
+/// about is checked again ([`unmoved`]), and if anything moved nothing is kept.
 pub fn commit(
     store: &SqliteStore,
     prepared: &Prepared,
     agora_version: &str,
     now_ms: u64,
 ) -> Result<Added, InstallError> {
-    Plugins::new(store)
-        .add_as(
-            &prepared.package,
-            agora_version,
-            now_ms,
-            prepared.mode.action(),
+    let result = Plugins::new(store).add_guarded(
+        &prepared.package,
+        agora_version,
+        now_ms,
+        |tx, installed| unmoved(tx, prepared, installed),
+    );
+    let (target, outcome) = match &result {
+        Ok(a) => (format!("{}@{}", a.id, a.version), "ok".to_string()),
+        Err(e) => (
+            target_of(&prepared.entry.id, Some(&prepared.entry.version)),
+            e.code(),
+        ),
+    };
+    record(store, now_ms, prepared.mode.action(), &target, &outcome);
+    result
+}
+
+/// What [`prepare`] checked, checked again through the write transaction `tx` that keeps the archive: the catalog is on, a key is pinned
+/// and the stored catalog was verified under it, the stored entry still names the archive fetched (its SHA-256), and the installed
+/// version (`installed`, read in the same transaction) is still the one shown (none for an install).
+fn unmoved(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: &Prepared,
+    installed: Option<&str>,
+) -> Result<(), InstallError> {
+    if setting_in(tx, SWITCH_SETTING)?.as_deref() != Some(b"on".as_slice()) {
+        return Err(InstallError::Off);
+    }
+    let pinned = setting_in(tx, KEY_SETTING)?
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|t| PublicKey::parse(&t).ok())
+        .ok_or(InstallError::NoKey)?;
+    if setting_in(tx, VERIFIED_KEY_SETTING)?.as_deref() != Some(pinned.line().as_bytes()) {
+        return Err(InstallError::NotVerified);
+    }
+    let sha256: Option<String> = tx
+        .query_row(
+            "SELECT sha256 FROM plugin_catalog WHERE id = ?1",
+            [&prepared.entry.id],
+            |r| r.get(0),
         )
-        .map_err(|e| match e {
-            AddError::Refused(r) => InstallError::Package(r),
-            AddError::Full => InstallError::Full,
-            AddError::Store(s) => InstallError::Store(s),
-        })
+        .optional()?;
+    match sha256 {
+        None => return Err(InstallError::NotInCatalog),
+        Some(s) if s != prepared.entry.sha256 => return Err(InstallError::Changed("catalog")),
+        Some(_) => {}
+    }
+    if installed != prepared.installed.as_deref() {
+        return Err(InstallError::Changed("installed"));
+    }
+    Ok(())
 }
 
 /// The owner said no: nothing is kept, and the trail says so.
@@ -935,16 +1075,19 @@ mod tests {
         hidden["name"] = "Agent\u{202e}list".into();
         let mut described = entry("described");
         described["description"] = "Lists the agents.".into();
+        let mut blank = entry("blank");
+        blank["description"] = "".into();
         let index = serde_json::json!({"agora-plugin-catalog": 1, "serial": 3, "plugins": [
-            entry("ok"), entry("ok"), extra, cap, twice, escape, big, hidden, described, {"id": "BAD"}
+            entry("ok"), entry("ok"), extra, cap, twice, escape, big, hidden, described, {"id": "BAD"}, blank
         ]});
         let f = read_index(&index.to_string()).unwrap();
         assert_eq!(f.serial, 3);
         assert_eq!(
             f.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
-            ["ok", "described"]
+            ["ok", "described", "blank"]
         );
         assert_eq!(f.entries[1].description, "Lists the agents.");
+        assert_eq!(f.entries[2].description, "", "an empty description is none");
         let codes: Vec<(String, String)> = f
             .refused
             .iter()

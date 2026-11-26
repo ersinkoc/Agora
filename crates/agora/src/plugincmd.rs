@@ -468,6 +468,10 @@ pub(crate) fn update_text(say: &Say, e: &UpdateError) -> String {
                 ),
             ],
         ),
+        UpdateError::SerialReused { serial } => say.text(
+            key!("cli-hub-plugins-serial-reused"),
+            &[("serial", i64::try_from(*serial).unwrap_or(i64::MAX).into())],
+        ),
         UpdateError::Store(s) => printable(s),
     }
 }
@@ -533,6 +537,7 @@ pub(crate) fn install_text(say: &Say, id: &str, e: &InstallError) -> String {
             &[("limit", (MAX_PLUGINS as i64).into())],
         ),
         InstallError::Declined => say.text(key!("cli-hub-plugins-declined"), &[]),
+        InstallError::Changed(_) => say.text(key!("cli-hub-plugins-install-changed"), &[]),
         InstallError::Store(s) => printable(s),
     }
 }
@@ -589,6 +594,7 @@ mod tests {
                     offered: 4,
                 },
             ));
+            lines.push(update_text(&say, &UpdateError::SerialReused { serial: 4 }));
             for e in [
                 InstallError::Off,
                 InstallError::NoKey,
@@ -609,6 +615,8 @@ mod tests {
                 InstallError::Mismatch("capabilities"),
                 InstallError::Full,
                 InstallError::Declined,
+                InstallError::Changed("catalog"),
+                InstallError::Changed("installed"),
             ] {
                 lines.push(install_text(&say, evil, &e));
             }

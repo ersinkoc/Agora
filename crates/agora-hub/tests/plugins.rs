@@ -432,6 +432,7 @@ async fn the_catalog_is_listed_to_everyone_only_while_it_is_on() {
     let key = plugin_catalog::set_key(store, &line, 1).unwrap();
     let fetched = Fetched {
         serial: 3,
+        sha256: "b".repeat(64),
         entries: vec![Entry {
             id: "demo".into(),
             name: "Demo".into(),

@@ -229,10 +229,10 @@ owner's, refused or not):
 
 | Command | What it does |
 | --- | --- |
-| `agora hub plugins key set FILE` | Pins the catalog's public key (its `.pub` file, one `ssh-ed25519 AAAA…` line, or an allowed-signers line `agora-plugin-catalog ssh-ed25519 AAAA…`) and prints its fingerprint as `ssh-keygen -l` does, to compare with the one the project publishes. A private key is refused and nothing of it is kept. Pinning another key forgets the catalog fetched under the old one and its serial (`plugin_catalog.key`, with the fingerprint). |
+| `agora hub plugins key set FILE` | Pins the catalog's public key (its `.pub` file, one `ssh-ed25519 AAAA…` line, or an allowed-signers line `agora-plugin-catalog [options] ssh-ed25519 AAAA…`, options such as `namespaces="agora-plugin-catalog"` allowed; only the key is kept) and prints its fingerprint as `ssh-keygen -l` does, to compare with the one the project publishes. A private key, or a line with two keys, is refused and nothing of it is kept. Pinning another key forgets the catalog fetched under the old one (`plugin_catalog.key`, with the fingerprint); each key's serial floor is kept (below). |
 | `agora hub plugins on` / `off` / `status` | The switch (off by default), the pinned key's fingerprint (or that there is none: then the catalog cannot be used at all), and the last fetch: how many plugins, the index's serial, when and from where. |
-| `agora hub plugins update [--url URL]` | Fetches `index.json` and `index.json.sig` beside it, checks the signature under the pinned key over the index's exact bytes before reading any of it, refuses an index whose serial is lower than the last accepted, reads the entries strictly (each one with a problem is refused and named, the others are kept), and replaces the stored catalog in one transaction. It names each installed plugin the catalog has a newer version of. It installs nothing. Without `--url`, the last address. |
-| `agora hub plugins install ID [--yes]` | Fetches that plugin's archive, refuses it unless its size and SHA-256 are the signed entry's, checks it as a window checks a package, refuses it unless its manifest's id, version, name, author, licence and capabilities are the entry's, shows what it asks to see and asks (`[y/N]`); only then keeps it through the hub's plugin storage (as `agora hub plugin add` would, `plugin_catalog.install`). With no terminal to ask in, only `--yes` installs. Refused while the catalog is off, without a key, or before an update under the key pinned now. |
+| `agora hub plugins update [--url URL]` | Fetches `index.json` and `index.json.sig` beside it, checks the signature under the pinned key over the index's exact bytes before reading any of it, refuses an index below the pinned key's floor (below), reads the entries strictly (each one with a problem is refused and named, the others are kept), and replaces the stored catalog in one transaction. It names each installed plugin the catalog has a newer version of. It installs nothing. Without `--url`, the last address. |
+| `agora hub plugins install ID [--yes]` | Fetches that plugin's archive, refuses it unless its size and SHA-256 are the signed entry's, checks it as a window checks a package, refuses it unless its manifest's id, version, name, author, licence and capabilities are the entry's, shows what it asks to see and asks (`[y/N]`); only then keeps it through the hub's plugin storage (as `agora hub plugin add` would, `plugin_catalog.install`). With no terminal to ask in, only `--yes` installs. Refused while the catalog is off, without a key, or before an update under the key pinned now. When the owner answers, all of this is checked again in the transaction that keeps the package: if meanwhile the catalog was turned off, another key was pinned, an update changed or dropped the entry, or the plugin was installed, upgraded or removed by another command, nothing is kept (`changed.catalog`, `changed.installed`, or the refusal above). |
 | `agora hub plugins upgrade ID [--yes]` | The same for a newer version of an installed plugin: **what changes in what it asks to see comes first** (what it asks to see more, what it no longer asks for, what it still asks for), then the version, then the question. A version not newer than the installed one is refused. Each person who allowed the old version is asked again in the window if the new one asks to see more (as for any new version). |
 
 Everything printed that came from the catalog (ids, names, authors, field names, the address) has every control, invisible and
@@ -245,7 +245,10 @@ direction-changing character written as a visible escape (`\u{1b}`), so a catalo
   over exactly the bytes fetched. Anything else refuses the whole index and changes nothing. The index lists every archive's SHA-256 and
   size, so the one signature covers every archive it names.
 - **No going back.** `serial` must not be lower than the last index the hub accepted under the same key: an old signed index (with a version
-  withdrawn since) cannot be served again. The same serial again is fine.
+  withdrawn since) cannot be served again. The same serial again is fine only with the same bytes (its SHA-256 is kept with the serial);
+  the same serial with other bytes is refused. Each key has its own floor, kept by its fingerprint and checked again in the transaction
+  that keeps a new index, so two updates at once cannot lower it. Pinning another key does not erase a floor: pinning a key again finds
+  its floor where it was. A key never pinned on this hub starts with no floor (trust on first use: a rotation starts the serial anywhere).
 - **Fetching** is the theme catalog's: `https://` (plain `http://` only to this machine), no redirect (a 3xx is a refusal), an archive only
   from a relative path under the index's folder on the same host; index at most 256 KiB, signature 8 KiB, archive 2 MiB; each step at most
   10 s and each command 120 s.
@@ -293,7 +296,7 @@ agora-plugins/
 | `agora-plugin-catalog` | `1`; a hub refuses a newer format |
 | `serial` | a whole number from 1 that only grows: one more on every signed release |
 | `id`, `version`, `name`, `author`, `licence`, `capabilities` | exactly the archive's manifest (the hub refuses an archive whose manifest differs); `licence` is an SPDX identifier and required |
-| `description` | optional, one line of at most 300 characters, no control or invisible characters |
+| `description` | optional (empty is the same as missing), one line of at most 300 characters, no control or invisible characters |
 | `sha256`, `size` | of the archive file exactly as served; at most 2 MiB |
 | `file` | the archive's path under the index's folder: letters, digits, `.`, `_`, `-` and `/`, ending in `.json`, no `.` or `..` part |
 
@@ -322,7 +325,8 @@ Tell owners to remove it (`agora hub plugin remove ID`) and install the listed v
 
 **Rotating the key, or after a leak.** Make a new key as above, publish its public half and fingerprint, say why (a leak is announced at
 once), and sign the next index with it, starting the serial anywhere. Each owner pins the new key with `agora hub plugins key set FILE`:
-the hub forgets the catalog fetched under the old key and its serial, so nothing verified under the old key is offered again. A hub that has
+the hub forgets the catalog fetched under the old key, so nothing verified under the old key is offered again (the old key keeps its floor,
+in case it is ever pinned again; the new key, never pinned before, starts with none). A hub that has
 not pinned the new key refuses the new index (another key) and keeps what it had. Plugins already installed stay installed; an owner removes
 one with `agora hub plugin remove ID`. What a leaked key can and cannot do is threat-model row T68.
 
@@ -387,9 +391,11 @@ runs.
   package loads through the dialog.
 - Catalog: the signature check against keys and signatures made in the test and by `ssh-keygen` itself (`src/sshsig.rs`,
   `tests/plugin_catalog.rs`): a good index kept and listed only while on; a bad signature, another key, another namespace, no signature, a
-  lower serial, a redirect, an index or archive too large or too slow change nothing; a tampered archive (hash), a wrong size, a manifest
-  that asks for more than its entry or installs under another id is never installed; an upgrade's capability changes, never a downgrade; a
-  new key forgets what the old one verified; every step an audit row. Over real sockets, every person lists the catalog only while it is on
+  lower serial (also after pinning the key again, and from an update that saves late), the same serial with other bytes, a redirect, an
+  index or archive too large or too slow change nothing; a reserved field in a signature is refused; a tampered archive (hash), a wrong
+  size, a manifest that asks for more than its entry or installs under another id is never installed; an upgrade's capability changes, never a downgrade; a
+  new key forgets what the old one verified; a yes that comes after the switch, the key, the entry or the installed version moved keeps
+  nothing; every step an audit row. Over real sockets, every person lists the catalog only while it is on
   and a request naming a node is refused (`tests/plugins.rs`); the whole procedure with `ssh-keygen` and the real command line, including
   the question, `--yes`, the order of an upgrade's lines and escaped terminal output (`crates/agora/tests/hub_cli.rs`); golden fixtures
   (`schema/fixtures/plugin-catalog/`); the window's list, read only, with the owner's command (`catalog.test.ts`, `hubDialog.test.tsx`).

@@ -1,8 +1,10 @@
 //! ADR-0114 decision 7 at the hub: the community plugin catalog against a local HTTP server. An index signed with a test key (made
-//! here, never kept) is kept; a bad signature, another key, a lower serial, a redirect, an answer too large or too slow change nothing;
-//! an archive whose bytes are not the signed entry's, or whose manifest says something else, is never installed; an upgrade says what it
-//! adds and removes, and a version not newer is refused; every step is a row of the audit trail as the owner's. When `ssh-keygen` is
-//! on the machine, an index signed by the tool itself (the procedure in `docs/ux/plugins.md`) verifies too.
+//! here, never kept) is kept; a bad signature, another key, a lower serial (under the same key, even pinned again or saved late), the
+//! same serial with other bytes, a redirect, an answer too large or too slow change nothing; what the owner was asked about is checked
+//! again when the answer comes; an archive whose bytes are not the signed entry's, or whose manifest says something else, is never
+//! installed; an upgrade says what it adds and removes, and a version not newer is refused; every step is a row of the audit trail as
+//! the owner's. When `ssh-keygen` is on the machine, an index signed by the tool itself (the procedure in `docs/ux/plugins.md`)
+//! verifies too.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::HashMap;
@@ -313,10 +315,8 @@ fn without_a_key_the_catalog_cannot_be_used_and_a_new_key_forgets_what_the_old_o
     let key = Key::new();
     let cat = Catalog::new();
     let a = package("demo", "1.0.0", &["agents.read"]);
-    cat.publish(
-        &key,
-        &index(9, vec![entry("demo", "1.0.0", &["agents.read"], &a)]),
-    );
+    let first = index(9, vec![entry("demo", "1.0.0", &["agents.read"], &a)]);
+    cat.publish(&key, &first);
     cat.archive("demo", "1.0.0", &a);
     let s = SqliteStore::open_in_memory().unwrap();
     plugin_catalog::set_on(&s, true, 1).unwrap();
@@ -367,13 +367,94 @@ fn without_a_key_the_catalog_cannot_be_used_and_a_new_key_forgets_what_the_old_o
         plugin_catalog::prepare(&s, "demo", Mode::Install, VERSION, roomy(), 9).unwrap_err(),
         InstallError::NotVerified
     );
-    // Under the new key an index with a lower serial is accepted: the old key's serial is not the new key's.
+    // Under the new key, never pinned before, an index with a lower serial is accepted: the old key's floor is not the new key's.
     cat.publish(
         &next,
         &index(1, vec![entry("demo", "1.0.0", &["agents.read"], &a)]),
     );
     plugin_catalog::update(&s, &cat.url, roomy(), 10).unwrap();
     assert_eq!(plugin_catalog::list(&s).unwrap().entries.len(), 1);
+
+    // The first key pinned again: what it verified is forgotten, but its floor is where it was, so its older index stays refused.
+    plugin_catalog::set_key(&s, &key.public().line(), 11).unwrap();
+    assert!(plugin_catalog::list(&s).unwrap().entries.is_empty());
+    cat.publish(
+        &key,
+        &index(8, vec![entry("demo", "0.9.0", &["agents.read"], &a)]),
+    );
+    assert_eq!(
+        plugin_catalog::update(&s, &cat.url, roomy(), 12).unwrap_err(),
+        UpdateError::Rollback {
+            seen: 9,
+            offered: 8
+        }
+    );
+    // Its serial again with other bytes is refused too; with the same bytes it is fine, and a higher one is taken.
+    cat.publish(
+        &key,
+        &index(9, vec![entry("demo", "0.9.0", &["agents.read"], &a)]),
+    );
+    assert_eq!(
+        plugin_catalog::update(&s, &cat.url, roomy(), 13).unwrap_err(),
+        UpdateError::SerialReused { serial: 9 }
+    );
+    assert!(has(&s, "plugin_catalog.update", "", "failed.serial-reused"));
+    assert!(plugin_catalog::list(&s).unwrap().entries.is_empty());
+    cat.publish(&key, &first);
+    plugin_catalog::update(&s, &cat.url, roomy(), 14).unwrap();
+    assert_eq!(
+        plugin_catalog::list(&s).unwrap().entries[0].version,
+        "1.0.0"
+    );
+    cat.publish(
+        &key,
+        &index(10, vec![entry("demo", "1.0.0", &["agents.read"], &a)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 15).unwrap();
+    assert_eq!(plugin_catalog::status(&s).unwrap().serial, 10);
+}
+
+/// Two updates at once: the one that read the floor before the other kept a newer index cannot lower it when it saves.
+#[test]
+fn an_update_that_saves_late_never_lowers_the_floor() {
+    let key = Key::new();
+    let cat = Catalog::new();
+    let a = package("demo", "1.0.0", &["agents.read"]);
+    let b = package("demo", "1.1.0", &["agents.read"]);
+    cat.publish(
+        &key,
+        &index(5, vec![entry("demo", "1.0.0", &["agents.read"], &a)]),
+    );
+    let s = store_with(&key);
+    let at = plugin_catalog::index_url(&cat.url).unwrap();
+    // The first update read no floor and fetched serial 5; before it saves, a second one keeps serial 6.
+    let late = plugin_catalog::fetch(&at, &key.public(), None, roomy()).unwrap();
+    assert_eq!(late.serial, 5);
+    cat.publish(
+        &key,
+        &index(6, vec![entry("demo", "1.1.0", &["agents.read"], &b)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 10).unwrap();
+    assert_eq!(
+        plugin_catalog::save(&s, &late, &cat.url, &key.public(), 11).unwrap_err(),
+        UpdateError::Rollback {
+            seen: 6,
+            offered: 5
+        }
+    );
+    // The same serial with other bytes is refused there too.
+    let mut other = late.clone();
+    other.serial = 6;
+    assert_eq!(
+        plugin_catalog::save(&s, &other, &cat.url, &key.public(), 12).unwrap_err(),
+        UpdateError::SerialReused { serial: 6 }
+    );
+    let st = plugin_catalog::status(&s).unwrap();
+    assert_eq!((st.serial, st.updated_ms), (6, 10), "nothing was changed");
+    assert_eq!(
+        plugin_catalog::list(&s).unwrap().entries[0].version,
+        "1.1.0"
+    );
 }
 
 #[test]
@@ -567,6 +648,132 @@ fn an_upgrade_says_what_it_adds_and_removes_and_never_goes_back() {
         }
     );
     assert!(has(&s, "plugin_catalog.upgrade", "demo@1.0.0", "not-newer"));
+}
+
+/// The owner may answer long after the archive was fetched and shown: what changed meanwhile (the switch, the key, the catalog, the
+/// installed version) is checked again when the answer comes, and then nothing is kept.
+#[test]
+fn what_the_owner_was_asked_about_is_checked_again_when_the_answer_comes() {
+    let key = Key::new();
+    let cat = Catalog::new();
+    let v1 = package("demo", "1.0.0", &["agents.read"]);
+    let v11 = package("demo", "1.1.0", &["agents.read"]);
+    let v12 = package("demo", "1.2.0", &["agents.read"]);
+    for (v, p) in [("1.0.0", &v1), ("1.1.0", &v11), ("1.2.0", &v12)] {
+        cat.archive("demo", v, p);
+    }
+    let first = index(1, vec![entry("demo", "1.0.0", &["agents.read"], &v1)]);
+    cat.publish(&key, &first);
+    let s = store_with(&key);
+    plugin_catalog::update(&s, &cat.url, roomy(), 10).unwrap();
+    let installed = || -> Vec<String> {
+        Plugins::new(&s)
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.version)
+            .collect()
+    };
+    let prepare =
+        |mode: Mode| plugin_catalog::prepare(&s, "demo", mode, VERSION, roomy(), 20).unwrap();
+
+    // Turned off while the owner was asked.
+    let p = prepare(Mode::Install);
+    plugin_catalog::set_on(&s, false, 21).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &p, VERSION, 22).unwrap_err(),
+        InstallError::Off
+    );
+    assert!(has(&s, "plugin_catalog.install", "demo@1.0.0", "off"));
+    plugin_catalog::set_on(&s, true, 23).unwrap();
+
+    // Another key pinned while the owner was asked: the archive was verified under the old one.
+    let p = prepare(Mode::Install);
+    plugin_catalog::set_key(&s, &Key::new().public().line(), 24).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &p, VERSION, 25).unwrap_err(),
+        InstallError::NotVerified
+    );
+    assert!(has(
+        &s,
+        "plugin_catalog.install",
+        "demo@1.0.0",
+        "not-verified"
+    ));
+    assert!(installed().is_empty());
+    plugin_catalog::set_key(&s, &key.public().line(), 26).unwrap();
+    plugin_catalog::update(&s, &cat.url, roomy(), 27).unwrap();
+
+    // Installed by another command while the owner was asked.
+    let p = prepare(Mode::Install);
+    let q = prepare(Mode::Install);
+    plugin_catalog::commit(&s, &p, VERSION, 28).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &q, VERSION, 29).unwrap_err(),
+        InstallError::Changed("installed")
+    );
+    assert!(has(
+        &s,
+        "plugin_catalog.install",
+        "demo@1.0.0",
+        "changed.installed"
+    ));
+
+    // The catalog moved on while the owner was asked about 1.1.0: the archive shown is no longer the one it lists.
+    cat.publish(
+        &key,
+        &index(2, vec![entry("demo", "1.1.0", &["agents.read"], &v11)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 30).unwrap();
+    let up = prepare(Mode::Upgrade);
+    cat.publish(
+        &key,
+        &index(3, vec![entry("demo", "1.2.0", &["agents.read"], &v12)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 31).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &up, VERSION, 32).unwrap_err(),
+        InstallError::Changed("catalog")
+    );
+    assert!(has(
+        &s,
+        "plugin_catalog.upgrade",
+        "demo@1.1.0",
+        "changed.catalog"
+    ));
+    assert_eq!(installed(), ["1.0.0"]);
+
+    // A newer version installed while the owner was asked about 1.1.0: answering yes would go back, so nothing is kept.
+    cat.publish(
+        &key,
+        &index(4, vec![entry("demo", "1.1.0", &["agents.read"], &v11)]),
+    );
+    plugin_catalog::update(&s, &cat.url, roomy(), 33).unwrap();
+    let up = prepare(Mode::Upgrade);
+    assert_eq!(up.installed.as_deref(), Some("1.0.0"));
+    Plugins::new(&s).add(&v12, VERSION, 34).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &up, VERSION, 35).unwrap_err(),
+        InstallError::Changed("installed")
+    );
+    assert!(has(
+        &s,
+        "plugin_catalog.upgrade",
+        "demo@1.1.0",
+        "changed.installed"
+    ));
+    assert_eq!(installed(), ["1.2.0"], "never back");
+
+    // Removed from the catalog while the owner was asked.
+    Plugins::new(&s).remove("demo", 37).unwrap();
+    let p = prepare(Mode::Install);
+    cat.publish(&key, &index(5, vec![]));
+    plugin_catalog::update(&s, &cat.url, roomy(), 38).unwrap();
+    assert_eq!(
+        plugin_catalog::commit(&s, &p, VERSION, 39).unwrap_err(),
+        InstallError::NotInCatalog
+    );
+    assert!(installed().is_empty());
 }
 
 #[test]

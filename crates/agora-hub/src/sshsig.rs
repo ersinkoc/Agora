@@ -2,12 +2,14 @@
 //! checked here with `ring` (already in the tree): no program is run and no crate is added. ADR-0114 decision 7 signs the community
 //! plugin catalog's index this way, so its maintainer signs with the same tool and the same kind of key as a release.
 //!
-//! - **A public key** is one OpenSSH line, `ssh-ed25519 <base64> [comment]`, or an allowed-signers line `<principal> ssh-ed25519
-//!   <base64>` (as `docs/security/release-key.pub`). Anything else is refused, a private key first of all, so a mistaken path never
-//!   puts a private key into the hub's database.
+//! - **A public key** is one OpenSSH line, `ssh-ed25519 <base64> [comment]`, or an allowed-signers line `<principal> [options]
+//!   ssh-ed25519 <base64>` (as `docs/security/release-key.pub`, or with `namespaces="agora-plugin-catalog"`): the one `ssh-ed25519
+//!   <base64>` pair is taken wherever it stands on the line, and only that key is kept (as [`PublicKey::line`]). Anything else is
+//!   refused (two keys, another type), a private key first of all, so a mistaken path never puts a private key into the hub's database.
 //! - **A signature** is the armoured `SSHSIG` blob (PROTOCOL.sshsig): the signer's public key, a namespace, a hash algorithm
 //!   (`sha256` or `sha512`) and the Ed25519 signature over `"SSHSIG" || namespace || reserved || hash algorithm || H(message)`. It is
-//!   accepted only when its key is the pinned key, its namespace the one asked for, and the signature verifies under the pinned key.
+//!   accepted only when its key is the pinned key, its namespace the one asked for, its reserved field empty (as OpenSSH always signs
+//!   it), and the signature verifies under the pinned key.
 //!
 //! Everything is bounded: a key line of at most [`MAX_KEY_TEXT`] bytes, a signature of at most [`MAX_SIGNATURE_TEXT`].
 
@@ -57,17 +59,17 @@ impl PublicKey {
         let [line] = lines.as_slice() else {
             return Err(KeyError::Invalid);
         };
+        // The key type, then its base64, wherever they stand (after a principal and options on an allowed-signers line): exactly one
+        // such pair on the line, or it is not one key.
         let words: Vec<&str> = line.split_whitespace().collect();
-        let at = words
-            .iter()
-            .position(|w| *w == KEY_TYPE)
-            .filter(|i| *i <= 1)
-            .ok_or(KeyError::Invalid)?;
-        let blob = words
-            .get(at + 1)
-            .and_then(|b| base64_decode(b))
-            .ok_or(KeyError::Invalid)?;
-        Self::from_blob(&blob).ok_or(KeyError::Invalid)
+        let mut keys = words
+            .windows(2)
+            .filter(|w| w[0] == KEY_TYPE)
+            .filter_map(|w| base64_decode(w[1]).and_then(|b| Self::from_blob(&b)));
+        match (keys.next(), keys.next()) {
+            (Some(k), None) => Ok(k),
+            _ => Err(KeyError::Invalid),
+        }
     }
 
     /// From the SSH wire form: `string "ssh-ed25519" || string key(32)`, nothing after.
@@ -151,7 +153,8 @@ pub fn verify(
     let reserved = r.string().ok_or(SigError::Malformed)?;
     let hash = r.string().ok_or(SigError::Malformed)?;
     let sig = r.string().ok_or(SigError::Malformed)?;
-    if !r.0.is_empty() {
+    // OpenSSH always signs the reserved field empty; anything in it is not a signature the tool made.
+    if !r.0.is_empty() || !reserved.is_empty() {
         return Err(SigError::Malformed);
     }
     let mut s = Reader(sig);
@@ -192,11 +195,15 @@ pub fn signed_data(namespace: &str, reserved: &[u8], hash: &[u8], digest: &[u8])
 /// The armoured signature `ssh-keygen -Y sign` writes for `key` (its wire form), `namespace` and the raw Ed25519 signature `sig` over
 /// [`signed_data`] with the `sha512` hash: public so a test can sign as the tool does.
 pub fn armour(key_blob: &[u8], namespace: &str, sig: &[u8]) -> String {
+    armour_reserved(key_blob, namespace, b"", sig)
+}
+
+fn armour_reserved(key_blob: &[u8], namespace: &str, reserved: &[u8], sig: &[u8]) -> String {
     let mut blob = MAGIC.to_vec();
     blob.extend_from_slice(&1u32.to_be_bytes());
     put_string(&mut blob, key_blob);
     put_string(&mut blob, namespace.as_bytes());
-    put_string(&mut blob, b"");
+    put_string(&mut blob, reserved);
     put_string(&mut blob, b"sha512");
     let mut inner = Vec::new();
     put_string(&mut inner, KEY_TYPE.as_bytes());
@@ -362,6 +369,12 @@ mod tests {
             PublicKey::parse(&format!("agora-plugin-catalog {line}")).unwrap(),
             k
         );
+        // An allowed-signers line with options: the key is taken, and only the key is kept.
+        let signers = format!(
+            "agora-plugin-catalog namespaces=\"agora-plugin-catalog\" {line} maintainer@catalog"
+        );
+        assert_eq!(PublicKey::parse(&signers).unwrap().line(), line);
+        assert_eq!(PublicKey::parse(&format!("a b {line}")).unwrap(), k);
         assert_eq!(
             PublicKey::parse(
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blbn\n-----END OPENSSH PRIVATE KEY-----"
@@ -373,8 +386,10 @@ mod tests {
             "ssh-rsa AAAAB3NzaC1yc2E".to_string(),
             format!("{line}\n{line}"),
             "ssh-ed25519 !!!".to_string(),
-            format!("a b {line}"),
+            format!("{line} {line}"),
+            format!("a {line} {}", public(&pair()).line()),
             format!("ssh-ed25519 {}", base64_encode(b"short")),
+            format!("namespaces=\"x\" ssh-rsa {}", base64_encode(&k.blob())),
         ] {
             assert_eq!(PublicKey::parse(&bad), Err(KeyError::Invalid), "{bad}");
         }
@@ -424,6 +439,23 @@ mod tests {
                 Err(SigError::Malformed)
             );
         }
+        // A reserved field with something in it is refused, even when the signature covers it.
+        let reserved = armour_reserved(
+            &k.blob(),
+            "agora-plugin-catalog",
+            b"x",
+            p.sign(&signed_data(
+                "agora-plugin-catalog",
+                b"x",
+                b"sha512",
+                &sha512(b"index"),
+            ))
+            .as_ref(),
+        );
+        assert_eq!(
+            verify(&k, "agora-plugin-catalog", b"index", &reserved),
+            Err(SigError::Malformed)
+        );
         let long = format!("{sig}{}", " ".repeat(MAX_SIGNATURE_TEXT));
         assert_eq!(
             verify(&k, "agora-plugin-catalog", b"index", &long),
