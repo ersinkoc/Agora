@@ -1374,3 +1374,185 @@ fn agora_down_while_an_agent_starts_still_keeps_the_usage_being_gathered() {
     drop(_slow);
     let _ = std::fs::remove_dir_all(home);
 }
+
+/// The process ids `agora status` names for `role` (`hub` or `node`): the role's own process and its supervisor.
+#[cfg(unix)]
+fn role_pids(status: &str, role: &str) -> Vec<u32> {
+    let line = status
+        .lines()
+        .find(|l| l.starts_with(&format!("The {role} is running (process ")))
+        .unwrap_or_default();
+    // Only the numbers that follow "process " (the line also names a version, whose digits are no process).
+    line.split("process ")
+        .skip(1)
+        .filter_map(|rest| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+/// The maintainer's question (2026-11-27): a whole machine that dies, hub and node together, comes back with its agents. A power loss
+/// is every process of the machine killed at once (SIGKILL: nothing gets to write a last word): the hub, the node, their supervisors,
+/// the terminal holder and the agents. When the machine starts again with `resume = "auto"`, with nobody doing anything: the hub and
+/// the node are back and linked, both agents (a terminal one and a structured one) continue in their own sessions under their own ids,
+/// and the structured agent's conversation is there and goes on.
+#[cfg(unix)]
+#[test]
+fn a_power_loss_takes_hub_node_and_agents_at_once_and_all_come_back_by_themselves() {
+    if !agora_platform::HOLDER_BUILT || !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let (home, repo) = node_home_with_an_adapter_kind("power-loss");
+    let probe = |file: &str| {
+        vec![
+            fake_agent().to_string_lossy().into_owned(),
+            "--probe-directory".into(),
+            home.join(file).to_string_lossy().into_owned(),
+        ]
+    };
+    let mut resume = probe("resume-{pid}.json");
+    resume.extend(["--resume".to_string(), "{session_id}".to_string()]);
+    let q = |v: Vec<String>| serde_json::to_string(&v).unwrap();
+    std::fs::write(
+        home.join("manifests/probe.toml"),
+        format!(
+            "kind = \"probe\"\ndisplay_name = \"probe\"\nversion = \"1\"\nmin_engine = 2\n[process]\nlaunch = {}\n[resume]\nargv = {}\n[session]\nid_args = [\"--session-id\", \"{{session_id}}\"]\n",
+            q(probe("start-{pid}.json")),
+            q(resume)
+        ),
+    )
+    .unwrap();
+    // This machine is the hub and a node, and resumes what it ran (as blackview is set up).
+    let port = free_port(18300);
+    std::fs::write(
+        home.join("machine.toml"),
+        format!(
+            "roles = [\"hub\", \"node\"]\nui = \"none\"\nhub_listen = \"127.0.0.1:{port}\"\nhub_names = [\"localhost\"]\nhub_dir = {}\nnode_projects = [{}]\nresume = \"auto\"\n",
+            toml_string(&home.join("hub").to_string_lossy()),
+            toml_string(&repo.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    let _down = DownAgents(home.clone());
+    let linked = format!("connected to wss://localhost:{port} as ");
+    let up = || {
+        let (code, out, err) = run(&home, &[]);
+        assert_eq!(code, 0, "{out}{err}");
+        let mut s = String::new();
+        wait_for(
+            "the hub and the node, linked",
+            Duration::from_secs(90),
+            || {
+                s = run(&home, &["status"]).1;
+                s.contains("The hub is running (process")
+                    && s.contains("The node is running (process")
+                    && has_row(&s, &linked)
+            },
+        );
+        s
+    };
+    let start = |kind: &str| {
+        let (code, out, err) = run(
+            &home,
+            &["agent", "start", kind, "--cwd", &repo.to_string_lossy()],
+        );
+        assert_eq!(code, 0, "{out}{err}");
+        agent_id_in(&out)
+    };
+    let pid_of = |id: &str| {
+        let mut pid = 0;
+        wait_for(
+            "the agent's process in the ledger",
+            Duration::from_secs(20),
+            || {
+                pid = ledger_entry(&home, id)
+                    .and_then(|e| e["pid"].as_u64())
+                    .unwrap_or(0);
+                pid > 0 && ledger_entry(&home, id).is_some_and(|e| e["session_id"] != "")
+            },
+        );
+        u32::try_from(pid).unwrap()
+    };
+
+    let status = up();
+    let structured = start("k");
+    let terminal = start("probe");
+    let (code, out, err) = run(&home, &["agent", "prompt", &structured, "first"]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for("the answer on disk", Duration::from_secs(20), || {
+        written_answer(&home, &structured, "first")
+    });
+    let session = ledger_entry(&home, &terminal).unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_terminal = pid_of(&terminal);
+    let mut everything: Vec<u32> = role_pids(&status, "hub");
+    everything.extend(role_pids(&status, "node"));
+    everything.push(pid_in(&home, "hold.pid"));
+    everything.extend([pid_of(&structured), old_terminal]);
+    assert!(
+        everything.len() >= 6,
+        "hub, node, two supervisors, the holder and two agents: {everything:?}\n{status}"
+    );
+
+    // The power goes: every one of these processes (all started by this test) is killed at once.
+    let mut kill = Command::new("kill");
+    kill.arg("-KILL");
+    for p in &everything {
+        kill.arg(p.to_string());
+    }
+    let _ = kill.status().unwrap();
+    wait_for("every process gone", Duration::from_secs(20), || {
+        everything
+            .iter()
+            .all(|p| agora_platform::process_start_time(*p).is_none())
+    });
+
+    // The machine starts again. Nobody resumes anything by hand.
+    up();
+    wait_for(
+        "the terminal agent back in its own session",
+        Duration::from_secs(60),
+        || {
+            std::fs::read_dir(&home).unwrap().flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("resume-")
+                    && std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains(&session))
+            })
+        },
+    );
+    wait_for(
+        "both agents running again under their own ids",
+        Duration::from_secs(60),
+        || {
+            let (_, list, _) = run(&home, &["agent", "list"]);
+            [&structured, &terminal].iter().all(|id| {
+                list.lines()
+                    .any(|l| l.starts_with(&format!("{id}\t")) && l.contains("\trunning"))
+            })
+        },
+    );
+    assert_ne!(
+        pid_of(&terminal),
+        old_terminal,
+        "a new process, the same agent"
+    );
+    assert!(
+        written_answer(&home, &structured, "first"),
+        "the conversation is kept"
+    );
+    let (code, out, err) = run(&home, &["agent", "prompt", &structured, "again"]);
+    assert_eq!(code, 0, "{out}{err}");
+    wait_for(
+        "the resumed structured agent's answer",
+        Duration::from_secs(30),
+        || written_answer(&home, &structured, "again"),
+    );
+    drop(_down);
+    let _ = agora(&home, &["down"]).output();
+    let _ = std::fs::remove_dir_all(home);
+}
