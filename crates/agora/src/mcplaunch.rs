@@ -5,8 +5,10 @@
 //!
 //! ADR-0133: the launch id lasts the agent's run, with one server at a time. The launcher keeps its connection to the node open while
 //! the server runs, says the server's process id and, at the end, its exit code; it closes the server when the node says so (the item
-//! was removed or changed, the agent ended). The server is bound to the launcher (`agora_platform::spawn_bound`), so ending the launcher
-//! ends it where the platform can. Asked while the previous server is still being let go, it waits a few seconds and asks again.
+//! was removed or changed, the agent ended) or when its connection to the node ends, together with everything the server started
+//! (Unix: the server leads a process group of its own; Windows: it is in the launcher's kill-on-close job, so the launcher's end is
+//! its end, and a server that cannot be bound there is not run). Asked while the previous server is still being let go, it waits a few
+//! seconds and asks again.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -82,26 +84,33 @@ pub(crate) fn read_answer(line: &str) -> Answer {
 /// How long the launcher keeps asking while the node still holds the previous server (`instance_live`, `too_soon`).
 const WAIT_FOR_ROOM: Duration = Duration::from_secs(8);
 
+/// How long the launcher waits for the node's answer.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// The longest line the node sends after its answer (a close notice).
+const MAX_NOTICE: u64 = 64 * 1024;
+
+/// The node's side of the launcher's connection: what it reads (buffered past the answer, so a notice right after it is kept) and
+/// what it writes.
+struct Link {
+    reader: BufReader<agora_platform::LocalStream>,
+    writer: agora_platform::LocalStream,
+}
+
 /// Asks the node over `socket` for `item`'s program; the connection stays open for the server's life.
-fn ask(
-    socket: &Path,
-    item: &str,
-    launch_id: &str,
-) -> std::io::Result<(Answer, agora_platform::LocalStream)> {
-    let mut conn = agora_platform::local_connect(socket)?;
+fn ask(socket: &Path, item: &str, launch_id: &str) -> std::io::Result<(Answer, Link)> {
+    let mut writer = agora_platform::local_connect(socket)?;
+    writer.set_read_timeout(Some(ANSWER_WAIT))?;
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": "agora/shared_launch", "params": {"item": item, "launch_id": launch_id}});
-    conn.write_all(format!("{request}\n").as_bytes())?;
+    writer.write_all(format!("{request}\n").as_bytes())?;
+    let mut reader = BufReader::new(writer.try_clone()?);
     let mut line = String::new();
-    BufReader::new(conn.try_clone()?.take(MAX_ANSWER)).read_line(&mut line)?;
-    Ok((read_answer(&line), conn))
+    (&mut reader).take(MAX_ANSWER).read_line(&mut line)?;
+    writer.set_read_timeout(None)?;
+    Ok((read_answer(&line), Link { reader, writer }))
 }
 
 /// Asks, and asks again for a few seconds while the node is still letting the previous server go.
-fn ask_with_room(
-    socket: &Path,
-    item: &str,
-    launch_id: &str,
-) -> std::io::Result<(Answer, agora_platform::LocalStream)> {
+fn ask_with_room(socket: &Path, item: &str, launch_id: &str) -> std::io::Result<(Answer, Link)> {
     let until = Instant::now() + WAIT_FOR_ROOM;
     loop {
         let (answer, conn) = ask(socket, item, launch_id)?;
@@ -136,7 +145,7 @@ pub(crate) fn mcp_launch(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
     };
-    let (answer, mut conn) = match ask_with_room(socket, item, launch_id) {
+    let (answer, link) = match ask_with_room(socket, item, launch_id) {
         Ok(a) => a,
         Err(e) => {
             say.err(
@@ -175,29 +184,50 @@ pub(crate) fn mcp_launch(say: &Say, o: &Opts) -> ExitCode {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    let started = agora_platform::spawn_bound(&mut cmd).map(|b| b.child);
+    // The server leads a process group of its own (Unix), so closing it ends what it started too (`npx` runs the real server as its
+    // child); on Windows it is in the launcher's kill-on-close job.
+    agora_platform::own_process_group(&mut cmd);
+    let Link {
+        mut reader,
+        writer: mut conn,
+    } = link;
+    let started = agora_platform::spawn_bound(&mut cmd);
     match started {
-        Ok(mut child) => {
+        Ok(agora_platform::Bound { mut child, bound }) => {
+            // A server this machine can neither bind to the launcher nor tell again by its process is not run: its liveness after the
+            // launcher would be unknown (ADR-0133 decision 2).
+            if !bound && agora_platform::process_identity(child.id()).is_err() {
+                agora_platform::kill_process_tree(&mut child);
+                notice(
+                    &mut conn,
+                    "agora/shared_launch_ended",
+                    json!({"item": item, "launch_id": launch_id, "code": 1}),
+                );
+                say.err(
+                    key!("cli-mcp-launch-refused"),
+                    &[("item", item.as_str().into()), ("reason", "unbound".into())],
+                );
+                return ExitCode::from(1);
+            }
             notice(
                 &mut conn,
                 "agora/shared_launch_started",
                 json!({"item": item, "launch_id": launch_id, "pid": child.id()}),
             );
-            // The node's word to close the server, read on a thread of its own; the server's end is waited for here.
+            // The node's word to close the server, read on a thread of its own: a close notice, or the connection ending (the agent
+            // ended, or the node stopped: its server is not left behind). The server's end is waited for here.
             let close = Arc::new(AtomicBool::new(false));
-            if let Ok(read) = conn.try_clone() {
+            {
                 let close = Arc::clone(&close);
                 let _ = std::thread::Builder::new()
                     .name("mcp-launch-close".into())
-                    .spawn(move || {
-                        for line in BufReader::new(read.take(MAX_ANSWER)).lines() {
-                            match line {
-                                Ok(l) if is_close(&l) => {
-                                    close.store(true, Ordering::Release);
-                                    return;
-                                }
-                                Ok(_) => {}
-                                Err(_) => return,
+                    .spawn(move || loop {
+                        let mut line = String::new();
+                        match (&mut reader).take(MAX_NOTICE).read_line(&mut line) {
+                            Ok(n) if n > 0 && !is_close(&line) => {}
+                            _ => {
+                                close.store(true, Ordering::Release);
+                                return;
                             }
                         }
                     });
@@ -211,10 +241,12 @@ pub(crate) fn mcp_launch(say: &Say, o: &Opts) -> ExitCode {
                 }
                 if close.load(Ordering::Acquire) && !killed {
                     killed = true;
-                    let _ = child.kill();
+                    agora_platform::kill_process_tree(&mut child);
                 }
                 std::thread::sleep(Duration::from_millis(100));
             };
+            // Whatever the server left running in its group goes with it.
+            agora_platform::kill_process_tree(&mut child);
             notice(
                 &mut conn,
                 "agora/shared_launch_ended",

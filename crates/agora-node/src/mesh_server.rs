@@ -216,6 +216,8 @@ pub struct LaunchPlan {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// ADR-0133: the generation of the instance this grant is (notices about another change nothing).
+    pub instance: u64,
 }
 
 /// Who answers [`SHARED_LAUNCH_METHOD`] (the node's shared items). `Err` is a stable reason (`unknown_launch`, `secret_missing`, ...).
@@ -226,31 +228,56 @@ pub trait SharedLaunch: Send + Sync {
         item: &str,
         launch_id: &str,
     ) -> Result<LaunchPlan, &'static str>;
-    /// ADR-0133: the launcher started the server as process `pid`.
-    fn started(&self, _agent: &AgentId, _item: &str, _launch_id: &str, _pid: u32) {}
-    /// ADR-0133: the launcher said its server ended (`clean`: exit code 0).
-    fn ended(&self, _agent: &AgentId, _item: &str, _launch_id: &str, _clean: bool) {}
-    /// ADR-0133: the launcher's connection ended without saying its server ended.
-    fn dropped(&self, _agent: &AgentId, _item: &str, _launch_id: &str) {}
+    /// ADR-0133: the launcher started the server of grant `generation` as process `pid`.
+    fn started(
+        &self,
+        _agent: &AgentId,
+        _item: &str,
+        _launch_id: &str,
+        _generation: u64,
+        _pid: u32,
+    ) {
+    }
+    /// ADR-0133: the launcher said the server of grant `generation` ended (`clean`: exit code 0).
+    fn ended(
+        &self,
+        _agent: &AgentId,
+        _item: &str,
+        _launch_id: &str,
+        _generation: u64,
+        _clean: bool,
+    ) {
+    }
+    /// ADR-0133: the launcher's connection ended without saying the server of grant `generation` ended.
+    fn dropped(&self, _agent: &AgentId, _item: &str, _launch_id: &str, _generation: u64) {}
     /// ADR-0133: whether the launcher should close its server now (the item was removed or changed, the agent ended).
     fn revoked(&self, _agent: &AgentId, _item: &str, _launch_id: &str) -> bool {
         false
     }
 }
 
-/// ADR-0133: the server instances a connection's launcher holds, `(item, launch id, told to close)`. When the connection ends, each
-/// one still held is said dropped, however the connection ended.
+/// ADR-0133: one server instance a connection's launcher was granted.
+struct Held {
+    item: String,
+    launch_id: String,
+    generation: u64,
+    /// The launcher was told to close it.
+    told: bool,
+}
+
+/// ADR-0133: the server instances a connection's launcher holds. When the connection ends, each one still held is said dropped,
+/// however the connection ended.
 struct LaunchesHeld {
     launcher: Option<Arc<dyn SharedLaunch>>,
     agent: AgentId,
-    held: Vec<(String, String, bool)>,
+    held: Vec<Held>,
 }
 
 impl Drop for LaunchesHeld {
     fn drop(&mut self) {
         if let Some(l) = &self.launcher {
-            for (item, id, _) in self.held.drain(..) {
-                l.dropped(&self.agent, &item, &id);
+            for h in self.held.drain(..) {
+                l.dropped(&self.agent, &h.item, &h.launch_id, h.generation);
             }
         }
     }
@@ -273,21 +300,26 @@ fn launch_notice(text: &str, agent: &AgentId, held: &mut LaunchesHeld) -> bool {
         p.get("item").and_then(Value::as_str).unwrap_or(""),
         p.get("launch_id").and_then(Value::as_str).unwrap_or(""),
     );
-    // Only an instance this connection was given: a notice about another is ignored.
-    let Some(at) = held.held.iter().position(|(i, l, _)| i == item && l == id) else {
+    // Only an instance this connection was given, as the grant it was: a notice about another is ignored.
+    let Some(at) = held
+        .held
+        .iter()
+        .position(|h| h.item == item && h.launch_id == id)
+    else {
         return true;
     };
+    let generation = held.held[at].generation;
     if method == Some(SHARED_LAUNCH_STARTED) {
         if let Some(pid) = p
             .get("pid")
             .and_then(Value::as_u64)
             .and_then(|x| u32::try_from(x).ok())
         {
-            launcher.started(agent, item, id, pid);
+            launcher.started(agent, item, id, generation, pid);
         }
     } else {
         let clean = p.get("code").and_then(Value::as_i64) == Some(0);
-        launcher.ended(agent, item, id, clean);
+        launcher.ended(agent, item, id, generation, clean);
         held.held.remove(at);
     }
     true
@@ -361,7 +393,7 @@ fn launch_reply(
     text: &str,
     agent: &AgentId,
     launcher: &dyn SharedLaunch,
-    granted: &mut Vec<(String, String, bool)>,
+    granted: &mut Vec<Held>,
 ) -> Option<Message> {
     let v: Value = serde_json::from_str(text).ok()?;
     if v.get("method").and_then(Value::as_str) != Some(SHARED_LAUNCH_METHOD) {
@@ -377,7 +409,12 @@ fn launch_reply(
     let (item, launch_id) = (param("item"), param("launch_id"));
     Some(match launcher.launch(agent, item, launch_id) {
         Ok(plan) => {
-            granted.push((item.to_string(), launch_id.to_string(), false));
+            granted.push(Held {
+                item: item.to_string(),
+                launch_id: launch_id.to_string(),
+                generation: plan.instance,
+                told: false,
+            });
             Message::Response {
                 id,
                 result: json!({
@@ -3464,10 +3501,10 @@ fn serve(
         }
         // ADR-0133: a server whose item was removed or changed, or whose agent ended, is told to close (once).
         if let Some(l) = s.launches.launcher.clone() {
-            for (item, id, told) in s.launches.held.iter_mut().filter(|h| !h.2) {
-                if l.revoked(agent, item, id) {
-                    *told = true;
-                    let notice = json!({"jsonrpc": "2.0", "method": SHARED_LAUNCH_CLOSE, "params": {"item": item}});
+            for h in s.launches.held.iter_mut().filter(|h| !h.told) {
+                if l.revoked(agent, &h.item, &h.launch_id) {
+                    h.told = true;
+                    let notice = json!({"jsonrpc": "2.0", "method": SHARED_LAUNCH_CLOSE, "params": {"item": h.item}});
                     if writeln!(writer, "{notice}").is_err() {
                         return;
                     }
@@ -3485,6 +3522,13 @@ fn serve(
         {
             return;
         }
+    }
+    // ADR-0133: the agent ended or the node stops: every server this connection's launcher still holds is told to close before the
+    // connection goes (the launcher also closes its server when the connection ends).
+    for h in s.launches.held.iter().filter(|h| !h.told) {
+        let notice =
+            json!({"jsonrpc": "2.0", "method": SHARED_LAUNCH_CLOSE, "params": {"item": h.item}});
+        let _ = writeln!(writer, "{notice}");
     }
     let _ = writer.shutdown();
 }
@@ -3582,6 +3626,7 @@ mod tests {
                         command: "npx".into(),
                         args: vec!["db".into()],
                         env: vec![("T".into(), "s".into())],
+                        instance: 1,
                     })
                 } else {
                     Err("unknown_launch")
@@ -3633,19 +3678,19 @@ mod tests {
             fn launch(&self, _: &AgentId, _: &str, _: &str) -> Result<LaunchPlan, &'static str> {
                 Err("unknown_launch")
             }
-            fn started(&self, a: &AgentId, item: &str, id: &str, pid: u32) {
+            fn started(&self, a: &AgentId, item: &str, id: &str, _g: u64, pid: u32) {
                 self.0
                     .lock()
                     .unwrap()
                     .push(format!("started {} {item} {id} {pid}", a.as_str()));
             }
-            fn ended(&self, a: &AgentId, item: &str, id: &str, clean: bool) {
+            fn ended(&self, a: &AgentId, item: &str, id: &str, _g: u64, clean: bool) {
                 self.0
                     .lock()
                     .unwrap()
                     .push(format!("ended {} {item} {id} {clean}", a.as_str()));
             }
-            fn dropped(&self, a: &AgentId, item: &str, id: &str) {
+            fn dropped(&self, a: &AgentId, item: &str, id: &str, _g: u64) {
                 self.0
                     .lock()
                     .unwrap()
@@ -3663,10 +3708,15 @@ mod tests {
             let mut held = LaunchesHeld {
                 launcher: Some(log.clone() as Arc<dyn SharedLaunch>),
                 agent: agent.clone(),
-                held: vec![
-                    ("db".into(), "L".into(), false),
-                    ("docs".into(), "L".into(), false),
-                ],
+                held: ["db", "docs"]
+                    .into_iter()
+                    .map(|i| Held {
+                        item: i.into(),
+                        launch_id: "L".into(),
+                        generation: 1,
+                        told: false,
+                    })
+                    .collect(),
             };
             assert!(launch_notice(
                 &notice(SHARED_LAUNCH_STARTED, "db", r#","pid":42"#),

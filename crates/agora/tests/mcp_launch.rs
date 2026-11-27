@@ -43,6 +43,15 @@ fn read(r: &mut BufReader<agora_platform::LocalStream>) -> Value {
     serde_json::from_str(line.trim()).unwrap_or(Value::Null)
 }
 
+/// Waits until process `pid` is gone (at most 10 s).
+fn gone(pid: u32) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while agora_platform::process_exists(pid) {
+        assert!(Instant::now() < until, "process {pid} still runs");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn launcher(socket: &Path) -> std::process::Child {
     Command::new(AGORA)
         .args(["mcp-launch", "--socket"])
@@ -120,6 +129,51 @@ fn the_launcher_reports_its_server_closes_it_when_told_and_waits_for_room() {
     while child.try_wait().unwrap().is_none() {
         assert!(Instant::now() < until, "the launcher ends with its server");
         std::thread::sleep(Duration::from_millis(50));
+    }
+    gone(u32::try_from(pid).unwrap());
+
+    // A server that runs the real one as its own child (as `npx` does), through `sh` where there is one: closing it ends the child
+    // too, and so does the node's side of the connection ending (the agent ended or the node stopped).
+    if Command::new("sh")
+        .args(["-c", "true"])
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        let mut child = launcher(&socket);
+        let conn = listener.accept().unwrap();
+        let mut r = BufReader::new(conn.try_clone().unwrap());
+        assert_eq!(read(&mut r)["method"], "agora/shared_launch");
+        let mut w = conn;
+        let probe = dir.join("deep-{pid}.json").to_string_lossy().into_owned();
+        let script = format!("'{server}' --probe-directory '{probe}' & wait");
+        writeln!(w, "{}", json!({"jsonrpc":"2.0","id":1,"result":{"command": "sh", "args": ["-c", script], "env": {}}})).unwrap();
+        assert_eq!(read(&mut r)["method"], "agora/shared_launch_started");
+        let until = Instant::now() + Duration::from_secs(10);
+        let deep = loop {
+            let found = std::fs::read_dir(&dir).unwrap().flatten().find_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_prefix("deep-")
+                    .and_then(|r| r.strip_suffix(".json"))
+                    .and_then(|p| p.parse::<u32>().ok())
+            });
+            if let Some(p) = found {
+                break p;
+            }
+            assert!(Instant::now() < until, "the grandchild started");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        // The node goes away without a word.
+        drop(w);
+        drop(r);
+        let until = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < until,
+                "the launcher ends when the node's side ends"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        gone(deep);
     }
     drop(sockets);
     let _ = std::fs::remove_dir_all(&dir);
