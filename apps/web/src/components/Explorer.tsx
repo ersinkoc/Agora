@@ -107,24 +107,27 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
                 </div>
                 {resumeError?.id === a.id && <p role="alert" className="m-0 px-2 pb-1 text-xs text-danger">{t(resumeReasonKey(resumeError.code))}</p>}
               </li>;
-  // #945: a row keeps the agent's name readable, and the bolt of an agent that acts without asking whole. The name has at least 40 % of the row and gives way only after "started by …"
-  // and the machine; when the name and the badges do not fit on one line the badges wrap below it. While the row is narrower than 16rem the
-  // limit chip says only "82 %" and "Shared" hides (it stays in the row's tooltip).
+  // #945: a row keeps the agent's name readable, and the bolt of an agent that acts without asking whole. A row is always one line (the
+  // maintainer, 2026-11-27): the facts are icons and short marks (the shared folder is an icon, its words in its name and the row's
+  // tooltip); the name keeps 40 % and "started by …" and the machine truncate; the facts are cut before the bolt and the state.
   // Redesign PR 7: who it is leads (the avatar: its colour and kind), the facts trail (the changed files as a neutral ±N, the bolt bare in
   // red, the state's shape last); the row in front is an accent tint, never a bar on its edge.
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <div className="group flex items-center">
-    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-wrap gap-y-1 overflow-hidden" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}`}>
+    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-nowrap overflow-hidden whitespace-nowrap" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}`}>
       <AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" needsYou={a.state === 'needs-you'} />
       <span className="flex min-w-[40%] flex-1 items-baseline gap-1.5 overflow-hidden" data-agent-name-cell>
         <span className="max-w-full flex-none truncate" data-agent-name>{visible(a.name)}</span>
         {a.parentName && <span className="min-w-0 truncate text-xs text-muted">{t('helper-started-by', { name: visible(a.parentName) })}</span>}
         {withMachine && <span className="min-w-0 truncate text-xs text-muted">{visible(a.machine)}</span>}
       </span>
-      <LimitChip agent={a} compact fit />
-      {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact />}
-      {a.shared && <span className="hidden flex-none text-xs text-muted @3xs:inline" title={t('workspace-shared')}>{t('ide-shared')}</span>}
-      {(a.filesChanged ?? 0) > 0 && <span className="flex-none font-mono text-xs font-normal text-muted" data-files-changed><span aria-hidden>±{a.filesChanged}</span><span className="sr-only">{t('changes-files', { count: a.filesChanged ?? 0 })}</span></span>}
+      {/* The facts that may give way: on a row too narrow for them they are cut here, never the bolt or the state that follow. */}
+      <span className="flex min-w-0 shrink items-center gap-2 overflow-hidden" data-agent-facts>
+        <LimitChip agent={a} compact fit />
+        {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <span className="inline-flex flex-none"><ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact /></span>}
+        {a.shared && <span role="img" className="inline-flex flex-none text-muted" title={t('workspace-shared')} aria-label={t('workspace-shared')} data-shared-mark><Icon name="shared" className="size-3.5" /></span>}
+        {(a.filesChanged ?? 0) > 0 && <span className="flex-none font-mono text-xs font-normal text-muted" data-files-changed><span aria-hidden>±{a.filesChanged}</span><span className="sr-only">{t('changes-files', { count: a.filesChanged ?? 0 })}</span></span>}
+      </span>
       <NoAskBadge agent={a} nested bare />
       <FinishedMark agentId={a.id} compact />
       <StatusMark state={a.state} />

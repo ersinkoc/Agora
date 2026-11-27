@@ -80,7 +80,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
           <span className="flex min-w-0 items-center gap-1.5" data-crumb="machine"><Icon name="machine" className="size-3.5 flex-none" /><span className="truncate">{visible(a.machine)}</span>
           <Icon name="chevron" className="size-3 flex-none rtl:rotate-180" /></span><Icon name="folder" className="size-3.5 flex-none" /><span className="min-w-[4ch] truncate">{visible(a.project || a.workspace)}</span>
           {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{visible(a.branch)}</span></span>}
-          {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
+          {a.shared && <span role="img" className="ms-1 inline-flex flex-none text-muted" title={t('workspace-shared')} aria-label={t('workspace-shared')} data-shared-mark><Icon name="shared" className="size-3.5" /></span>}
           <RunsInsideChip agent={a} />
           <ModelChip agent={a} />
           <NoAskBadge agent={a} />

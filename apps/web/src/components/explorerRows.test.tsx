@@ -42,7 +42,15 @@ describe('an Agents-list row (#945)', () => {
       expect(row.title).toContain('Shared');
       if (a.parentName) expect(cell.textContent).toContain(`started by ${a.parentName}`);
       // An agent that acts without asking is one sign, a red bolt, never words; its meaning is its name, its tooltip and the row's title.
-      expect(row.className).toContain('flex-wrap');
+      // One line, always (the maintainer, 2026-11-27): the row never wraps; the shared folder is an icon, its words in its name.
+      expect(row.className).toContain('flex-nowrap');
+      expect(row.className).not.toContain('flex-wrap');
+      const shared = row.querySelector('[data-shared-mark]') as HTMLElement | null;
+      if (a.shared) {
+        expect(shared?.getAttribute('role')).toBe('img');
+        expect(shared?.textContent).toBe('');
+        expect(shared?.getAttribute('aria-label')).toMatch(/^Shared folder/);
+      }
       const badge = row.querySelector('[data-no-ask]') as HTMLElement;
       expect(badge.getAttribute('role')).toBe('img');
       expect(badge.getAttribute('aria-label')).toMatch(/^Runs without asking: /);
