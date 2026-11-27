@@ -56,10 +56,17 @@ impl OtherProcess {
             )
         };
         if handle.is_null() {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            // ERROR_INVALID_PARAMETER: no process has this pid (any more), which is `NotFound` as on Unix.
+            if e.raw_os_error() == Some(87) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            return Err(e);
         }
         let p = Self { handle, pid };
-        if p.start_time()? != started {
+        // An ended process stays openable, start time and all, while any handle to it is open (another watch's, for one): it does not
+        // run any more, so it is `NotFound` as on Unix, where an ended process is gone once reaped.
+        if p.start_time()? != started || p.ended(Duration::ZERO) {
             return Err(io::Error::from(io::ErrorKind::NotFound));
         }
         Ok(p)
@@ -117,6 +124,8 @@ impl OtherProcess {
     }
 
     /// Whether the process has ended, waiting at most `wait` for it (ADR-0079 decision 4: the holder starts reading when it has).
+    /// A failed wait (`WAIT_FAILED`, which an open handle with `SYNCHRONIZE` does not give) counts as not ended: the process is still
+    /// watched, and a watcher that wrongly took it for ended would start a second reader beside the node's.
     pub(crate) fn ended(&self, wait: Duration) -> bool {
         let ms = u32::try_from(wait.as_millis()).unwrap_or(u32::MAX - 1);
         // SAFETY: a live handle with SYNCHRONIZE.
