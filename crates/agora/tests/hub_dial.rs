@@ -73,6 +73,7 @@ fn hubside(node_id: &str) -> Hubside {
                 "agent.forget.local".into(),
                 // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
                 agora_protocol::handshake::FLEET_STATUS_V1.into(),
+                agora_protocol::handshake::MESH_SPAWN_REMOTE.into(),
             ],
             required: vec![],
         },
@@ -4440,5 +4441,210 @@ fn a_shared_lease_is_renewed_by_its_node_and_given_back_when_the_hub_sees_its_ag
     assert!(
         !err,
         "the lease of an agent the hub saw end is still held: {got}"
+    );
+}
+
+/// ADR-0119, end to end through a real hub: an agent on alpha asks beta for a helper with `agent_start {node: "beta"}`; beta raises an
+/// `agent.start.remote` card; the person's v4 decision there starts it; the hub carries the result back and the agent's call answers
+/// with the helper as `beta/<agent>`, whose `AgentStarted` names its parent on alpha.
+#[test]
+fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_node::uplink_client::MeshOut;
+    use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
+    let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        assert!(std::process::Command::new(
+            std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+        )
+        .args(["build", "-q", "-p", "agora-fake-agent"])
+        .status()
+        .unwrap()
+        .success());
+    });
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let (device, _) = agora_tui::device::Device::generate().unwrap();
+    let start = |name: &str, cert: String, key: String| {
+        let dir = tmp(&format!("remote-{name}"));
+        let manifests = dir.join("manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let launch = serde_json::to_string(&vec![
+            fake.to_string_lossy().into_owned(),
+            "--probe-directory".into(),
+            dir.join("probe-{pid}.json").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        std::fs::write(
+            manifests.join("probe.toml"),
+            format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 3\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\n"),
+        )
+        .unwrap();
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        agora_node::approvals::trust_device(
+            &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+            &device.id,
+            &device.public_key_hex(),
+        )
+        .unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: data,
+            worktree_root: dir.join("wt"),
+            manifests_dir: manifests,
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        node.spawner.set_link(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        link.spawner = Some(Arc::clone(&node.spawner));
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        (node, up, cfg.socket, dir)
+    };
+    let (ca, cb) = (hub.enroll("alpha"), hub.enroll("beta"));
+    let (alpha, _ua, alpha_sock, alpha_dir) = start("alpha", ca.0, ca.1);
+    let (beta, _ub, beta_sock, beta_dir) = start("beta", cb.0, cb.1);
+    wait("both machines to agree on mesh.spawn.remote", || {
+        let agreed = hub
+            .state
+            .hub
+            .router()
+            .nodes_with(agora_protocol::handshake::MESH_SPAWN_REMOTE);
+        agreed.iter().any(|n| n == "alpha") && agreed.iter().any(|n| n == "beta")
+    });
+    // The person's agent on alpha.
+    let mut c = agora_node::control::Client::connect(&alpha_sock).unwrap();
+    let work = agora_platform::canonicalize_plain(&alpha_dir.join("work")).unwrap();
+    let info = match c
+        .call(Cmd::DirectoryInspect(v1::DirectoryInspect {
+            path: work.to_string_lossy().into_owned(),
+            create_project_id: false,
+            authorization: None,
+        }))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(Ok_::DirectoryInfo(i)) => i,
+        other => panic!("{other:?}"),
+    };
+    let asker = match c
+        .call(Cmd::AgentLaunch(v1::AgentLaunch {
+            path: info.path.clone(),
+            project_id: info.project_id.clone(),
+            kind: "probe".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap()
+        .result
+    {
+        Some(Ok_::AgentLaunch(r)) => r.agent_id,
+        other => panic!("{other:?}"),
+    };
+    let sock = alpha
+        .mesh
+        .socket_path(&agora_core::AgentId::new(asker.clone()));
+    wait("the asker's mesh socket", || sock.exists());
+    let target_folder = agora_platform::canonicalize_plain(&beta_dir.join("work"))
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let call = std::thread::spawn({
+        let sock = sock.clone();
+        let target_folder = target_folder.clone();
+        move || {
+            let mut conn = agora_platform::local_connect(&sock).unwrap();
+            mcp(
+                &mut conn,
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion": "2025-03-26"}),
+            );
+            mcp(
+                &mut conn,
+                2,
+                "tools/call",
+                serde_json::json!({"name": "agent_start", "arguments": {"kind": "probe", "node": "beta", "folder": target_folder}}),
+            )
+        }
+    });
+    // Beta's card, decided over v4 by the person's device.
+    let mut card = None;
+    wait("beta's agent.start.remote card", || {
+        if call.is_finished() {
+            panic!("the agent's call ended before any card");
+        }
+        card = beta
+            .approvals
+            .waiting()
+            .into_iter()
+            .find(|p| p.action == agora_node::approvals::REMOTE_START_ACTION);
+        card.is_some()
+    });
+    let p = card.unwrap();
+    assert_eq!(p.remote.as_ref().unwrap().origin_node, "alpha");
+    let grant = v1::RemoteGrant::default();
+    let msg = agora_node::approvals::start_signed_message_v4(
+        "beta",
+        p.remote.as_ref().unwrap(),
+        &p.id,
+        true,
+        &agora_node::approvals::detail_settings(&p.detail),
+        &agora_node::approvals::detail_launch_options(&p.detail),
+        &grant,
+        &p.detail,
+    );
+    let mut cb = agora_node::control::Client::connect(&beta_sock).unwrap();
+    cb.call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+        approval_id: p.id.clone(),
+        approved: true,
+        signer_device_id: device.id.clone(),
+        signature: device.sign(&msg).unwrap(),
+        remote_grant: Some(grant),
+        ..Default::default()
+    }))
+    .unwrap()
+    .unwrap();
+    let answer = call.join().unwrap();
+    let text = answer["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let helper = v["agent_id"].as_str().unwrap_or_default().to_string();
+    assert!(helper.starts_with("beta/agent-"), "{answer}");
+    let local = helper.trim_start_matches("beta/").to_string();
+    let started = beta
+        .events
+        .events_after(0)
+        .into_iter()
+        .find_map(|e| match e.body {
+            Some(v1::event::Body::AgentStarted(s)) if s.agent_id == local => Some(s),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (
+            started.parent_node_id.as_str(),
+            started.parent_node_agent_id.as_str(),
+            started.parent_agent_id.as_str()
+        ),
+        ("alpha", asker.as_str(), "")
     );
 }

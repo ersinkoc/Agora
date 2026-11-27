@@ -219,7 +219,7 @@ pub fn spawn_tools() -> Vec<Value> {
                    ("prompt", string("The helper's task, in full; the user reads it before deciding")),
                    ("folder", string("Folder to work in; default your own folder. Another folder needs the user's explicit approval")),
                    ("worktree", boolean("Give the helper its own git worktree of the folder (default false)")),
-                   ("node", string("Machine; default yours (only yours is supported)")),
+                   ("node", string("Machine; default yours. On another machine (as agents_list names it), folder must be a full path there, and that machine's person decides")),
                    ("settings", json!({"type": "object", "additionalProperties": {"type": "string"},
                         "description": "Launch settings the kind declares, such as {\"model\": \"...\", \"effort\": \"high\"}. The user sees each one and approves it; a setting the kind does not declare, or a value it does not take, is refused"})),
                    ("options", json!({"type": "array", "items": {"type": "string"},

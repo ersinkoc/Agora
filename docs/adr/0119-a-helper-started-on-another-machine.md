@@ -329,7 +329,14 @@ New threat-model rows (numbers are the next free ones when built):
    for their first answer (`mesh.rate_limited`), within the node's 64 open forwards. Audit rows `agent.start.remote.asked`,
    `agent.start.remote.result` and `agent.start.remote.released`. The record is in memory: after a hub restart every asker is its own
    root (chain grants stop applying). Tests: `crates/agora-hub/tests/server.rs`, `helpers.rs` and `users.rs`.
-4. The asking node: not started.
+4. The asking node: built except following (`agent_wait`/`agent_output` for `<machine>/<agent>` through `HelperFollow`).
+   `agent_start` with `node` set to another machine is checked here (the asker runs and may ask, a full folder, the prompt rules, 3
+   helpers local and remote together, the start rate) and sent through the hub link (`MeshOut::request`); the call answers with the
+   helper once the hub carries the target's `HelperStartResult` back (`uplink_client::run_routed`), `node.timeout` past the card's time
+   plus 2 minutes (and the card there is withdrawn); the asker's end, and a stop with its helpers, send `HelperRelease` to every machine
+   it asked (with the run it asked from). The target's results go out on the same link, offered again for 15 minutes when the hub
+   cannot take them. The node offers `mesh.spawn.remote` while its policy allows. End to end through a real hub:
+   `crates/agora/tests/hub_dial.rs` `an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there`.
 5. The window and the terminal client: not started.
 
 ## Consequences

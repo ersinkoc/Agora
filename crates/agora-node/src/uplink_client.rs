@@ -183,7 +183,8 @@ pub struct HubLink {
     pub spawner: Option<Arc<crate::spawn::Spawner>>,
 }
 
-type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
+/// What the hub answered (its `CommandOk`, if any), or the error code.
+type Done = Box<dyn FnOnce(Result<Option<agora_protocol::v1::CommandOk>, String>) + Send>;
 
 /// A board tool call (ADR-0039): project, tool, arguments as JSON.
 type BoardArgs = (String, String, String);
@@ -194,12 +195,26 @@ struct PostJob {
     body: String,
     refs: Vec<String>,
     board: Option<BoardArgs>,
+    /// ADR-0119: a request of the node's own for the hub to carry (a helper start, its result, a follow or a release), and the
+    /// envelope's `target_node`. Sent as it is, instead of a post or a board call.
+    raw: Option<(command_request::Command, String)>,
     done: Option<Done>,
 }
 
 impl PostJob {
     /// The parts, with the obligation to call `done` handed over.
-    fn take(mut self) -> (String, String, String, Vec<String>, Option<BoardArgs>, Done) {
+    #[allow(clippy::type_complexity)]
+    fn take(
+        mut self,
+    ) -> (
+        String,
+        String,
+        String,
+        Vec<String>,
+        Option<BoardArgs>,
+        Option<(command_request::Command, String)>,
+        Done,
+    ) {
         let done = self.done.take().unwrap_or_else(|| Box::new(|_| {}));
         (
             std::mem::take(&mut self.from_agent),
@@ -207,6 +222,7 @@ impl PostJob {
             std::mem::take(&mut self.body),
             std::mem::take(&mut self.refs),
             self.board.take(),
+            self.raw.take(),
             done,
         )
     }
@@ -267,6 +283,7 @@ impl crate::mesh_server::RemoteLink for MeshOut {
             body: body.to_string(),
             refs: refs.to_vec(),
             board: None,
+            raw: None,
             done: Some(Box::new(move |r| done(r.map(|_| ())))),
         });
     }
@@ -289,9 +306,39 @@ impl crate::mesh_server::RemoteLink for MeshOut {
                 tool.to_string(),
                 arguments_json.to_string(),
             )),
+            raw: None,
             done: Some(Box::new(move |r| {
-                done(r.and_then(|b| b.ok_or_else(|| "protocol.invalid_message".to_string())))
+                done(r.and_then(|ok| match ok.and_then(|o| o.result) {
+                    Some(agora_protocol::v1::command_ok::Result::BoardResult(b)) => {
+                        Ok(crate::mesh_server::BoardReply {
+                            shared: b.shared,
+                            result_json: b.result_json,
+                        })
+                    }
+                    _ => Err("protocol.invalid_message".to_string()),
+                }))
             })),
+        });
+    }
+}
+
+impl MeshOut {
+    /// ADR-0119: hands one request of the node's own to the hub (`target_node` in its envelope, for a follow or a release). `done` is
+    /// called once with the hub's answer, or the error code (`node.offline` when no hub connection is up). Must not block.
+    pub fn request(
+        &self,
+        command: command_request::Command,
+        target_node: &str,
+        done: Box<dyn FnOnce(Result<agora_protocol::v1::CommandOk, String>) + Send>,
+    ) {
+        self.queue(PostJob {
+            from_agent: String::new(),
+            to: String::new(),
+            body: String::new(),
+            refs: Vec::new(),
+            board: None,
+            raw: Some((command, target_node.to_string())),
+            done: Some(Box::new(move |r| done(r.map(Option::unwrap_or_default)))),
         });
     }
 }
@@ -674,6 +721,11 @@ where
     if mesh.as_ref().is_some_and(|mesh| mesh.fleet_allowed()) {
         capabilities.push(agora_protocol::handshake::FLEET_STATUS_V1);
     }
+    // ADR-0119: offered only while the node's policy lets other machines ask it for helpers (`mesh.remote_helpers` with `mesh.remote`),
+    // which is also what lets its own agents ask other machines.
+    if spawner.as_ref().is_some_and(|s| s.remote_helpers_on()) {
+        capabilities.push(agora_protocol::handshake::MESH_SPAWN_REMOTE);
+    }
     let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
         STREAM_CONTROL,
@@ -792,14 +844,18 @@ where
                 if waited.jumped(live.suspended_after) {
                     return Err(LinkError::Suspended);
                 }
-                let (from_agent, to, body, refs, board, done) = job.take();
+                let (from_agent, to, body, refs, board, raw, done) = job.take();
                 posts.next += 1;
                 let id = format!("m{}", posts.next);
+                let (raw, target_node) = match raw {
+                    Some((command, target)) => (Some(command), target),
+                    None => (None, String::new()),
+                };
                 let req = CommandRequest {
                     request_id: id.clone(),
                     idempotency_key: String::new(),
-                    target_node: String::new(),
-                    command: Some(match board {
+                    target_node,
+                    command: Some(if let Some(command) = raw { command } else { match board {
                         Some((project_id, tool, arguments_json)) => {
                             command_request::Command::BoardCall(agora_protocol::v1::BoardCall {
                                 project_id,
@@ -816,7 +872,7 @@ where
                             from_agent,
                             refs,
                         }),
-                    }),
+                    }}),
                 };
                 posts.waiting.insert(id, (tokio::time::Instant::now(), done));
                 put(&mut conn, &frame(STREAM_COMMANDS, 0, req.encode_to_vec()), limit).await?;
@@ -955,15 +1011,7 @@ where
                         if let Some((_, done)) = posts.waiting.remove(&r.request_id) {
                             done(match r.result {
                                 Some(command_response::Result::Err(e)) => Err(e.code),
-                                Some(command_response::Result::Ok(ok)) => match ok.result {
-                                    Some(agora_protocol::v1::command_ok::Result::BoardResult(
-                                        b,
-                                    )) => Ok(Some(crate::mesh_server::BoardReply {
-                                        shared: b.shared,
-                                        result_json: b.result_json,
-                                    })),
-                                    _ => Ok(None),
-                                },
+                                Some(command_response::Result::Ok(ok)) => Ok(Some(ok)),
                                 None => Ok(None),
                             });
                         }
@@ -1563,6 +1611,14 @@ fn run_routed(
                 || Err(missing()),
                 |s| s.remote_follow(f).map(Ok_::HelperFollowResult),
             ));
+        }
+        // ADR-0119 decision 6: the result of a start this node's agent asked for, carried back by the hub.
+        Some(command_request::Command::HelperStartResult(r)) => {
+            let Some(s) = spawner else {
+                return answer(Err(missing()));
+            };
+            s.remote_result(r);
+            return answer(Ok(Ok_::Empty(agora_protocol::v1::Empty {})));
         }
         Some(command_request::Command::HelperRelease(r)) => {
             let Some(s) = spawner else {

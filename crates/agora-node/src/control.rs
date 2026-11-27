@@ -1348,7 +1348,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             let id = AgentId::new(a.agent_id.clone());
             // ADR-0057: its helpers (and theirs) first, when asked; found before the parent stops.
             let helpers = match (&ctx.spawn, a.stop_helpers) {
-                (Some(s), true) => s.running_helpers(&id),
+                (Some(s), true) => {
+                    // ADR-0119: its helpers on other machines stop too.
+                    s.release_remote(&id, true);
+                    s.running_helpers(&id)
+                }
                 _ => Vec::new(),
             };
             let stopped_now = ctx.sup().stop(&id);

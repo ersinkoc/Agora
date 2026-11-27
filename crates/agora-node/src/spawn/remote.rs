@@ -102,15 +102,46 @@ pub(super) struct Grant {
     starts: VecDeque<Instant>,
 }
 
+/// ADR-0119 decision 6: how long the asking node waits for a start's result after its first answer, beyond the card's own time.
+const RESULT_GRACE: Duration = Duration::from_secs(120);
+/// How long the first answer may take (a forward's deadline is 30 s).
+const FIRST_ANSWER: Duration = Duration::from_secs(45);
+/// How long a result the target could not hand to the hub is offered again.
+const RESEND_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// A start this node's agent asked another machine for.
+pub(super) struct Asked {
+    ticket: u64,
+    target: String,
+    caller: AgentId,
+    deadline: Instant,
+}
+
+/// What came back from the hub link (its callbacks run on the link's thread; [`Spawner::tick`] applies them).
+pub(super) enum FromLink {
+    /// The target's first answer to a start (the card's id and time, or a grant covered it), or why it was not carried.
+    Accepted(Vec<u8>, Result<v1::CommandOk, String>),
+    /// A result this node could not hand to the hub: offered again until [`RESEND_FOR`] passed.
+    Unsent(v1::HelperStartResult, Instant),
+}
+
 #[derive(Default)]
 pub(super) struct RemoteState {
+    /// The hub link, for this node's own requests (ADR-0119): starts, results, follows and releases.
+    link: Option<Arc<crate::uplink_client::MeshOut>>,
+    /// Starts this node's agents asked other machines for, by start id.
+    asked: HashMap<Vec<u8>, Asked>,
+    /// Helpers on other machines each local agent started (`<machine>/<agent>`), and the machines it asked.
+    children: HashMap<AgentId, Vec<String>>,
+    /// The machines each local agent asked, with the run it asked from (a release must name that run, also once it ended).
+    targets: HashMap<AgentId, (Vec<u8>, HashSet<String>)>,
+    /// Results to send, with when they were first made.
+    unsent: Vec<(v1::HelperStartResult, Instant)>,
     /// Whether this node takes starts from other machines (`mesh.remote_helpers`, and `mesh.remote`).
     on: bool,
     waiting: HashMap<String, Waiting>,
     started: HashMap<AgentId, Started>,
     grants: Vec<Grant>,
-    /// Results for the hub to carry back to the asking machines.
-    outbox: Vec<v1::HelperStartResult>,
     /// Follows being answered now, per asking machine.
     following: HashMap<String, usize>,
 }
@@ -125,6 +156,11 @@ impl Spawner {
     /// ADR-0119: whether this node takes starts from other machines (`mesh.remote_helpers` and `mesh.remote` in its policy).
     pub fn set_remote_helpers(&self, on: bool) {
         self.st().remote.on = on;
+    }
+
+    /// Whether the policy allows it now: the node offers `mesh.spawn.remote` to its hub only then.
+    pub fn remote_helpers_on(&self) -> bool {
+        self.st().remote.on
     }
 
     /// The helpers started here for other machines that still run, by asker.
@@ -573,7 +609,39 @@ impl Spawner {
                 from_node: String::new(),
             },
         };
-        st.remote.outbox.push(result);
+        st.remote.unsent.push((result, Instant::now()));
+        drop(st);
+        self.send_results();
+    }
+
+    /// Hands the results waiting to be sent to the hub link; one it cannot hand over comes back through [`FromLink::Unsent`] and is
+    /// offered again on a later tick, until [`RESEND_FOR`] passed.
+    fn send_results(&self) {
+        let (link, unsent) = {
+            let mut st = self.st();
+            let Some(link) = st.remote.link.clone() else {
+                return;
+            };
+            (link, std::mem::take(&mut st.remote.unsent))
+        };
+        for (result, since) in unsent {
+            if since.elapsed() >= RESEND_FOR {
+                continue;
+            }
+            let back = Arc::clone(&self.from_link);
+            let again = result.clone();
+            link.request(
+                v1::command_request::Command::HelperStartResult(result),
+                "",
+                Box::new(move |r| {
+                    if r.is_err() {
+                        back.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(FromLink::Unsent(again, since));
+                    }
+                }),
+            );
+        }
     }
 
     /// A card that ran out of time: its asker hears `approval.expired`. `false` if it was not a remote card.
@@ -593,9 +661,278 @@ impl Spawner {
         true
     }
 
-    /// The results waiting to be carried back (each is taken once; the caller sends them to the hub).
+    /// The results not yet handed to the hub (each is taken once). Without a hub link they stay here.
     pub fn take_remote_results(&self) -> Vec<v1::HelperStartResult> {
-        std::mem::take(&mut self.st().remote.outbox)
+        std::mem::take(&mut self.st().remote.unsent)
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect()
+    }
+
+    /// ADR-0119: the hub link this node sends its own requests on (starts, results, follows, releases).
+    pub fn set_link(&self, link: Arc<crate::uplink_client::MeshOut>) {
+        self.st().remote.link = Some(link);
+    }
+
+    /// ADR-0119 decision 1: `caller` asks machine `target` to start a helper. Checked here first (the asker runs, may ask, names a
+    /// full folder, a prompt that passes the rules, within its limits), then carried by the hub; the answer fills the start's ticket
+    /// when the target's result comes back ([`Self::remote_result`]).
+    pub(super) fn remote_ask(
+        &self,
+        caller: &AgentId,
+        a: &StartArgs,
+        target: &str,
+    ) -> Result<u64, Error> {
+        let Some(link) = self.st().remote.link.clone() else {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", agora_protocol::handshake::MESH_SPAWN_REMOTE));
+        };
+        let folder = a.folder.clone().unwrap_or_default();
+        if folder.is_empty()
+            || !Path::new(&folder).is_absolute()
+            || folder.chars().any(|c| c.is_control() || invisible(c))
+        {
+            return Err(
+                Error::new(ErrorCode::MeshFolderNotAllowed).with("folder", cut(&folder, MAX_FIELD))
+            );
+        }
+        check_prompt(&a.prompt)?;
+        let views = self.sup().list();
+        let me = views
+            .iter()
+            .find(|v| v.id == *caller && v.running)
+            .ok_or_else(|| not_found(caller.as_str()))?
+            .clone();
+        {
+            let st = self.st();
+            // A helper asks only if the decision that started it allowed it (the hub then places it in its chain).
+            match st.lineage.get(caller) {
+                Some(l) if !l.may_start => {
+                    return Err(helper_limit("depth", MAX_REMOTE_DEPTH as usize))
+                }
+                None if me.parent.is_some() => {
+                    return Err(helper_limit("depth", MAX_REMOTE_DEPTH as usize))
+                }
+                _ => {}
+            }
+            let remote = st.remote.children.get(caller).map_or(0, Vec::len)
+                + st.remote
+                    .asked
+                    .values()
+                    .filter(|x| x.caller == *caller)
+                    .count();
+            if Self::running_children(&st, &views, caller) + remote >= MAX_HELPERS {
+                return Err(helper_limit("helpers", MAX_HELPERS));
+            }
+        }
+        if let Err((e, _)) = self.reserve(caller) {
+            return Err(e);
+        }
+        let mut start_id = vec![0u8; 16];
+        if getrandom::getrandom(&mut start_id).is_err() {
+            self.release(caller);
+            return Err(Error::new(ErrorCode::Internal).with("incident_id", "start-id"));
+        }
+        let ticket = {
+            let mut st = self.st();
+            let ticket = Self::new_ticket(&mut st, None);
+            st.remote.asked.insert(
+                start_id.clone(),
+                Asked {
+                    ticket,
+                    target: target.to_string(),
+                    caller: caller.clone(),
+                    deadline: Instant::now() + FIRST_ANSWER,
+                },
+            );
+            st.remote
+                .targets
+                .entry(caller.clone())
+                .or_insert_with(|| (me.run_id.map(Vec::from).unwrap_or_default(), HashSet::new()))
+                .1
+                .insert(target.to_string());
+            ticket
+        };
+        let back = Arc::clone(&self.from_link);
+        let id = start_id.clone();
+        link.request(
+            v1::command_request::Command::HelperStart(v1::HelperStart {
+                start_id,
+                target_node: target.to_string(),
+                kind: a.kind.clone(),
+                folder,
+                prompt: a.prompt.clone(),
+                worktree: a.worktree,
+                settings: a
+                    .settings
+                    .iter()
+                    .map(|(id, value)| v1::LaunchSetting {
+                        id: id.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+                launch_options: a.options.clone(),
+                from_agent: caller.as_str().to_string(),
+                from_run_id: me.run_id.map(Vec::from).unwrap_or_default(),
+                from_agent_kind: me.kind.clone(),
+                ..Default::default()
+            }),
+            "",
+            Box::new(move |r| {
+                back.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(FromLink::Accepted(id, r));
+            }),
+        );
+        Ok(ticket)
+    }
+
+    /// ADR-0119 decision 6: the result of a start this node asked for, carried by the hub (`from_node` is the hub's word). It fills
+    /// the start's ticket: the helper as `<machine>/<agent>`, or the target's error. Anything else is ignored.
+    pub fn remote_result(&self, r: &v1::HelperStartResult) {
+        let found = {
+            let mut st = self.st();
+            match st.remote.asked.get(&r.start_id) {
+                Some(x) if x.target == r.from_node => st.remote.asked.remove(&r.start_id),
+                _ => None,
+            }
+        };
+        let Some(x) = found else {
+            return;
+        };
+        let outcome = match &r.error {
+            Some(e) => Err(error_of(e)),
+            None if r.agent_id.is_empty() => Err(Error::new(ErrorCode::Internal)),
+            None => Ok(format!("{}/{}", x.target, r.agent_id)),
+        };
+        let mut st = self.st();
+        if let Ok(helper) = &outcome {
+            st.remote
+                .children
+                .entry(x.caller.clone())
+                .or_default()
+                .push(helper.clone());
+        }
+        if let Some(t) = st.tickets.get_mut(&x.ticket) {
+            *t = Some(outcome);
+        }
+        st.busy.remove(&x.caller);
+    }
+
+    /// Applies what the hub link answered, ends starts whose answer never came, and offers unsent results again. From [`Self::tick`].
+    pub(super) fn remote_tick(&self) {
+        let came: Vec<FromLink> =
+            std::mem::take(&mut *self.from_link.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut release: Vec<(String, Vec<u8>, AgentId, Vec<u8>)> = Vec::new();
+        {
+            let mut st = self.st();
+            for c in came {
+                match c {
+                    FromLink::Unsent(r, since) => st.remote.unsent.push((r, since)),
+                    FromLink::Accepted(id, Ok(ok)) => {
+                        if let Some(v1::command_ok::Result::HelperStartAccepted(a)) = ok.result {
+                            if let Some(x) = st.remote.asked.get_mut(&id) {
+                                x.deadline =
+                                    Instant::now() + Duration::from_millis(a.ttl_ms) + RESULT_GRACE;
+                            }
+                        }
+                    }
+                    FromLink::Accepted(id, Err(code)) => {
+                        if let Some(x) = st.remote.asked.remove(&id) {
+                            if let Some(t) = st.tickets.get_mut(&x.ticket) {
+                                *t = Some(Err(Error::new(ErrorCode::parse(&code))));
+                            }
+                            st.busy.remove(&x.caller);
+                        }
+                    }
+                }
+            }
+            let now = Instant::now();
+            let late: Vec<Vec<u8>> = st
+                .remote
+                .asked
+                .iter()
+                .filter(|(_, x)| now >= x.deadline)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in late {
+                if let Some(x) = st.remote.asked.remove(&id) {
+                    if let Some(t) = st.tickets.get_mut(&x.ticket) {
+                        *t =
+                            Some(Err(Error::new(ErrorCode::NodeTimeout)
+                                .with("node_id", x.target.as_str())));
+                    }
+                    st.busy.remove(&x.caller);
+                    let run = st
+                        .remote
+                        .targets
+                        .get(&x.caller)
+                        .map(|(run, _)| run.clone())
+                        .unwrap_or_default();
+                    release.push((x.target, id, x.caller, run));
+                }
+            }
+        }
+        // A start given up on here withdraws its card there, so nothing starts that nobody tracks.
+        for (target, start_id, caller, run) in release {
+            self.send_release(&target, &caller, run, start_id, false);
+        }
+        self.send_results();
+    }
+
+    fn send_release(
+        &self,
+        target: &str,
+        caller: &AgentId,
+        run: Vec<u8>,
+        start_id: Vec<u8>,
+        stop_helpers: bool,
+    ) {
+        let Some(link) = self.st().remote.link.clone() else {
+            return;
+        };
+        link.request(
+            v1::command_request::Command::HelperRelease(v1::HelperRelease {
+                from_agent: caller.as_str().to_string(),
+                from_run_id: run,
+                start_id,
+                stop_helpers,
+                origin: String::new(),
+            }),
+            target,
+            Box::new(|_| {}),
+        );
+    }
+
+    /// ADR-0119 decision 8: `caller` is gone (or a person stopped it with its helpers): every machine it asked hears it, its waiting
+    /// starts are withdrawn there, and with `stop_helpers` its helpers there stop too.
+    pub fn release_remote(&self, caller: &AgentId, stop_helpers: bool) {
+        let targets = {
+            let mut st = self.st();
+            let (run, targets) = st.remote.targets.remove(caller).unwrap_or_default();
+            st.remote.children.remove(caller);
+            let waiting: Vec<Vec<u8>> = st
+                .remote
+                .asked
+                .iter()
+                .filter(|(_, x)| x.caller == *caller)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &waiting {
+                if let Some(x) = st.remote.asked.remove(id) {
+                    if let Some(t) = st.tickets.get_mut(&x.ticket) {
+                        *t = Some(Err(
+                            Error::new(ErrorCode::MeshStartDenied).with("approval_id", "")
+                        ));
+                    }
+                }
+            }
+            (run, targets, waiting)
+        };
+        let (run, targets, _waiting) = (targets.0, targets.1, targets.2);
+        for target in targets {
+            self.send_release(&target, caller, run.clone(), Vec::new(), stop_helpers);
+        }
     }
 
     /// ADR-0119 decision 7: `agent_wait` and `agent_output` from the asking machine, for a helper whose record names this origin, asking
@@ -803,4 +1140,17 @@ impl Drop for Following<'_> {
             }
         }
     }
+}
+
+/// An error the target or the hub answered with, as this node's own.
+fn error_of(e: &v1::ErrorInfo) -> Error {
+    let mut out = Error::new(ErrorCode::parse(&e.code));
+    for (k, v) in &e.params {
+        out = match &v.value {
+            Some(v1::param_value::Value::Str(s)) => out.with(k, s.as_str()),
+            Some(v1::param_value::Value::Int(i)) => out.with(k, *i),
+            None => out,
+        };
+    }
+    out
 }

@@ -1067,10 +1067,12 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
         // Messages for agents on other machines go through the hub connection (ADR-0031).
         let out = agora_node::uplink_client::MeshOut::new();
         node.mesh.set_remote(out.clone());
+        let out_for_helpers = out.clone();
         l.mesh_out = Some(out);
         l.grants = Some(Arc::clone(&node.grants));
         l.mesh = Some(Arc::clone(&node.mesh));
         l.spawner = Some(Arc::clone(&node.spawner));
+        node.spawner.set_link(out_for_helpers);
         l.devices = Some(Arc::clone(&node.devices));
         l.state_dir = Some(cfg.data_dir.clone());
         agora_node::uplink_client::spawn(Arc::clone(&node.events), l).ok()

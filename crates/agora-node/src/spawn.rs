@@ -221,6 +221,8 @@ pub struct Spawner {
     state: Mutex<State>,
     /// Test hook (#1150, [`Self::pause_next_filing`]): where the next start says it reached, and what it waits for to go on.
     pause_filing: Mutex<Option<FilingPause>>,
+    /// ADR-0119: what the hub link answered, applied by [`Self::tick`] (its callbacks run on the link's thread).
+    from_link: Arc<Mutex<Vec<remote::FromLink>>>,
 }
 
 /// See [`Spawner::pause_next_filing`].
@@ -358,6 +360,7 @@ impl Spawner {
             names: AtomicU64::new(0),
             state: Mutex::new(State::default()),
             pause_filing: Mutex::new(None),
+            from_link: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -912,6 +915,8 @@ impl Spawner {
     /// (a restart, a resume), and the supervisor, which never forgets an agent while the node runs, keeps its parent link too.
     pub fn agent_ended(&self, agent: &AgentId) {
         self.approvals.end_helper_grants(agent);
+        // ADR-0119 decision 8: the machines it asked hear that it is gone.
+        self.release_remote(agent, false);
         let withdrawn: Vec<String> = {
             let mut st = self.st();
             let ids: Vec<String> = st
@@ -974,6 +979,7 @@ impl Spawner {
 
     /// Types each new helper's first prompt when a fresh look at its screen allows it (see [`prompt_step`]). Called on the node's tick.
     pub fn tick(&self) {
+        self.remote_tick();
         let mut type_now: Vec<(AgentId, String)> = Vec::new();
         let mut enter_now: Vec<AgentId> = Vec::new();
         let mut gave_up: Vec<(AgentId, String, AgentId)> = Vec::new();
@@ -1108,15 +1114,13 @@ impl Helpers for Spawner {
         let refuse = |e: Error| self.refused(caller, &a.kind, &folder_shown, e);
         // Recorded as every refusal is (`agent_start_refused`).
         self.stopping().map_err(refuse)?;
-        if a.node
+        if let Some(target) = a
+            .node
             .as_deref()
-            .is_some_and(|n| !n.is_empty() && n != self.node_id)
+            .filter(|n| !n.is_empty() && *n != self.node_id)
         {
-            // ADR-0057 allows another machine only when the approval names it; starting there is not built yet, so it is refused.
-            return Err(refuse(
-                Error::new(ErrorCode::ProtocolCapabilityMissing)
-                    .with("capability", "mesh.spawn.remote"),
-            ));
+            // ADR-0119: another machine decides (its own card, or a standing grant there); the hub carries the ask.
+            return self.remote_ask(caller, a, target).map_err(refuse);
         }
         if let Err((e, record)) = self.reserve(caller) {
             return Err(if record { refuse(e) } else { e });
