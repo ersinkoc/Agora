@@ -832,6 +832,7 @@ remote-tailscale_missing = Tailscale is not installed on this machine (there is 
 remote-tailscale_logged_out = Tailscale is installed but this machine is not signed in to your tailnet. Run `tailscale up`, then run this again.
 remote-tailscale_timeout = Tailscale did not answer in time. If it printed a link asking you to allow HTTPS for your tailnet, open it once, then run this again.
 remote-tailscale_unreadable = Tailscale's answer could not be used ({ $reason }). Nothing was changed except what is listed above. Check that `tailscale status` works and that MagicDNS is turned on for your tailnet.
+remote-tailscale_not_operator = Tailscale lets only root or its operator change `tailscale serve`, and this user is neither. Run `sudo tailscale set --operator={ $user }` once, then run this command again. Nothing was changed except what is listed above.
 remote-serve_port_in_use = Tailscale already serves something of yours on HTTPS port { $port }, so Agora leaves it alone. Choose another port with `--port N`.
 remote-names-added = The hub's certificate now names this machine on your tailnet: { $names }. The running hub picks them up within a few seconds; a stopped hub when it starts.
 remote-serve-on = Open Agora from a phone or laptop on your tailnet at { $url } (sign in with a code and the screen password).

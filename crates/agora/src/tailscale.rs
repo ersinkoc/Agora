@@ -43,6 +43,9 @@ pub enum Problem {
     NoName,
     /// The status has a machine name that is not a plain MagicDNS name; it is never used.
     BadName,
+    /// `tailscale serve` was refused: only root or the user Tailscale names as its operator may change it
+    /// (`sudo tailscale set --operator=$USER` once).
+    NotOperator,
 }
 
 impl Problem {
@@ -56,6 +59,7 @@ impl Problem {
             Problem::LoggedOut => "logged_out",
             Problem::NoName => "no_name",
             Problem::BadName => "bad_name",
+            Problem::NotOperator => "not_operator",
         }
     }
 }
@@ -326,17 +330,70 @@ pub fn serve_on(port: u16, target: &str) -> Result<(), Problem> {
         SERVE_WAIT,
     )
     .map(|_| ())
+    .map_err(why_serve_failed)
 }
 
 /// Removes the rule on HTTPS port `port` (and only that one).
 pub fn serve_off(port: u16) -> Result<(), Problem> {
-    run(&["serve", &format!("--https={port}"), "off"], SERVE_WAIT).map(|_| ())
+    run(&["serve", &format!("--https={port}"), "off"], SERVE_WAIT)
+        .map(|_| ())
+        .map_err(why_serve_failed)
+}
+
+/// A `tailscale serve` that failed: [`Problem::NotOperator`] when this user is neither root nor Tailscale's operator (the usual
+/// reason on Linux, where Tailscale says "Access denied: serve config denied"), else the failure as it was. Tailscale's own error
+/// text is never read: its preferences say who the operator is.
+fn why_serve_failed(p: Problem) -> Problem {
+    if p != Problem::Failed {
+        return p;
+    }
+    match run(&["debug", "prefs"], STATUS_WAIT) {
+        Ok(prefs) if operator_missing(&prefs, &this_user()) => Problem::NotOperator,
+        _ => p,
+    }
+}
+
+/// The user this runs as, by name (`USER`, else `LOGNAME`); empty when neither is set.
+pub fn this_user() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_default()
+}
+
+/// Whether `user` (not root, and known) is not the operator Tailscale's preferences (`tailscale debug prefs`) name. Unreadable
+/// preferences or an unknown user say nothing (false).
+fn operator_missing(prefs: &str, user: &str) -> bool {
+    if user.is_empty() || user == "root" {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(prefs) else {
+        return false;
+    };
+    match v.get("OperatorUser") {
+        Some(serde_json::Value::String(op)) => op != user,
+        Some(serde_json::Value::Null) | None => v.is_object(),
+        Some(_) => false,
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Who may change `tailscale serve`, from Tailscale's preferences (the maintainer's blackview, 2026-11-27: "Access denied:
+    /// serve config denied" until `sudo tailscale set --operator=$USER`).
+    #[test]
+    fn a_user_who_is_not_tailscales_operator_is_told_so() {
+        assert!(operator_missing(r#"{"OperatorUser":""}"#, "dev"));
+        assert!(operator_missing(r#"{"OperatorUser":"someone"}"#, "dev"));
+        assert!(operator_missing(r#"{"WantRunning":true}"#, "dev"));
+        assert!(!operator_missing(r#"{"OperatorUser":"dev"}"#, "dev"));
+        assert!(!operator_missing(r#"{"OperatorUser":""}"#, "root"));
+        assert!(!operator_missing(r#"{"OperatorUser":""}"#, ""));
+        assert!(!operator_missing("not json", "dev"));
+        assert!(!operator_missing(r#"{"OperatorUser":7}"#, "dev"));
+    }
 
     /// A program (a shell script) in a folder of its own.
     #[cfg(unix)]

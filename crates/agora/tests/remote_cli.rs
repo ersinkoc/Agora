@@ -51,9 +51,12 @@ case "$1" in
   serve)
     case "$2" in
       status) serve_json; exit 0 ;;
-      --bg) port=${3#--https=}; mkdir -p "$D/rules"; printf '%s' "$4" > "$D/rules/$port"; exit 0 ;;
+      --bg) [ -e "$D/denied" ] && { echo "Access denied: serve config denied" >&2; exit 1; }
+            port=${3#--https=}; mkdir -p "$D/rules"; printf '%s' "$4" > "$D/rules/$port"; exit 0 ;;
       --https=*) port=${2#--https=}; [ "$3" = off ] && rm -f "$D/rules/$port"; exit 0 ;;
     esac ;;
+  debug)
+    [ "$2" = prefs ] && { printf '{"OperatorUser":"%s"}\n' "$(cat "$D/operator" 2>/dev/null)"; exit 0; } ;;
 esac
 exit 1
 "#;
@@ -101,6 +104,7 @@ impl Env {
             .env("AGORA_LANG", "en")
             .env("PATH", &self.path)
             .env("FAKE_TS_DIR", &self.fake)
+            .env("USER", "dev")
             .stdin(Stdio::null());
         c
     }
@@ -205,6 +209,26 @@ fn a_tailnet_machine_gets_its_names_and_a_serve_rule_and_a_url() {
     let (code, out) = e.run(&["remote", "tailscale", "--serve", "--port", "9443"]);
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("https://box.tail1234.ts.net:9443/"), "{out}");
+}
+
+/// The maintainer's blackview (2026-11-27): Tailscale refused `serve` ("Access denied: serve config denied") because the user was not
+/// its operator, and Agora said only that the answer could not be used. Now it names the fix.
+#[cfg(unix)]
+#[test]
+fn a_serve_refused_for_want_of_operator_rights_says_how_to_fix_it() {
+    let e = Env::new("notoperator");
+    e.set_password();
+    std::fs::write(e.fake.join("denied"), "").unwrap();
+    let (code, out) = e.run(&["remote", "tailscale", "--serve"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.tailscale_not_operator"), "{out}");
+    assert!(out.contains("sudo tailscale set --operator=dev"), "{out}");
+    assert!(!e.hub.join("remote-serve").exists());
+    // Refused for another reason while the user is the operator: the failure as it was.
+    std::fs::write(e.fake.join("operator"), "dev").unwrap();
+    let (code, out) = e.run(&["remote", "tailscale", "--serve"]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("remote.tailscale_unreadable"), "{out}");
 }
 
 #[cfg(unix)]

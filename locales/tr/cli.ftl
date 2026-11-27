@@ -815,6 +815,7 @@ remote-tailscale_missing = Bu makinede Tailscale kurulu değil (`tailscale` komu
 remote-tailscale_logged_out = Tailscale kurulu ama bu makine tailnet'inizde oturum açmamış. `tailscale up` çalıştırın, sonra bunu yeniden çalıştırın.
 remote-tailscale_timeout = Tailscale zamanında yanıt vermedi. Tailnet'iniz için HTTPS'e izin vermenizi isteyen bir bağlantı yazdıysa onu bir kez açın, sonra bunu yeniden çalıştırın.
 remote-tailscale_unreadable = Tailscale'in yanıtı kullanılamadı ({ $reason }). Yukarıda yazılanlar dışında hiçbir şey değiştirilmedi. `tailscale status` komutunun çalıştığını ve tailnet'inizde MagicDNS'in açık olduğunu denetleyin.
+remote-tailscale_not_operator = Tailscale `tailscale serve` ayarını yalnızca root'un veya operatörünün değiştirmesine izin veriyor ve bu kullanıcı ikisi de değil. Bir kez `sudo tailscale set --operator={ $user }` çalıştırın, sonra bu komutu yeniden çalıştırın. Yukarıda yazılanlar dışında hiçbir şey değiştirilmedi.
 remote-serve_port_in_use = Tailscale zaten { $port } numaralı HTTPS bağlantı noktasında sizin bir şeyinizi sunuyor, Agora ona dokunmaz. `--port N` ile başka bir bağlantı noktası seçin.
 remote-names-added = Hub'ın sertifikası artık bu makineyi tailnet'inizde şu adlarla anıyor: { $names }. Çalışan hub bunları birkaç saniye içinde alır; durmuş bir hub başlarken alır.
 remote-serve-on = Tailnet'inizdeki bir telefondan veya dizüstünden Agora'yı { $url } adresinde açın (bir kod ve ekran parolasıyla oturum açın).

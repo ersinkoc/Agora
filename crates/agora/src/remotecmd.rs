@@ -259,6 +259,12 @@ fn problem_refusal(say: &Say, p: Problem) -> ExitCode {
             key!("remote-tailscale_timeout"),
             &[],
         ),
+        Problem::NotOperator => refuse(
+            say,
+            "remote.tailscale_not_operator",
+            key!("remote-tailscale_not_operator"),
+            &[("user", tailscale::this_user().into())],
+        ),
         _ => refuse(
             say,
             "remote.tailscale_unreadable",

@@ -8,6 +8,12 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **A CSP error in the window's console on every load** (seen by the maintainer, 2026-11-27): `long.js` (bundled through protobufjs) tries a
+  tiny WebAssembly module for 64-bit multiplication, the hub's page policy refuses it (no `'wasm-unsafe-eval'`, on purpose), and the
+  library falls back to plain JavaScript. Harmless, but noisy: take the probe out of the bundle (a `long` build without it, or an alias),
+  never by widening the page policy.
+- **The hub's own CA is not name-constrained**: a person who adds it to a device's trusted roots to silence the warning trusts it for
+  every site. Constrain new CAs to the hub's names, and steer people to `agora remote tailscale --serve` (a real certificate) first.
 - **Task ownership across receiver reattachment** (ADR-0109): when the receiver's node process restarts instead of reconnecting,
   the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the claim of a
   still-running receiver across holder reattachment without giving it to a replacement run.

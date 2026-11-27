@@ -190,6 +190,7 @@ Not covered here: installing coding agents from the window (ADR-0087).
 | `remote.password_required` | `agora password set`, then repeat the command |
 | `remote.tailscale_missing` / `remote.tailscale_logged_out` | install Tailscale / `tailscale up` |
 | `remote.tailscale_unreadable (bad_name)` | the machine name Tailscale reports is not a plain `.ts.net` name; Agora does not use it. Rename the machine in Tailscale |
+| `remote.tailscale_not_operator` | on Linux, Tailscale lets only root or its operator use `tailscale serve`: run `sudo tailscale set --operator=$USER` once, then the command again |
 | `remote.serve_port_in_use` | choose another port: `agora remote tailscale --serve --port 9443` |
 | `remote.password_in_use` | `agora remote off` first, then `agora password clear` |
 | `remote.proxy_header_invalid` / `remote.proxy_host_invalid` / `remote.proxy_addr_invalid` | give a plain header name, plain public host names (no address, wildcard or port) and IP addresses |
