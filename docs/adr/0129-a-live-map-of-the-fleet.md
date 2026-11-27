@@ -1,6 +1,8 @@
 # 0129. A live map of the fleet
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (the maintainer's answer, "Accept": a fixed radial layout, no new dependency, this window only). The open questions'
+proposed answers stand.
 
 Origin: roadmap M8.8 ("a live graph of the hub, machines, windows, agents and helpers, with the mesh messages, tasks and handoffs moving
 between them, in the web window and the desktop app"; **decision**: an ADR and a graph-drawing dependency first).

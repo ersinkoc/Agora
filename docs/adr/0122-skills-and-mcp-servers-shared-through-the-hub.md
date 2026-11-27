@@ -1,7 +1,7 @@
 # 0122. Skills and MCP servers shared through the hub
 Status: Accepted
 Date: 2026-11-27
-Amended: Amendment A (Proposed, 2026-11-27): the node's launcher gives a shared MCP server its secrets.
+Amended: Amendment A (Accepted 2026-11-27, the maintainer's answer "Accept"): the node's launcher gives a shared MCP server its secrets.
 
 Accepted: 2026-11-27 (the maintainer's answer to the question listing the written decisions). The open questions' proposed answers stand.
 Decided later the same day (the maintainer): the additive `ShareItemSigned.name` (7), for a removal that carries no item, is covered
@@ -90,7 +90,7 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
 4. The window: Settings → Shared, publish and sign, per-machine refusals, the agent's started-with list.
 5. Skills: the `[skills]` manifest section per kind once checked on a real version.
 
-## Amendment A (Proposed, 2026-11-27): the node's launcher gives a shared server its secrets
+## Amendment A (Accepted, 2026-11-27): the node's launcher gives a shared server its secrets
 
 Decision 6 says a `{secret:NAME}` is filled on the node "when the agent starts", but the agent's tool reads its MCP servers from a file
 the agent can read (`<data>/shared-items/agents/<agent>.json`), so a filled value would sit in that file. Step 3b therefore gives no
@@ -120,7 +120,7 @@ policy lets that secret go to shared servers.
 6. **Audit and words.** The node records `share.launch` (the item, the agent, the outcome; never the value). The window's Shared
    section says "needs the secret NAME on MACHINE" and "MACHINE does not let NAME go to shared servers" instead of "not given yet".
 
-Open questions (with proposed answers): (1) `share.secrets` empty by default, so every machine opts in by name: yes. (2) URL servers
+Accepted with the proposed answers. Open questions (with proposed answers): (1) `share.secrets` empty by default, so every machine opts in by name: yes. (2) URL servers
 with secret headers in this step: no, a later step. (3) A new mesh request needs the schema's approval (`shared.launch` is a node-local
 mesh tool, not a hub message): proposed as a mesh tool name only, no schema change; confirm.
 
