@@ -8,7 +8,7 @@
 //! with `ShareItemGet`. Each refusal is said once per version with `ShareItemRefused`. What a launch gets is [`SharedItems::for_launch`]
 //! (step 3b injects it).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -210,7 +210,27 @@ struct Launch {
     item_hash: String,
     project: String,
     kind: String,
+    /// ADR-0133: the one instance of this binding that may be live, if any.
+    instance: Option<Instance>,
+    /// When the last instance ended badly: the next start waits [`RETRY_AFTER`].
+    failed_at: Option<Instant>,
+    /// When instances were started in the last minute (at most [`STARTS_PER_MINUTE`]).
+    starts: VecDeque<Instant>,
 }
+
+/// ADR-0133: a server instance the launcher started (or is starting) for a binding.
+#[derive(Debug, Clone)]
+struct Instance {
+    /// The server's process, as the launcher reported it (where this platform can tell a process again: not on Windows, where the
+    /// launcher binds its server to itself, so the launcher's end is the server's).
+    process: Option<agora_platform::ProcessIdentity>,
+    /// The launcher's connection went away without saying the server ended.
+    dropped: bool,
+}
+
+/// ADR-0133: the least time after an instance ended badly before the next may start, and the most starts a minute per binding.
+pub const RETRY_AFTER: Duration = Duration::from_secs(5);
+pub const STARTS_PER_MINUTE: usize = 6;
 
 /// Reads a secret by name from the node's store.
 pub type SecretReader = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
@@ -316,6 +336,18 @@ impl crate::mesh_server::SharedLaunch for SharedItems {
         launch_id: &str,
     ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
         SharedItems::launch(self, agent.as_str(), item, launch_id)
+    }
+    fn started(&self, agent: &agora_core::AgentId, item: &str, launch_id: &str, pid: u32) {
+        self.instance_started(agent.as_str(), item, launch_id, pid);
+    }
+    fn ended(&self, agent: &agora_core::AgentId, item: &str, launch_id: &str, clean: bool) {
+        self.instance_ended(agent.as_str(), item, launch_id, clean);
+    }
+    fn dropped(&self, agent: &agora_core::AgentId, item: &str, launch_id: &str) {
+        self.instance_dropped(agent.as_str(), item, launch_id);
+    }
+    fn revoked(&self, agent: &agora_core::AgentId, item: &str, launch_id: &str) -> bool {
+        self.instance_revoked(agent.as_str(), item, launch_id)
     }
 }
 
@@ -578,6 +610,9 @@ impl SharedItems {
                             item_hash: w.item_hash.clone(),
                             project: project.to_string(),
                             kind: kind.to_string(),
+                            instance: None,
+                            failed_at: None,
+                            starts: VecDeque::new(),
                         },
                     );
                 }
@@ -739,17 +774,83 @@ impl SharedItems {
         item: &str,
         launch_id: &str,
     ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
-        let Some(given) = self
-            .launches
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(launch_id)
-        else {
-            return Err("unknown_launch");
+        let now = Instant::now();
+        // ADR-0133: the binding stays for the agent's run; one instance at a time, a pause after a bad end, a budget per minute. The
+        // instance is reserved here, so a second ask while this one is answered is refused, and released if this one is refused.
+        let given = {
+            let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(l) = launches.get_mut(launch_id) else {
+                return Err("unknown_launch");
+            };
+            if l.agent != agent || l.item != item {
+                return Err("unknown_launch");
+            }
+            if let Some(inst) = &l.instance {
+                let alive = match &inst.process {
+                    Some(p) => agora_platform::process_still_running(p),
+                    None => !inst.dropped,
+                };
+                if alive {
+                    crate::log_line!("shared launch: {agent} {item} refused: instance_live");
+                    return Err("instance_live");
+                }
+                l.instance = None;
+            }
+            if l.failed_at
+                .is_some_and(|t| now.saturating_duration_since(t) < RETRY_AFTER)
+            {
+                return Err("too_soon");
+            }
+            while l
+                .starts
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= Duration::from_secs(60))
+            {
+                l.starts.pop_front();
+            }
+            if l.starts.len() >= STARTS_PER_MINUTE {
+                crate::log_line!("shared launch: {agent} {item} refused: start_budget");
+                return Err("start_budget");
+            }
+            l.instance = Some(Instance {
+                process: None,
+                dropped: false,
+            });
+            l.starts.push_back(now);
+            (l.item_hash.clone(), l.project.clone(), l.kind.clone())
         };
-        if given.agent != agent || given.item != item {
-            return Err("unknown_launch");
+        let answer = self.plan_for(item, &given);
+        let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+        match &answer {
+            Ok(_) => crate::log_line!("shared launch: {agent} {item} started"),
+            Err(reason) => {
+                crate::log_line!("shared launch: {agent} {item} refused: {reason}");
+                if let Some(l) = launches.get_mut(launch_id) {
+                    l.instance = None;
+                    l.starts.pop_back();
+                }
+            }
         }
+        answer
+    }
+
+    /// The program of `item` with its secrets filled, judged again with today's trust and policy, for the version, project and kind
+    /// the binding `(item hash, project, kind)` was made for.
+    fn plan_for(
+        &self,
+        item: &str,
+        given: &(String, String, String),
+    ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
+        struct Given<'a> {
+            item_hash: &'a str,
+            project: &'a str,
+            kind: &'a str,
+        }
+        let given = Given {
+            item_hash: &given.0,
+            project: &given.1,
+            kind: &given.2,
+        };
         self.rejudge();
         let (m, allowed) = {
             let st = self.st();
@@ -761,8 +862,8 @@ impl SharedItems {
             if w.item_hash != given.item_hash
                 || !covers(
                     &w.scope.clone().unwrap_or_default(),
-                    &given.project,
-                    &given.kind,
+                    given.project,
+                    given.kind,
                 )
             {
                 return Err("unknown_item");
@@ -794,6 +895,83 @@ impl SharedItems {
             args: m.args,
             env,
         })
+    }
+
+    /// ADR-0133: the launcher started the server of the binding `launch_id` as process `pid`.
+    pub fn instance_started(&self, agent: &str, item: &str, launch_id: &str, pid: u32) {
+        let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(inst) = launches
+            .get_mut(launch_id)
+            .filter(|l| l.agent == agent && l.item == item)
+            .and_then(|l| l.instance.as_mut())
+        {
+            inst.process = agora_platform::process_identity(pid).ok();
+        }
+    }
+
+    /// ADR-0133: the launcher said the server ended (`clean`: it exited with 0); a bad end makes the next start wait.
+    pub fn instance_ended(&self, agent: &str, item: &str, launch_id: &str, clean: bool) {
+        let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = launches
+            .get_mut(launch_id)
+            .filter(|l| l.agent == agent && l.item == item)
+        {
+            l.instance = None;
+            if !clean {
+                l.failed_at = Some(Instant::now());
+            }
+            crate::log_line!(
+                "shared launch: {agent} {item} ended{}",
+                if clean { "" } else { " badly" }
+            );
+        }
+    }
+
+    /// ADR-0133: the launcher's connection went away without saying the server ended. A server whose process is known and still runs
+    /// keeps the binding taken until it ends; otherwise the instance is over, as a bad end.
+    pub fn instance_dropped(&self, agent: &str, item: &str, launch_id: &str) {
+        let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(l) = launches
+            .get_mut(launch_id)
+            .filter(|l| l.agent == agent && l.item == item)
+        {
+            match l.instance.as_mut() {
+                Some(inst)
+                    if inst
+                        .process
+                        .as_ref()
+                        .is_some_and(agora_platform::process_still_running) =>
+                {
+                    inst.dropped = true;
+                }
+                Some(_) => {
+                    l.instance = None;
+                    l.failed_at = Some(Instant::now());
+                }
+                None => {}
+            }
+            crate::log_line!("shared launch: {agent} {item} launcher gone");
+        }
+    }
+
+    /// ADR-0133: whether the launcher should close its server now: the binding is gone (the agent ended), or the item it was made for
+    /// is no longer in use here as that version and scope (removed, replaced, its signer untrusted, the policy changed).
+    pub fn instance_revoked(&self, agent: &str, item: &str, launch_id: &str) -> bool {
+        let binding = {
+            let launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+            match launches.get(launch_id) {
+                Some(l) if l.agent == agent && l.item == item => {
+                    (l.item_hash.clone(), l.project.clone(), l.kind.clone())
+                }
+                _ => return true,
+            }
+        };
+        let st = self.st();
+        !st.policy.on
+            || !st.used.get(item).is_some_and(|w| {
+                w.item_hash == binding.0
+                    && covers(&w.scope.clone().unwrap_or_default(), &binding.1, &binding.2)
+            })
     }
 
     /// The agent ended: its file of shared servers is removed, what it was given forgotten, and its launch ids spent.
@@ -1641,9 +1819,10 @@ mod tests {
         );
         assert_eq!(
             s.launch("agent-1", "db", &id),
-            Err("unknown_launch"),
-            "single use"
+            Err("instance_live"),
+            "one instance at a time (ADR-0133)"
         );
+        s.instance_ended("agent-1", "db", &id, true);
         // Only the newest launch's id for an item is live.
         let first = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
         let second = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
@@ -1711,6 +1890,65 @@ mod tests {
         assert_eq!(s.launch("agent-1", "db", &id), Err("unknown_launch"));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// ADR-0133: a binding lasts the agent's run: one instance at a time, a new one after a clean end, a pause after a bad end, at most
+    /// six starts a minute; a launcher gone while its server (a process this node can tell) still runs keeps the binding taken; a
+    /// removed item or an ended agent tells the launcher to close.
+    #[test]
+    fn a_shared_server_restarts_within_its_agents_run_within_bounds() {
+        let d = temp("restart");
+        let s = open(
+            &d,
+            SharePolicy {
+                secrets: ["DB".to_string()].into_iter().collect(),
+                ..SharePolicy::default()
+            },
+        );
+        let mut db = item("db", "npx", "");
+        db.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_URL".into(),
+            value: "{secret:DB}".into(),
+        }];
+        s.take(word("db", Some(db), 1, ShareScope::default()));
+        s.set_secrets(Box::new(|n| {
+            (n == "DB").then(|| "postgres://x".to_string())
+        }));
+        let sock = Path::new("/run/m/agent-1.sock");
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        // Clean ends: a new instance each time, up to the budget.
+        for _ in 0..STARTS_PER_MINUTE {
+            assert!(s.launch("agent-1", "db", &id).is_ok());
+            assert_eq!(s.launch("agent-1", "db", &id), Err("instance_live"));
+            s.instance_ended("agent-1", "db", &id, true);
+        }
+        assert_eq!(s.launch("agent-1", "db", &id), Err("start_budget"));
+        // A bad end, or a launcher gone with no server known, makes the next start wait.
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        assert!(s.launch("agent-1", "db", &id).is_ok());
+        s.instance_ended("agent-1", "db", &id, false);
+        assert_eq!(s.launch("agent-1", "db", &id), Err("too_soon"));
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        assert!(s.launch("agent-1", "db", &id).is_ok());
+        s.instance_dropped("agent-1", "db", &id);
+        assert_eq!(s.launch("agent-1", "db", &id), Err("too_soon"));
+        // A launcher gone while its server still runs (this test's own process stands for it): still taken.
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        assert!(s.launch("agent-1", "db", &id).is_ok());
+        s.instance_started("agent-1", "db", &id, std::process::id());
+        s.instance_dropped("agent-1", "db", &id);
+        if agora_platform::process_identity(std::process::id()).is_ok() {
+            assert_eq!(s.launch("agent-1", "db", &id), Err("instance_live"));
+        }
+        // Another agent's notices change nothing; removal and the agent's end tell the launcher to close.
+        s.instance_ended("agent-2", "db", &id, true);
+        assert!(!s.instance_revoked("agent-1", "db", &id));
+        assert!(s.instance_revoked("agent-2", "db", &id));
+        s.take(word("db", None, 2, ShareScope::default()));
+        assert!(s.instance_revoked("agent-1", "db", &id), "removed");
+        s.agent_ended("agent-1");
+        assert!(s.instance_revoked("agent-1", "db", &id), "the agent ended");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// An item may not set what a loader or an interpreter reads first: an allowed program would then run anything.

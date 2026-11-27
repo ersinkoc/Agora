@@ -71,3 +71,18 @@ recovery without a fresh trust check and denial when instance liveness is unknow
 arguments, user configuration, logs, audit records and hub frames for the generated values. Exercise
 redirect and destination refusals, bounded requests and bridge shutdown with a synthetic endpoint.
 Run the launcher cases on Linux, macOS and Windows for each supported lifecycle path.
+
+## Status of the build
+
+Program restarts (decisions 1–3, 5 in part): built (2026-11-27). The launch id is a run-scoped binding (`crates/agora-node/src/shared_items.rs`
+`Launch`): the node keeps it until the agent ends, admits one instance at a time (a second ask is `instance_live`), refuses a start within
+5 s of a bad end (`too_soon`) or past six a minute (`start_budget`), and judges the item again before each instance. `agora mcp-launch`
+keeps its connection open while the server runs, says `agora/shared_launch_started` (the server's pid) and `agora/shared_launch_ended` (its
+exit code), and closes the server on `agora/shared_launch_close`, which the node sends when the item is removed, changed, no longer
+trusted or out of policy, or the agent ended (`mesh_server.rs` `LaunchesHeld`, `launch_notice`). A connection that ends without the
+end said is a drop: a server whose process the node can tell (pid, start time, boot) and that still runs keeps the binding taken; on
+Windows the server is in the launcher's kill-on-close job (`agora_platform::spawn_bound`), so the drop is its end. Asked while the node
+still lets the previous server go, the launcher asks again for up to 8 s. Outcomes are logged on the node with agent, item and reason,
+never a value. Tests: `a_shared_server_restarts_within_its_agents_run_within_bounds`, `launcher_notices_follow_the_instances_its_connection_holds`,
+`crates/agora/tests/mcp_launch.rs`. Not built: recovering a binding after a node restart for a holder-backed run (the agent restarts), the
+URL bridge (decision 4), and an audit record beyond the node's log.

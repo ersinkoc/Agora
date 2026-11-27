@@ -12,9 +12,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   session), the phone's view of a machine's figures and of disks running low, and ADR-0064's clean-up buttons in the window.
 - **Shared MCP servers at a URL whose headers need a secret** (ADR-0122 Amendment A point 4): still refused (`secret_needs_launcher`);
   the launcher could become a small stdio-to-HTTP bridge that adds the headers. Also a `share.launch` audit row on the node.
-- **Shared items after a crash restart** (review of 553cd461): the restart reuses the first launch's arguments, so a shared server that
-  needs a secret answers `unknown_launch` (its single-use id was spent, ADR-0122 Amendment A point 5; ADR-0133, Accepted, is the fix), and items
-  revoked between the crash and the restart are still given until the agent's next real start.
+- **Shared items after a crash restart** (review of 553cd461): items revoked between an agent's crash and its restart are still given
+  until the agent's next real start (the restart reuses the first launch's arguments); a secret server's launcher is judged again at each
+  instance (ADR-0133), so only servers without a secret and skills keep what they had. ADR-0133's node-restart recovery for a held run and
+  the URL bridge are not built.
 - **Shared skills, smaller gaps** (review of 5c7c1410): a kind with `[skills]` but no `[mcp]` (or no mesh endpoint) gets no skill,
   since the shared items are handed out with the mesh server; every agent's plugin folder is named `shared`, which would clash with a
   person's own plugin of that name in Claude Code.

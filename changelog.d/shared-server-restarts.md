@@ -1,0 +1,1 @@
+- A shared MCP server that needs a secret can start again within the same agent run (after a crash or a reconnect), one at a time and at most six times a minute; it is closed when its item is removed or changed (ADR-0133).

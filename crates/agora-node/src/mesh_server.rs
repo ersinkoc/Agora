@@ -204,6 +204,11 @@ type HelpersSlot = Mutex<Option<Arc<dyn Helpers>>>;
 /// ADR-0122 Amendment A: the node's launcher for a shared MCP server that names a secret asks over the agent's own mesh socket, with
 /// this JSON-RPC method (never a tool: no agent's tool list names it), for what to start.
 pub const SHARED_LAUNCH_METHOD: &str = "agora/shared_launch";
+/// ADR-0133: the launcher's notices on the same connection: it started the server (`{item, launch_id, pid}`), the server ended
+/// (`{item, launch_id, code}`); and the node's notice to it to close the server now (`{item}`).
+pub const SHARED_LAUNCH_STARTED: &str = "agora/shared_launch_started";
+pub const SHARED_LAUNCH_ENDED: &str = "agora/shared_launch_ended";
+pub const SHARED_LAUNCH_CLOSE: &str = "agora/shared_launch_close";
 
 /// What a launcher starts: the item's program, its arguments and its environment with the secrets filled.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,6 +226,71 @@ pub trait SharedLaunch: Send + Sync {
         item: &str,
         launch_id: &str,
     ) -> Result<LaunchPlan, &'static str>;
+    /// ADR-0133: the launcher started the server as process `pid`.
+    fn started(&self, _agent: &AgentId, _item: &str, _launch_id: &str, _pid: u32) {}
+    /// ADR-0133: the launcher said its server ended (`clean`: exit code 0).
+    fn ended(&self, _agent: &AgentId, _item: &str, _launch_id: &str, _clean: bool) {}
+    /// ADR-0133: the launcher's connection ended without saying its server ended.
+    fn dropped(&self, _agent: &AgentId, _item: &str, _launch_id: &str) {}
+    /// ADR-0133: whether the launcher should close its server now (the item was removed or changed, the agent ended).
+    fn revoked(&self, _agent: &AgentId, _item: &str, _launch_id: &str) -> bool {
+        false
+    }
+}
+
+/// ADR-0133: the server instances a connection's launcher holds, `(item, launch id, told to close)`. When the connection ends, each
+/// one still held is said dropped, however the connection ended.
+struct LaunchesHeld {
+    launcher: Option<Arc<dyn SharedLaunch>>,
+    agent: AgentId,
+    held: Vec<(String, String, bool)>,
+}
+
+impl Drop for LaunchesHeld {
+    fn drop(&mut self) {
+        if let Some(l) = &self.launcher {
+            for (item, id, _) in self.held.drain(..) {
+                l.dropped(&self.agent, &item, &id);
+            }
+        }
+    }
+}
+
+/// ADR-0133: the launcher's notice that it started or ended a server; `true` when the line was one.
+fn launch_notice(text: &str, agent: &AgentId, held: &mut LaunchesHeld) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return false;
+    };
+    let method = v.get("method").and_then(Value::as_str);
+    if method != Some(SHARED_LAUNCH_STARTED) && method != Some(SHARED_LAUNCH_ENDED) {
+        return false;
+    }
+    let Some(launcher) = held.launcher.clone() else {
+        return true;
+    };
+    let p = v.get("params").cloned().unwrap_or(Value::Null);
+    let (item, id) = (
+        p.get("item").and_then(Value::as_str).unwrap_or(""),
+        p.get("launch_id").and_then(Value::as_str).unwrap_or(""),
+    );
+    // Only an instance this connection was given: a notice about another is ignored.
+    let Some(at) = held.held.iter().position(|(i, l, _)| i == item && l == id) else {
+        return true;
+    };
+    if method == Some(SHARED_LAUNCH_STARTED) {
+        if let Some(pid) = p
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|x| u32::try_from(x).ok())
+        {
+            launcher.started(agent, item, id, pid);
+        }
+    } else {
+        let clean = p.get("code").and_then(Value::as_i64) == Some(0);
+        launcher.ended(agent, item, id, clean);
+        held.held.remove(at);
+    }
+    true
 }
 
 type LaunchSlot = Mutex<Option<Arc<dyn SharedLaunch>>>;
@@ -287,7 +357,12 @@ fn preview_reply(
 
 /// The answer to one [`SHARED_LAUNCH_METHOD`] request on `agent`'s socket; `None` when the line is not one. The answer to a refusal
 /// is a JSON-RPC error (-32001) whose data names the reason; never the secret's value in either.
-fn launch_reply(text: &str, agent: &AgentId, launcher: &dyn SharedLaunch) -> Option<Message> {
+fn launch_reply(
+    text: &str,
+    agent: &AgentId,
+    launcher: &dyn SharedLaunch,
+    granted: &mut Vec<(String, String, bool)>,
+) -> Option<Message> {
     let v: Value = serde_json::from_str(text).ok()?;
     if v.get("method").and_then(Value::as_str) != Some(SHARED_LAUNCH_METHOD) {
         return None;
@@ -301,14 +376,17 @@ fn launch_reply(text: &str, agent: &AgentId, launcher: &dyn SharedLaunch) -> Opt
     };
     let (item, launch_id) = (param("item"), param("launch_id"));
     Some(match launcher.launch(agent, item, launch_id) {
-        Ok(plan) => Message::Response {
-            id,
-            result: json!({
-                "command": plan.command,
-                "args": plan.args,
-                "env": plan.env.into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>(),
-            }),
-        },
+        Ok(plan) => {
+            granted.push((item.to_string(), launch_id.to_string(), false));
+            Message::Response {
+                id,
+                result: json!({
+                    "command": plan.command,
+                    "args": plan.args,
+                    "env": plan.env.into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>(),
+                }),
+            }
+        }
         Err(reason) => Message::ErrorResponse {
             id,
             code: -32001,
@@ -3053,6 +3131,8 @@ struct Session<'a> {
     /// Batches (2025-03-26) with a request still waiting; each is sent whole once the last of them is answered (#981). Every one
     /// holds a waiting call, so the limits on those (open asks, `agent_wait`s, starts) bound how many there are.
     batches: Vec<BatchReply>,
+    /// ADR-0133: the shared server instances this connection's launcher holds.
+    launches: LaunchesHeld,
 }
 
 /// What routing one message did.
@@ -3083,8 +3163,12 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
     }
     // ADR-0122 Amendment A: the node's own launcher asks for a shared server's program; never the broker's, never a tool.
     if let Some(l) = &links.launch {
-        if let Some(msg) = launch_reply(text, s.conn.agent(), l.as_ref()) {
+        if let Some(msg) = launch_reply(text, s.conn.agent(), l.as_ref(), &mut s.launches.held) {
             return Step::Reply(msg);
+        }
+        let agent = s.conn.agent().clone();
+        if launch_notice(text, &agent, &mut s.launches) {
+            return Step::Silent;
         }
     }
     // ADR-0057: starting and following helpers is the node's, not the broker's.
@@ -3314,6 +3398,11 @@ fn serve(
             outputs: HashSet::new(),
         },
         batches: Vec::new(),
+        launches: LaunchesHeld {
+            launcher: links.launch.clone(),
+            agent: agent.clone(),
+            held: Vec::new(),
+        },
     };
     let mut line: Vec<u8> = Vec::new();
     while !stop.load(Ordering::Acquire) {
@@ -3372,6 +3461,18 @@ fn serve(
         .is_err()
         {
             return;
+        }
+        // ADR-0133: a server whose item was removed or changed, or whose agent ended, is told to close (once).
+        if let Some(l) = s.launches.launcher.clone() {
+            for (item, id, told) in s.launches.held.iter_mut().filter(|h| !h.2) {
+                if l.revoked(agent, item, id) {
+                    *told = true;
+                    let notice = json!({"jsonrpc": "2.0", "method": SHARED_LAUNCH_CLOSE, "params": {"item": item}});
+                    if writeln!(writer, "{notice}").is_err() {
+                        return;
+                    }
+                }
+            }
         }
         if poll_inbox(
             &mut s.inbox_waits,
@@ -3491,9 +3592,18 @@ mod tests {
             let line = format!(
                 r#"{{"jsonrpc":"2.0","id":7,"method":"agora/shared_launch","params":{{"item":"db","launch_id":"{id}"}}}}"#
             );
-            launch_reply(&line, &AgentId::new(agent), &One)
-                .map(|m| agora_protocol::jsonrpc::to_line(&m))
+            let mut granted = Vec::new();
+            let answer = launch_reply(&line, &AgentId::new(agent), &One, &mut granted)
+                .map(|m| agora_protocol::jsonrpc::to_line(&m));
+            (answer, granted.len())
         };
+        assert_eq!(
+            ask("agent-1", "abc").1,
+            1,
+            "a granted instance is held by the connection"
+        );
+        assert_eq!(ask("agent-2", "abc").1, 0);
+        let ask = |agent: &str, id: &str| ask(agent, id).0;
         let ok = ask("agent-1", "abc").unwrap();
         assert!(
             ok.contains(r#""result":{"args":["db"],"command":"npx","env":{"T":"s"}}"#)
@@ -3507,9 +3617,90 @@ mod tests {
         assert!(launch_reply(
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
             &AgentId::new("agent-1"),
-            &One
+            &One,
+            &mut Vec::new()
         )
         .is_none());
+    }
+
+    /// ADR-0133: the launcher's notices reach the node only for an instance its connection was given; the end of the connection says
+    /// every instance still held dropped.
+    #[test]
+    fn launcher_notices_follow_the_instances_its_connection_holds() {
+        #[derive(Default)]
+        struct Log(Mutex<Vec<String>>);
+        impl SharedLaunch for Log {
+            fn launch(&self, _: &AgentId, _: &str, _: &str) -> Result<LaunchPlan, &'static str> {
+                Err("unknown_launch")
+            }
+            fn started(&self, a: &AgentId, item: &str, id: &str, pid: u32) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("started {} {item} {id} {pid}", a.as_str()));
+            }
+            fn ended(&self, a: &AgentId, item: &str, id: &str, clean: bool) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("ended {} {item} {id} {clean}", a.as_str()));
+            }
+            fn dropped(&self, a: &AgentId, item: &str, id: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("dropped {} {item} {id}", a.as_str()));
+            }
+        }
+        let log = Arc::new(Log::default());
+        let agent = AgentId::new("agent-1");
+        let notice = |method: &str, item: &str, extra: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"{method}","params":{{"item":"{item}","launch_id":"L"{extra}}}}}"#
+            )
+        };
+        {
+            let mut held = LaunchesHeld {
+                launcher: Some(log.clone() as Arc<dyn SharedLaunch>),
+                agent: agent.clone(),
+                held: vec![
+                    ("db".into(), "L".into(), false),
+                    ("docs".into(), "L".into(), false),
+                ],
+            };
+            assert!(launch_notice(
+                &notice(SHARED_LAUNCH_STARTED, "db", r#","pid":42"#),
+                &agent,
+                &mut held
+            ));
+            assert!(
+                launch_notice(
+                    &notice(SHARED_LAUNCH_STARTED, "other", r#","pid":1"#),
+                    &agent,
+                    &mut held
+                ),
+                "taken, ignored"
+            );
+            assert!(launch_notice(
+                &notice(SHARED_LAUNCH_ENDED, "db", r#","code":0"#),
+                &agent,
+                &mut held
+            ));
+            assert!(!launch_notice(
+                r#"{"jsonrpc":"2.0","method":"tools/list"}"#,
+                &agent,
+                &mut held
+            ));
+            assert_eq!(held.held.len(), 1);
+        }
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            [
+                "started agent-1 db L 42",
+                "ended agent-1 db L true",
+                "dropped agent-1 docs L"
+            ]
+        );
     }
 
     /// A test's folder, removed when the test ends, whether it passed or not.
