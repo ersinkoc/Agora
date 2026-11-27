@@ -244,6 +244,7 @@ pub(crate) async fn run(hub: &Hub) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
