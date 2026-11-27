@@ -158,6 +158,15 @@ impl Reported {
     }
 }
 
+/// ADR-0119 decision 10: a helper's parent on another machine (the hub-written origin and that machine's agent), and the standing grant
+/// it started under (empty when it was asked).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteParent {
+    pub node: String,
+    pub agent: String,
+    pub grant_id: String,
+}
+
 /// Writes protocol events to the durable buffer.
 pub struct EventSink {
     producer: String,
@@ -846,7 +855,9 @@ impl EventSink {
         parent: &str,
     ) {
         let none = crate::launch_options::LaunchChoice::default();
-        self.agent_started_with(agent, project, node, worktree, kind, parent, &none, None);
+        self.agent_started_with(
+            agent, project, node, worktree, kind, parent, &none, None, None,
+        );
     }
 
     /// [`Self::agent_started_by`] with the launch options the agent was started with (ADR-0059).
@@ -861,6 +872,7 @@ impl EventSink {
         parent: &str,
         launch: &crate::launch_options::LaunchChoice,
         run_id: Option<[u8; 16]>,
+        remote: Option<&RemoteParent>,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
             run_id: run_id.map(Vec::from).unwrap_or_default(),
@@ -874,9 +886,9 @@ impl EventSink {
             same_process: false,
             launch_options: launch.ids.clone(),
             skips_permissions: launch.skips_permissions,
-            grant_id: String::new(),
-            parent_node_id: String::new(),
-            parent_node_agent_id: String::new(),
+            grant_id: remote.map(|r| r.grant_id.clone()).unwrap_or_default(),
+            parent_node_id: remote.map(|r| r.node.clone()).unwrap_or_default(),
+            parent_node_agent_id: remote.map(|r| r.agent.clone()).unwrap_or_default(),
         }));
     }
 
@@ -1244,7 +1256,17 @@ impl EventSink {
             path: worktree_id.clone(),
             branch: branch.to_string(),
         }));
-        self.agent_started_with(agent, project, node, &worktree_id, kind, "", launch, run_id);
+        self.agent_started_with(
+            agent,
+            project,
+            node,
+            &worktree_id,
+            kind,
+            "",
+            launch,
+            run_id,
+            None,
+        );
         if !has_terminal {
             return; // an adapter agent has no terminal
         }
@@ -1277,7 +1299,7 @@ impl EventSink {
         launch: &crate::launch_options::LaunchChoice,
         run_id: Option<[u8; 16]>,
     ) {
-        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch, run_id);
+        self.workspace_agent_launched(agent, workspace, kind, terminal, "", launch, run_id, None);
     }
 
     /// [`Self::directory_agent_launched`] for a helper `parent` started (ADR-0057); `parent` empty means the user.
@@ -1294,7 +1316,34 @@ impl EventSink {
     ) {
         // ADR-0059 decision 5: a helper has launch options only when the user's signed decision named them (never inherited); the
         // event carries them, so every client shows the "does not ask" badge on it.
-        self.workspace_agent_launched(agent, workspace, kind, terminal, parent, launch, run_id);
+        self.workspace_agent_launched(
+            agent, workspace, kind, terminal, parent, launch, run_id, None,
+        );
+    }
+
+    /// ADR-0119: a helper another machine asked for: as [`Self::helper_launched`], with its parent on that machine and the grant it
+    /// started under (if any) on its `AgentStarted`, and no local parent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remote_helper_launched(
+        &self,
+        agent: &AgentId,
+        workspace: &v1::WorkspaceRegistered,
+        kind: &str,
+        terminal: bool,
+        remote: &RemoteParent,
+        launch: &crate::launch_options::LaunchChoice,
+        run_id: Option<[u8; 16]>,
+    ) {
+        self.workspace_agent_launched(
+            agent,
+            workspace,
+            kind,
+            terminal,
+            "",
+            launch,
+            run_id,
+            Some(remote),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1307,6 +1356,7 @@ impl EventSink {
         parent: &str,
         launch: &crate::launch_options::LaunchChoice,
         run_id: Option<[u8; 16]>,
+        remote: Option<&RemoteParent>,
     ) {
         self.record(Body::WorkspaceRegistered(workspace.clone()));
         self.record(Body::AgentWorkspaceBound(v1::AgentWorkspaceBound {
@@ -1322,6 +1372,7 @@ impl EventSink {
             parent,
             launch,
             run_id,
+            remote,
         );
         if terminal {
             self.record(Body::TerminalOpened(v1::TerminalOpened {
@@ -2710,6 +2761,10 @@ impl Node {
                                 continue;
                             }
                             if spawner.expired(&node_approval) {
+                                continue;
+                            }
+                            // ADR-0119: a card for another machine's start; its asker hears `approval.expired`.
+                            if spawner.remote_expired(&node_approval) {
                                 continue;
                             }
                             let call = sup

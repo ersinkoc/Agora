@@ -1470,6 +1470,20 @@ impl NodeApprovals {
         Some(p)
     }
 
+    /// ADR-0119: another machine asks this node to start a helper. Returns the pending `agent.start.remote` card to announce, bound to the
+    /// asking machine and agent, or `None` if no safe id could be made. Routed like a local start (no agent of this node asked).
+    pub fn request_remote_start(
+        &self,
+        detail: &str,
+        remote: RemoteBinding,
+        now_ms: u64,
+    ) -> Option<Pending> {
+        let mut routes = self.r();
+        let p = self.q().request_remote(detail, remote, now_ms, 0)?;
+        routes.insert(p.id.clone(), (agora_core::AgentId::new(""), String::new()));
+        Some(p)
+    }
+
     /// Limits which requests each device may answer (`device.<id>.projects` in the policy file).
     pub fn set_limits(&self, limits: std::sync::Arc<crate::limits::DeviceLimits>) {
         *self.limits.lock().unwrap_or_else(|e| e.into_inner()) = Some(limits);
@@ -2587,12 +2601,7 @@ mod tests {
         };
         let mut a = fresh();
         let p = remote_card(&mut a, r#"{"kind":"codex"}"#);
-        for (approved, g) in [
-            (false, six),
-            (true, past),
-            (true, over),
-            (true, flags_only),
-        ] {
+        for (approved, g) in [(false, six), (true, past), (true, over), (true, flags_only)] {
             assert_eq!(
                 a.resolve(&remote_decision(&p, approved, g, &g), 2_000),
                 Err(ApprovalError::BadSignature),

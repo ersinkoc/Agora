@@ -1588,6 +1588,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 }
                 return Ok(ok_empty());
             }
+            // ADR-0119: a start another machine asked for, verified over v4 above.
+            if resolution.request.action == crate::approvals::REMOTE_START_ACTION {
+                if let Some(s) = &ctx.spawn {
+                    s.remote_decided(&resolution.request, r, now)?;
+                }
+                return Ok(ok_empty());
+            }
             // ADR-0090 Amendment A: a switch to a mode or option that skips permissions is the node's own request, decided over its own
             // domain; its answer never goes to an adapter.
             if resolution.request.action == crate::approvals::SKIP_ACTION {

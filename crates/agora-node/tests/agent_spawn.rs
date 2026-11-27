@@ -1601,3 +1601,172 @@ fn a_secret_in_a_helper_starts_prompt_never_reaches_its_card() {
     let (v, is_error) = m.result(call);
     assert!(!is_error, "{v}");
 }
+
+fn wall_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+/// ADR-0119: a start another machine asks for, as the hub carries it (origin and root written by the hub).
+fn remote_ask(e: &Env, start: u8, run: u8) -> v1::HelperStart {
+    v1::HelperStart {
+        start_id: vec![start; 16],
+        target_node: NODE.into(),
+        kind: "probe".into(),
+        folder: agora_platform::canonicalize_plain(&e.folder)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        prompt: String::new(),
+        from_agent: "agent-3".into(),
+        from_run_id: vec![run; 16],
+        origin: "mac".into(),
+        from_agent_kind: "claude-code".into(),
+        depth: 0,
+        root_node: "mac".into(),
+        root_agent: "agent-3".into(),
+        root_run_id: vec![run; 16],
+        ..Default::default()
+    }
+}
+
+fn started_events(e: &Env) -> Vec<v1::AgentStarted> {
+    e.node()
+        .events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|ev| match ev.body {
+            Some(Body::AgentStarted(s)) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+/// ADR-0119 step 2: off unless the node's policy allows it; the first start from another machine raises an `agent.start.remote`
+/// card decided over v4; a standing grant then covers the next starts of that run, up to its number, without a card; the helper
+/// names its parent on the other machine; the outcome is queued for the hub; a revoked grant covers nothing.
+#[test]
+fn a_start_from_another_machine_asks_once_and_a_grant_covers_the_next() {
+    use agora_node::approvals::{start_signed_message_v4, REMOTE_START_ACTION};
+    if !supported() {
+        return;
+    }
+    let e = Env::new("remote");
+    let sp = &e.node().spawner;
+    let refused = sp
+        .remote_start(&remote_ask(&e, 1, 9), wall_ms())
+        .unwrap_err();
+    assert_eq!(refused.code.as_str(), "node.policy_denied");
+    sp.set_remote_helpers(true);
+    // A folder that is not a full path on this machine is refused before anyone is asked.
+    let mut relative = remote_ask(&e, 1, 9);
+    relative.folder = "work".into();
+    assert_eq!(
+        sp.remote_start(&relative, wall_ms())
+            .unwrap_err()
+            .code
+            .as_str(),
+        "mesh.folder_not_allowed"
+    );
+    let first = sp.remote_start(&remote_ask(&e, 1, 9), wall_ms()).unwrap();
+    assert!(
+        !first.granted && !first.approval_id.is_empty() && first.ttl_ms > 0,
+        "{first:?}"
+    );
+    let p = e
+        .node()
+        .approvals
+        .waiting()
+        .into_iter()
+        .find(|p| p.id == first.approval_id)
+        .unwrap();
+    assert_eq!(p.action, REMOTE_START_ACTION);
+    let detail: Value = serde_json::from_str(&p.detail).unwrap();
+    assert_eq!(
+        (
+            detail["origin_node"].as_str(),
+            detail["origin_agent_kind"].as_str()
+        ),
+        (Some("mac"), Some("claude-code"))
+    );
+    let grant = v1::RemoteGrant {
+        max_running: 2,
+        ..Default::default()
+    };
+    let sig = e.sign(&start_signed_message_v4(
+        NODE,
+        p.remote.as_ref().unwrap(),
+        &p.id,
+        true,
+        &[],
+        &[],
+        &grant,
+        &p.detail,
+    ));
+    e.client()
+        .call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: DEVICE.into(),
+            signature: sig,
+            remote_grant: Some(grant),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let results = sp.take_remote_results();
+    assert_eq!(results.len(), 1, "{results:?}");
+    let helper = results[0].agent_id.clone();
+    assert!(
+        !helper.is_empty() && results[0].error.is_none(),
+        "{results:?}"
+    );
+    assert_eq!(
+        (results[0].to_node.as_str(), results[0].start_id.clone()),
+        ("mac", vec![1; 16])
+    );
+    let s = started_events(&e)
+        .into_iter()
+        .find(|s| s.agent_id == helper)
+        .unwrap();
+    assert_eq!(
+        (
+            s.parent_agent_id.as_str(),
+            s.parent_node_id.as_str(),
+            s.parent_node_agent_id.as_str(),
+            s.grant_id.as_str()
+        ),
+        ("", "mac", "agent-3", "")
+    );
+    // The next start of the same run is covered: no card, the grant named on its `AgentStarted`.
+    let second = sp.remote_start(&remote_ask(&e, 2, 9), wall_ms()).unwrap();
+    assert!(second.granted && second.grant_id == p.id, "{second:?}");
+    let r2 = sp.take_remote_results();
+    let s2 = started_events(&e)
+        .into_iter()
+        .find(|s| s.agent_id == r2[0].agent_id)
+        .unwrap();
+    assert_eq!(s2.grant_id, p.id);
+    let listed = sp.remote_grants(wall_ms());
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        (listed[0].origin_node.as_str(), listed[0].max_running),
+        ("mac", 2)
+    );
+    // Another run of the same agent is not covered (a grant without `chain` is for the asking run only): it is asked.
+    let other_run = sp.remote_start(&remote_ask(&e, 3, 8), wall_ms()).unwrap();
+    assert!(!other_run.granted);
+    // Revoked: the same run is asked again (its card limit per machine is 2: this is the second).
+    assert!(sp.revoke_remote_grant(&p.id));
+    assert!(sp.remote_grants(wall_ms()).is_empty());
+    let after = sp.remote_start(&remote_ask(&e, 4, 9), wall_ms()).unwrap();
+    assert!(!after.granted);
+    // A third card from the same machine while two wait is refused.
+    let over = sp
+        .remote_start(&remote_ask(&e, 5, 9), wall_ms())
+        .unwrap_err();
+    assert_eq!(over.code.as_str(), "mesh.helper_limit");
+    assert!(e.running(&helper));
+}

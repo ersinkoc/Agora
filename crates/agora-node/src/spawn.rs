@@ -42,6 +42,11 @@ use crate::launch_options::Requested;
 use crate::mesh_server::{Helpers, StartArgs, StartOutcome};
 use crate::supervisor::{AgentView, ScreenCheck, StartRequest, Supervisor};
 
+mod remote;
+pub use remote::{
+    CARDS_PER_ORIGIN, GRANT_STARTS_PER_HOUR, MAX_REMOTE_DEPTH, RUNNING_PER_ORIGIN, RUNNING_PER_RUN,
+};
+
 /// Running helpers one agent may have at once.
 pub const MAX_HELPERS: usize = 3;
 /// `agent_start` calls one agent may make in a minute (refused ones count).
@@ -198,6 +203,8 @@ struct State {
     /// the start ends, so two calls cannot both pass them.
     busy: HashSet<AgentId>,
     prompts: Vec<Prompt>,
+    /// ADR-0119: starts other machines ask for (`remote`).
+    remote: remote::RemoteState,
 }
 
 pub struct Spawner {
@@ -632,13 +639,26 @@ impl Spawner {
     /// Starts the helper the user (or a grant) allowed. Called with the caller's slot held; limits are checked again, since things
     /// changed while the user read.
     fn launch(&self, r: &Request, may_start: bool) -> StartOutcome {
-        let views = self.sup().list();
-        // The asker may have ended while the user read: a helper is never started for an agent that is gone.
-        if !views.iter().any(|v| v.id == r.caller && v.running) {
-            return Err(not_found(r.caller.as_str()));
-        }
-        if Self::running_children(&self.st(), &views, &r.caller) >= MAX_HELPERS {
-            return Err(helper_limit("helpers", MAX_HELPERS));
+        self.launch_as(r, may_start, None)
+    }
+
+    /// [`Self::launch`], or for a helper another machine asked for (ADR-0119, `remote`): then `r.caller` names the asker there
+    /// (`<origin>/<agent>`), which this node cannot see, its limits were checked by the caller, and the helper has no local parent.
+    fn launch_as(
+        &self,
+        r: &Request,
+        may_start: bool,
+        remote: Option<&crate::daemon::RemoteParent>,
+    ) -> StartOutcome {
+        if remote.is_none() {
+            let views = self.sup().list();
+            // The asker may have ended while the user read: a helper is never started for an agent that is gone.
+            if !views.iter().any(|v| v.id == r.caller && v.running) {
+                return Err(not_found(r.caller.as_str()));
+            }
+            if Self::running_children(&self.st(), &views, &r.caller) >= MAX_HELPERS {
+                return Err(helper_limit("helpers", MAX_HELPERS));
+            }
         }
         // F1012: held from before the check until the start, which goes into the held folder.
         let held = agora_platform::HeldFolder::open(Path::new(&r.folder));
@@ -690,7 +710,9 @@ impl Spawner {
                 Some(folder),
             )
             .map_err(|e| e.to_protocol())?;
-        sup.set_parent(&id, &r.caller);
+        if remote.is_none() {
+            sup.set_parent(&id, &r.caller);
+        }
         let view = sup.list().into_iter().find(|v| v.id == id);
         let has_terminal = sup.terminal(&id).is_some();
         let session = sup.session_of(&id);
@@ -717,35 +739,49 @@ impl Spawner {
             } else {
                 info.git_root.clone()
             };
-            ev.helper_launched(
-                &id,
-                &v1::WorkspaceRegistered {
-                    workspace_id: format!("directory:{path}"),
-                    node_id: self.node_id.clone(),
-                    project_id: info.project_id.clone(),
-                    path,
-                    git_root,
-                    branch: if r.worktree {
-                        format!("agent/{}", req.name)
-                    } else {
-                        info.branch.clone()
-                    },
-                    managed_worktree: r.worktree,
-                    files_changed: 0,
+            let workspace = v1::WorkspaceRegistered {
+                workspace_id: format!("directory:{path}"),
+                node_id: self.node_id.clone(),
+                project_id: info.project_id.clone(),
+                path,
+                git_root,
+                branch: if r.worktree {
+                    format!("agent/{}", req.name)
+                } else {
+                    info.branch.clone()
                 },
-                &r.kind,
-                has_terminal,
-                r.caller.as_str(),
-                &crate::launch_options::LaunchChoice {
-                    ids: view
-                        .as_ref()
-                        .map(|v| v.launch_options.clone())
-                        .unwrap_or_default(),
-                    args: Vec::new(),
-                    skips_permissions: view.as_ref().is_some_and(|v| v.skips_permissions),
-                },
-                view.as_ref().and_then(|v| v.run_id),
-            );
+                managed_worktree: r.worktree,
+                files_changed: 0,
+            };
+            let launch = crate::launch_options::LaunchChoice {
+                ids: view
+                    .as_ref()
+                    .map(|v| v.launch_options.clone())
+                    .unwrap_or_default(),
+                args: Vec::new(),
+                skips_permissions: view.as_ref().is_some_and(|v| v.skips_permissions),
+            };
+            let run_id = view.as_ref().and_then(|v| v.run_id);
+            match remote {
+                Some(parent) => ev.remote_helper_launched(
+                    &id,
+                    &workspace,
+                    &r.kind,
+                    has_terminal,
+                    parent,
+                    &launch,
+                    run_id,
+                ),
+                None => ev.helper_launched(
+                    &id,
+                    &workspace,
+                    &r.kind,
+                    has_terminal,
+                    r.caller.as_str(),
+                    &launch,
+                    run_id,
+                ),
+            }
             // ADR-0060: a session id the node chose at launch.
             if let Some(session) = &session {
                 ev.session_reported(&id, session);
