@@ -82,6 +82,26 @@ impl TerminalHandle {
     pub fn into_file(self) -> io::Result<File> {
         Ok(File::from(self.fd))
     }
+
+    /// Windows only (M2.6): on Unix the master travels beside the frame (`SCM_RIGHTS`), never in it ([`crate::TERMINAL_IN_BAND`]).
+    pub fn export_to<'a>(&self, _peer: &'a ProcessWatch) -> io::Result<ExportedTerminal<'a>> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
+    /// Windows only (M2.6), as [`Self::export_to`].
+    pub fn import(_reference: &[u8]) -> io::Result<TerminalHandle> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+/// A terminal handed to the node inside a frame (Windows only, M2.6); never made on Unix.
+pub struct ExportedTerminal<'a>(std::marker::PhantomData<&'a ()>);
+
+impl ExportedTerminal<'_> {
+    pub fn bytes(&self) -> &[u8] {
+        &[]
+    }
+    pub fn delivered(self) {}
 }
 
 /// A program on a PTY the holder owns: its master, its child (so its exit status) and nothing else. The holder is the child's parent.

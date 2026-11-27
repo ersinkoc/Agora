@@ -79,11 +79,13 @@ pub use held::{
 };
 #[cfg(not(unix))]
 pub use nohold::{
-    held_pty, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader,
+    held_pty, ExportedTerminal, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle,
+    TerminalReader,
 };
 #[cfg(unix)]
 pub use unixhold::{
-    held_pty, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle, TerminalReader,
+    held_pty, ExportedTerminal, HeldProcess, HeldTerminal, ProcessWatch, TerminalHandle,
+    TerminalReader,
 };
 
 /// ADR-0079 decision 2: makes this process the leader of a session of its own, so nothing that ends its starter's session or group
@@ -1757,6 +1759,15 @@ pub const PROTECTED_PATHS_BY_REFUSAL: bool = cfg!(target_os = "linux");
 /// Whether this build has the terminal holder (ADR-0079): Unix. Where it is `false` nothing starts one, and the node runs its agents
 /// itself (Windows joins in a later step).
 pub const HOLDER_BUILT: bool = cfg!(unix);
+
+/// Whether a held terminal travels to the node inside a holder-link frame (M2.6, the link's `StartedRef`/`TerminalRef`): on Windows,
+/// as a reference to handles the holder duplicated into the node ([`TerminalHandle::export_to`], [`TerminalHandle::import`]). On Unix
+/// the master travels beside the frame (`SCM_RIGHTS`) and those tags are never sent.
+pub const TERMINAL_IN_BAND: bool = cfg!(windows);
+
+/// The most bytes a terminal reference in a holder-link frame may have (M2.6). Its layout is the platform's own; a longer one is
+/// refused before it is read.
+pub const TERMINAL_REF_MAX: usize = 64;
 
 /// True where a confined agent gets a temp folder of its own (`TMPDIR`, `TEMP`, `TMP` point at it): on macOS the per-user temp folder
 /// is private to the sandbox and on Windows the profile's is out of reach, so without one compilers and `mktemp` fail. On Linux the

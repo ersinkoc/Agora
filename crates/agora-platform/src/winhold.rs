@@ -15,7 +15,8 @@ use std::ptr::null_mut;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE, WAIT_OBJECT_0,
+    CloseHandle, DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, FILETIME, HANDLE,
+    WAIT_OBJECT_0,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_DUP_HANDLE,
@@ -121,6 +122,28 @@ impl OtherProcess {
             return Err(io::Error::last_os_error());
         }
         Ok(theirs as usize)
+    }
+
+    /// Closes, in the other process, a handle this process duplicated into it ([`Self::duplicate_into`]) and that it never got to use
+    /// (the frame naming it was not delivered): `DUPLICATE_CLOSE_SOURCE` with no target closes it there.
+    pub(crate) fn close_theirs(&self, value: usize) -> io::Result<()> {
+        // SAFETY: `self.handle` has PROCESS_DUP_HANDLE; with DUPLICATE_CLOSE_SOURCE and no target, the source handle (in the other
+        // process) is only closed.
+        let ok = unsafe {
+            DuplicateHandle(
+                self.handle,
+                value as HANDLE,
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                DUPLICATE_CLOSE_SOURCE,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Whether the process has ended, waiting at most `wait` for it (ADR-0079 decision 4: the holder starts reading when it has).

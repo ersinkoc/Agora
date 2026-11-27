@@ -16,7 +16,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE,
     ERROR_OPERATION_ABORTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows_sys::Win32::Storage::FileSystem::{GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE};
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, SetConsoleCtrlHandler, COORD,
     HPCON,
@@ -484,6 +484,61 @@ impl TerminalHandle {
         Ok(unsafe { std::fs::File::from_raw_handle(raw.cast()) })
     }
 
+    /// M2.6 (the holder link's `StartedRef`/`TerminalRef`): duplicates the two pipe ends into `peer`, the process the holder admitted
+    /// and checked by its start time (ADR-0079 decision 5), and gives the reference the frame carries. The duplicates belong to `peer`
+    /// from now on; until [`ExportedTerminal::delivered`] says the frame went out, dropping the export closes them there again, so a
+    /// frame that never left (or a link that dropped first) leaves nothing behind in the node.
+    pub fn export_to<'a>(&self, peer: &'a crate::ProcessWatch) -> io::Result<ExportedTerminal<'a>> {
+        let process = peer.process();
+        let input = process.duplicate_into(self.input.0)?;
+        let output = match process.duplicate_into(self.output.0) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = process.close_theirs(input);
+                return Err(e);
+            }
+        };
+        let mut bytes = Vec::with_capacity(TERMINAL_REF_LEN);
+        bytes.push(TERMINAL_REF_VERSION);
+        bytes.extend_from_slice(&(input as u64).to_be_bytes());
+        bytes.extend_from_slice(&(output as u64).to_be_bytes());
+        Ok(ExportedTerminal {
+            peer,
+            values: Some([input, output]),
+            bytes,
+        })
+    }
+
+    /// M2.6: the terminal a holder's reference names, in this process. Checked before anything is owned: the exact length and version,
+    /// two values that are handles of this process, and both of them pipes. A reference that fails any of that is refused and nothing
+    /// of it is closed (its values may name handles this process holds for something else).
+    pub fn import(reference: &[u8]) -> io::Result<TerminalHandle> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "terminal reference");
+        if reference.len() != TERMINAL_REF_LEN || reference[0] != TERMINAL_REF_VERSION {
+            return Err(invalid());
+        }
+        let value = |at: usize| -> io::Result<HANDLE> {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&reference[at..at + 8]);
+            let v = usize::try_from(u64::from_be_bytes(raw)).map_err(|_| invalid())?;
+            // Zero and INVALID_HANDLE_VALUE are never a duplicated handle.
+            if v == 0 || v as HANDLE == INVALID_HANDLE_VALUE {
+                return Err(invalid());
+            }
+            Ok(v as HANDLE)
+        };
+        let (input, output) = (value(1)?, value(9)?);
+        // SAFETY: GetFileType only reads the handle's type; a value that is no handle of this process gives FILE_TYPE_UNKNOWN.
+        let pipe = |h: HANDLE| unsafe { GetFileType(h) } == FILE_TYPE_PIPE;
+        if input == output || !pipe(input) || !pipe(output) {
+            return Err(invalid());
+        }
+        Ok(TerminalHandle {
+            input: Handle(input),
+            output: Handle(output),
+        })
+    }
+
     #[allow(dead_code)] // M2.6's terminal transfer (`export_to`) duplicates these into the node; until then only the tests do.
     pub(crate) fn input_raw(&self) -> HANDLE {
         self.input.0
@@ -492,6 +547,42 @@ impl TerminalHandle {
     #[allow(dead_code)] // As `input_raw`.
     pub(crate) fn output_raw(&self) -> HANDLE {
         self.output.0
+    }
+}
+
+/// The version byte of a terminal reference (M2.6), and its whole length: the version, then the input's and the output's handle values
+/// in the node, each a `u64` big-endian. Private to Windows; the holder link carries it as opaque bytes of at most
+/// [`crate::TERMINAL_REF_MAX`].
+const TERMINAL_REF_VERSION: u8 = 1;
+const TERMINAL_REF_LEN: usize = 17;
+
+/// A terminal duplicated into the node for one frame ([`TerminalHandle::export_to`]). Until [`Self::delivered`], dropping it closes
+/// the duplicates in the node again.
+pub struct ExportedTerminal<'a> {
+    peer: &'a crate::ProcessWatch,
+    values: Option<[usize; 2]>,
+    bytes: Vec<u8>,
+}
+
+impl ExportedTerminal<'_> {
+    /// The reference to put in the frame.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The frame went out: the node owns the duplicates now.
+    pub fn delivered(mut self) {
+        self.values = None;
+    }
+}
+
+impl Drop for ExportedTerminal<'_> {
+    fn drop(&mut self) {
+        if let Some(values) = self.values.take() {
+            for v in values {
+                let _ = self.peer.process().close_theirs(v);
+            }
+        }
     }
 }
 
@@ -1366,5 +1457,133 @@ mod held_tests {
         let mut text = Vec::new();
         file.read_to_end(&mut text).unwrap();
         assert!(String::from_utf8_lossy(&text).contains("file-Windows_NT"));
+    }
+}
+
+/// M2.6: a held terminal handed to the node inside a frame: the reference, its import, and the duplicates closed again when the frame
+/// never went out. The "node" is this test process (opened and checked by its start time like any peer).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reference_tests {
+    use super::*;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    fn me() -> crate::ProcessWatch {
+        let pid = std::process::id();
+        crate::ProcessWatch::open(pid, crate::process_start_time(pid).unwrap()).unwrap()
+    }
+
+    fn values(reference: &[u8]) -> [HANDLE; 2] {
+        let at = |i: usize| {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&reference[i..i + 8]);
+            u64::from_be_bytes(raw) as usize as HANDLE
+        };
+        [at(1), at(9)]
+    }
+
+    /// Whether `value` (a handle of this process) still names the same object as `original`.
+    fn same_object(value: HANDLE, original: HANDLE) -> bool {
+        // SAFETY: CompareObjectHandles only compares; a closed or reused value gives FALSE for "not the same".
+        unsafe { windows_sys::Win32::Foundation::CompareObjectHandles(value, original) != 0 }
+    }
+
+    #[test]
+    fn a_reference_imports_as_the_same_terminal() {
+        let peer = me();
+        let mut term = HeldTerminal::start(&PtyConfig::new(vec![
+            "cmd.exe".into(),
+            "/c".into(),
+            "echo ref-%OS%".into(),
+        ]))
+        .unwrap();
+        let handle = term.handle().unwrap();
+        let export = handle.export_to(&peer).unwrap();
+        assert_eq!(export.bytes().len(), TERMINAL_REF_LEN);
+        assert!(export.bytes().len() <= crate::TERMINAL_REF_MAX);
+        let imported = TerminalHandle::import(export.bytes()).unwrap();
+        export.delivered();
+        let mut file = imported.into_file().unwrap();
+        let end = Instant::now() + Duration::from_secs(20);
+        while term.try_wait().unwrap().is_none() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let mut text = Vec::new();
+        file.read_to_end(&mut text).unwrap();
+        assert!(String::from_utf8_lossy(&text).contains("ref-Windows_NT"));
+    }
+
+    #[test]
+    fn an_export_that_was_not_delivered_closes_its_duplicates_in_the_node() {
+        let peer = me();
+        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let handle = term.handle().unwrap();
+        let export = handle.export_to(&peer).unwrap();
+        let [input, output] = values(export.bytes());
+        assert!(same_object(input, handle.input_raw()));
+        assert!(same_object(output, handle.output_raw()));
+        // The frame never went out (a send failed, the link dropped): nothing is left in the node.
+        drop(export);
+        assert!(!same_object(input, handle.input_raw()));
+        assert!(!same_object(output, handle.output_raw()));
+    }
+
+    #[test]
+    fn a_delivered_export_leaves_the_duplicates_to_the_node() {
+        let peer = me();
+        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let handle = term.handle().unwrap();
+        let export = handle.export_to(&peer).unwrap();
+        let bytes = export.bytes().to_vec();
+        export.delivered();
+        let [input, output] = values(&bytes);
+        assert!(same_object(input, handle.input_raw()));
+        assert!(same_object(output, handle.output_raw()));
+        // The node owns them: importing and dropping is how it closes them.
+        drop(TerminalHandle::import(&bytes).unwrap());
+        assert!(!same_object(input, handle.input_raw()));
+    }
+
+    #[test]
+    fn a_bad_reference_is_refused_and_closes_nothing() {
+        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let file_value = {
+            use std::os::windows::io::AsRawHandle;
+            file.as_raw_handle() as usize as u64
+        };
+        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let handle = term.handle().unwrap();
+        let pipe_value = handle.output_raw() as usize as u64;
+        let reference = |version: u8, a: u64, b: u64| {
+            let mut r = vec![version];
+            r.extend_from_slice(&a.to_be_bytes());
+            r.extend_from_slice(&b.to_be_bytes());
+            r
+        };
+        let refused = |r: &[u8]| {
+            assert_eq!(
+                TerminalHandle::import(r).err().map(|e| e.kind()),
+                Some(io::ErrorKind::InvalidData),
+                "{r:?}"
+            )
+        };
+        refused(&[]);
+        refused(&reference(1, pipe_value, pipe_value)[..16]);
+        refused(&[reference(1, pipe_value, pipe_value), vec![0]].concat());
+        refused(&reference(
+            2,
+            pipe_value,
+            handle.input_raw() as usize as u64,
+        ));
+        refused(&reference(1, 0, pipe_value));
+        refused(&reference(1, u64::MAX, pipe_value));
+        // The same handle twice, and a handle that is no pipe (a file this test holds open).
+        refused(&reference(1, pipe_value, pipe_value));
+        refused(&reference(1, file_value, pipe_value));
+        // Nothing of a refused reference was closed: the file and the pipe end still work.
+        assert!(file.metadata().is_ok());
+        // SAFETY: only reads the type of a handle this test owns.
+        assert_eq!(unsafe { GetFileType(handle.output_raw()) }, FILE_TYPE_PIPE);
     }
 }

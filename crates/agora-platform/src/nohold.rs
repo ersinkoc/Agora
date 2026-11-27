@@ -27,7 +27,7 @@ pub fn held_pty(
 
 /// M2.6: on Windows the holder's terminal, its reader and its passable pipe ends are `conpty`'s.
 #[cfg(windows)]
-pub use crate::conpty::{HeldTerminal, TerminalHandle, TerminalReader};
+pub use crate::conpty::{ExportedTerminal, HeldTerminal, TerminalHandle, TerminalReader};
 
 /// A terminal's master as one passable thing (Unix only for now).
 #[cfg(not(windows))]
@@ -39,6 +39,24 @@ impl TerminalHandle {
     pub fn into_file(self) -> io::Result<std::fs::File> {
         Err(unsupported())
     }
+    pub fn export_to<'a>(&self, _peer: &'a ProcessWatch) -> io::Result<ExportedTerminal<'a>> {
+        Err(unsupported())
+    }
+    pub fn import(_reference: &[u8]) -> io::Result<TerminalHandle> {
+        Err(unsupported())
+    }
+}
+
+/// A terminal handed to the node inside a frame (not built on this system).
+#[cfg(not(windows))]
+pub struct ExportedTerminal<'a>(std::marker::PhantomData<&'a ()>);
+
+#[cfg(not(windows))]
+impl ExportedTerminal<'_> {
+    pub fn bytes(&self) -> &[u8] {
+        &[]
+    }
+    pub fn delivered(self) {}
 }
 
 /// A program on a terminal the holder owns (Unix only for now).
@@ -118,6 +136,11 @@ impl ProcessWatch {
     /// Waits up to `timeout` for the process to end.
     pub fn wait(&self, timeout: Duration) -> bool {
         self.0.ended(timeout)
+    }
+
+    /// The opened process, for handing it a terminal ([`crate::TerminalHandle::export_to`]).
+    pub(crate) fn process(&self) -> &crate::winhold::OtherProcess {
+        &self.0
     }
 }
 
