@@ -134,5 +134,5 @@ Date: YYYY-MM-DD
 | 0115 | A repository on a case-insensitive host is one project, whatever the case of its URL | Accepted |
 | 0117 | Screen detection confirms idle, keeps blocked, and reads anchored regions and progress reports | Proposed |
 | 0118 | A terminal agent can report its own state through its mesh socket | Proposed |
-| 0119 | A helper started on another machine | Proposed |
+| 0119 | A helper started on another machine | Accepted |
 | 0120 | A gallery for the community catalogs: dates, popularity and plugin screenshots | Accepted |
