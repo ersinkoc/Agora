@@ -1246,6 +1246,19 @@ impl Helpers for Spawner {
     }
 
     fn states(&self, caller: &AgentId, helpers: &[String]) -> Vec<Result<String, Error>> {
+        // ADR-0119: a helper on another machine, as last heard from there.
+        if helpers.iter().any(|h| self.remote_id(h).is_some()) {
+            return helpers
+                .iter()
+                .map(|h| {
+                    self.remote_state(caller, h).unwrap_or_else(|| {
+                        self.states(caller, std::slice::from_ref(h))
+                            .pop()
+                            .unwrap_or_else(|| Err(not_found(h)))
+                    })
+                })
+                .collect();
+        }
         let ids: Vec<Result<AgentId, Error>> = {
             let st = self.st();
             helpers
@@ -1269,6 +1282,9 @@ impl Helpers for Spawner {
     }
 
     fn output(&self, caller: &AgentId, helper: &str, lines: usize) -> Result<Value, Error> {
+        if let Some(r) = self.remote_output(caller, helper, lines) {
+            return r;
+        }
         let id = Self::helper_of(&self.st(), caller, helper)?;
         let screen = {
             let sup = self.sup();

@@ -264,7 +264,9 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   `mesh.remote`). An agent's 3 helpers count its running helpers here and its starts on their way to other machines; the helpers
   running on another machine are counted there, which holds each asking run to 3 (6 per asking machine) unless a standing grant
   given there says otherwise. A caller whose process was replaced (a restart, a resume) asks as its new run: the machines its earlier
-  run asked are told that run is gone. `agent_wait` and `agent_output` for a helper on another machine are not built yet.
+  run asked are told that run is gone. `agent_wait` and `agent_output` follow a helper on another machine by its `<machine>/<agent>` id
+  (only one this agent started): the wait reads its state as last heard from there, asked again every 2 seconds in the background
+  (`exited` once that machine no longer knows it for this agent), and the output is asked of that machine (up to 25 s).
 - **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
   helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
   agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass

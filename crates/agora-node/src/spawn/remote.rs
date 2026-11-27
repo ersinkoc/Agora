@@ -119,8 +119,24 @@ pub(super) struct Asked {
     deadline: Instant,
 }
 
+/// How often the asking side asks a remote helper's state again while an agent waits on it, and how long one output request waits.
+const FOLLOW_EVERY: Duration = Duration::from_secs(2);
+const OUTPUT_WAIT: Duration = Duration::from_secs(25);
+/// The most helpers on other machines one caller is remembered to have started (for following them); the oldest go first.
+const REMOTE_CHILDREN_MAX: usize = 256;
+
+/// What the asking side last heard of a helper on another machine.
+#[derive(Default)]
+pub(super) struct Followed {
+    state: String,
+    at: Option<Instant>,
+    asking: bool,
+}
+
 /// What came back from the hub link (its callbacks run on the link's thread; [`Spawner::tick`] applies them).
 pub(super) enum FromLink {
+    /// The state a remote helper's machine answered (`exited` when it no longer knows it for this caller).
+    Followed(String, String),
     /// The target's first answer to a start (the card's id and time, or a grant covered it), or why it was not carried.
     Accepted(Vec<u8>, Result<v1::CommandOk, String>),
     /// A result this node could not hand to the hub: offered again until [`RESEND_FOR`] passed.
@@ -133,6 +149,10 @@ pub(super) struct RemoteState {
     link: Option<Arc<crate::uplink_client::MeshOut>>,
     /// Starts this node's agents asked other machines for, by start id.
     asked: HashMap<Vec<u8>, Asked>,
+    /// The helpers on other machines each local agent started (`<machine>/<agent>`), oldest first, which it may follow.
+    children: HashMap<AgentId, VecDeque<String>>,
+    /// What was last heard of each such helper's state.
+    followed: HashMap<String, Followed>,
     /// The machines each local agent asked.
     /// The machines each local agent asked, with the run it asked from (a release must name that run, also once it ended).
     targets: HashMap<AgentId, (Vec<u8>, HashSet<String>)>,
@@ -830,10 +850,148 @@ impl Spawner {
             None => Ok(format!("{}/{}", x.target, r.agent_id)),
         };
         let mut st = self.st();
+        if let Ok(helper) = &outcome {
+            let mine = st.remote.children.entry(x.caller.clone()).or_default();
+            mine.push_back(helper.clone());
+            let mut dropped = Vec::new();
+            while mine.len() > REMOTE_CHILDREN_MAX {
+                if let Some(old) = mine.pop_front() {
+                    dropped.push(old);
+                }
+            }
+            for old in dropped {
+                st.remote.followed.remove(&old);
+            }
+        }
         if let Some(t) = st.tickets.get_mut(&x.ticket) {
             *t = Some(outcome);
         }
         st.busy.remove(&x.caller);
+    }
+
+    /// Whether `helper` names a helper on another machine (`<machine>/<agent>`, another machine than this one).
+    pub(super) fn remote_id<'a>(&self, helper: &'a str) -> Option<(&'a str, &'a str)> {
+        helper
+            .split_once('/')
+            .filter(|(node, agent)| !node.is_empty() && !agent.is_empty() && *node != self.node_id)
+    }
+
+    /// The caller's run and whether it started `helper` (a remote helper it may follow).
+    fn follows(&self, caller: &AgentId, helper: &str) -> Option<Vec<u8>> {
+        let st = self.st();
+        let mine = st.remote.children.get(caller)?;
+        if !mine.iter().any(|h| h == helper) {
+            return None;
+        }
+        Some(
+            st.remote
+                .targets
+                .get(caller)
+                .map(|(run, _)| run.clone())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// ADR-0119 decision 7: the state of a helper `caller` started on another machine, as last heard; asked again (at most every
+    /// [`FOLLOW_EVERY`]) in the background, so a wait never blocks on the network. `None`: `helper` is not on another machine.
+    pub(super) fn remote_state(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+    ) -> Option<Result<String, Error>> {
+        let (node, agent) = self.remote_id(helper)?;
+        let Some(run) = self.follows(caller, helper) else {
+            return Some(Err(not_found(cut(helper, MAX_FIELD))));
+        };
+        let (link, ask, state) = {
+            let mut st = self.st();
+            let link = st.remote.link.clone();
+            let f = st.remote.followed.entry(helper.to_string()).or_default();
+            let stale = f.at.is_none_or(|at| at.elapsed() >= FOLLOW_EVERY);
+            let ask = stale && !f.asking && link.is_some();
+            if ask {
+                f.asking = true;
+            }
+            let state = if f.state.is_empty() {
+                "unknown".to_string()
+            } else {
+                f.state.clone()
+            };
+            (link, ask, state)
+        };
+        if let (true, Some(link)) = (ask, link) {
+            let back = Arc::clone(&self.from_link);
+            let key = helper.to_string();
+            link.request(
+                v1::command_request::Command::HelperFollow(v1::HelperFollow {
+                    agent_id: agent.to_string(),
+                    from_agent: caller.as_str().to_string(),
+                    from_run_id: run,
+                    origin: String::new(),
+                    wait_state: String::new(),
+                    wait_ms: 0,
+                    lines: 0,
+                }),
+                node,
+                Box::new(move |r| {
+                    let state = match r.map(|ok| ok.result) {
+                        Ok(Some(v1::command_ok::Result::HelperFollowResult(f))) => f.state,
+                        // The machine no longer knows it for this caller (released, restarted): it is over as far as this wait goes.
+                        Err(code) if code == "agent.not_found" => "exited".to_string(),
+                        _ => String::new(),
+                    };
+                    back.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(FromLink::Followed(key, state));
+                }),
+            );
+        }
+        Some(Ok(state))
+    }
+
+    /// ADR-0119 decision 7: the last lines of a helper `caller` started on another machine, asked of that machine now (at most
+    /// [`OUTPUT_WAIT`]). `None`: `helper` is not on another machine.
+    pub(super) fn remote_output(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+        lines: usize,
+    ) -> Option<Result<Value, Error>> {
+        let (node, agent) = self.remote_id(helper)?;
+        let Some(run) = self.follows(caller, helper) else {
+            return Some(Err(not_found(cut(helper, MAX_FIELD))));
+        };
+        let Some(link) = self.st().remote.link.clone() else {
+            return Some(Err(Error::new(ErrorCode::NodeOffline).with("node_id", node)));
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        link.request(
+            v1::command_request::Command::HelperFollow(v1::HelperFollow {
+                agent_id: agent.to_string(),
+                from_agent: caller.as_str().to_string(),
+                from_run_id: run,
+                origin: String::new(),
+                wait_state: String::new(),
+                wait_ms: 0,
+                lines: u32::try_from(lines.min(200)).unwrap_or(200),
+            }),
+            node,
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        );
+        Some(match rx.recv_timeout(OUTPUT_WAIT) {
+            Ok(Ok(ok)) => match ok.result {
+                Some(v1::command_ok::Result::HelperFollowResult(f)) => Ok(json!({
+                    "agent_id": helper,
+                    "source": f.source,
+                    "lines": tail_within(f.lines, MAX_OUTPUT_BYTES),
+                })),
+                _ => Err(Error::new(ErrorCode::Internal)),
+            },
+            Ok(Err(code)) => Err(Error::new(ErrorCode::parse(&code))),
+            Err(_) => Err(Error::new(ErrorCode::NodeTimeout).with("node_id", node)),
+        })
     }
 
     /// Applies what the hub link answered, ends starts whose answer never came, and offers unsent results again. From [`Self::tick`].
@@ -846,6 +1004,15 @@ impl Spawner {
             for c in came {
                 match c {
                     FromLink::Unsent(r, since) => st.remote.unsent.push((r, since)),
+                    FromLink::Followed(helper, state) => {
+                        if let Some(f) = st.remote.followed.get_mut(&helper) {
+                            f.asking = false;
+                            f.at = Some(Instant::now());
+                            if !state.is_empty() {
+                                f.state = state;
+                            }
+                        }
+                    }
                     FromLink::Accepted(id, Ok(ok)) => {
                         if let Some(v1::command_ok::Result::HelperStartAccepted(a)) = ok.result {
                             if let Some(x) = st.remote.asked.get_mut(&id) {
@@ -921,6 +1088,9 @@ impl Spawner {
         let targets = {
             let mut st = self.st();
             let (run, targets) = st.remote.targets.remove(caller).unwrap_or_default();
+            for h in st.remote.children.remove(caller).unwrap_or_default() {
+                st.remote.followed.remove(&h);
+            }
             let waiting: Vec<Vec<u8>> = st
                 .remote
                 .asked

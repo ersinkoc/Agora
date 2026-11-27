@@ -329,7 +329,8 @@ New threat-model rows (numbers are the next free ones when built):
    for their first answer (`mesh.rate_limited`), within the node's 64 open forwards. Audit rows `agent.start.remote.asked`,
    `agent.start.remote.result` and `agent.start.remote.released`. The record is in memory: after a hub restart every asker is its own
    root (chain grants stop applying). Tests: `crates/agora-hub/tests/server.rs`, `helpers.rs` and `users.rs`.
-4. The asking node: built except following (`agent_wait`/`agent_output` for `<machine>/<agent>` through `HelperFollow`).
+4. The asking node: built. Following (`agent_wait`/`agent_output` for `<machine>/<agent>`, only a helper this agent started) asks
+   `HelperFollow` of that machine: the state in the background every 2 s, the output on request.
    `agent_start` with `node` set to another machine is checked here (the asker runs and may ask, a full folder, the prompt rules, 3
    helpers local and remote together, the start rate) and sent through the hub link (`MeshOut::request`); the call answers with the
    helper once the hub carries the target's `HelperStartResult` back (`uplink_client::run_routed`), `node.timeout` past the card's time
@@ -342,8 +343,7 @@ New threat-model rows (numbers are the next free ones when built):
    (`net/approval.ts` `remoteStartSignedMessage`, checked against the shared vectors) and sends `remote_grant`; a helper from another
    machine hangs under its parent there in the agent tree (the hub fills `AgentSnapshot.parent_node_id` and
    `parent_node_agent_id`). The terminal client signs v4 for this start only (no grant). Not built yet: the live-grant indicator with
-   Revoke, the choice of a time, "any integrated kind" and "folders below" on the card, and following a remote helper from the asking
-   side. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
+   Revoke, the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
 
 ## Consequences
 

@@ -4647,4 +4647,31 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         ),
         ("alpha", asker.as_str(), "")
     );
+    // Following it from alpha (ADR-0119 decision 7): its screen through the hub, and a wait for a state it reaches.
+    let mut conn = agora_platform::local_connect(&sock).unwrap();
+    mcp(
+        &mut conn,
+        1,
+        "initialize",
+        serde_json::json!({"protocolVersion": "2025-03-26"}),
+    );
+    let out = mcp(
+        &mut conn,
+        3,
+        "tools/call",
+        serde_json::json!({"name": "agent_output", "arguments": {"agent_id": helper, "lines": 5}}),
+    );
+    assert_ne!(out["isError"], true, "{out}");
+    let waited = mcp(
+        &mut conn,
+        4,
+        "tools/call",
+        serde_json::json!({"name": "agent_wait", "arguments": {"agent_id": helper, "state": "exited", "timeout_s": 3}}),
+    );
+    // It runs on: the wait ends at its timeout, and says so; the point is that it was asked of beta (not refused as unknown).
+    let text = waited["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!text.contains("agent.not_found"), "{waited}");
 }
