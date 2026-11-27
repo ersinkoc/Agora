@@ -131,7 +131,7 @@ export interface PanelActions {
   readonly resolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   readonly sendPrompt?: PromptSend;
   readonly chooseOption?: (agentKey: string, kind: 'mode' | 'model', id: string) => Promise<ActionResult>;
-  readonly revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
+  readonly revokeGrant?: (agent: AgentTileModel, grant: import('../components/HelperGrants').HelperGrant) => Promise<void>;
   /** The window's one guard on answering requests (T44): every card in a pane answers through it. */
   readonly answers: AnswerGuard;
   /** Machines asking to join, with their answers (ADR-0065), for an owner's session. */

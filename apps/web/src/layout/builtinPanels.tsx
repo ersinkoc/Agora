@@ -105,7 +105,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
       {!asksUnderHeader(a) ? null : <ApprovalBanners approvals={approvals.filter((x) => x.agentId === a.id)} agent={a} guard={banners} onResolve={onResolve} />}
       <AgentAddress agent={a} />
       {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
-        <HelperGrants view={a.id} list={() => helperGrants(a)} revoke={(id) => revokeGrant(a, id)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
+        <HelperGrants view={a.id} list={() => helperGrants(a)} revoke={(g) => revokeGrant(a, g)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
       {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => review(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => history(a.id) : undefined} onFiles={filesOf ? () => browse(a.id) : undefined}
         onStart={onStart ? () => onStart() : undefined} onDismiss={() => dismiss([a.id])}

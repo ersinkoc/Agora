@@ -342,8 +342,9 @@ New threat-model rows (numbers are the next free ones when built):
    card with both machines and "More like this" as a standing grant (6 at a time; its helpers may ask too), signs v4
    (`net/approval.ts` `remoteStartSignedMessage`, checked against the shared vectors) and sends `remote_grant`; a helper from another
    machine hangs under its parent there in the agent tree (the hub fills `AgentSnapshot.parent_node_id` and
-   `parent_node_agent_id`). The terminal client signs v4 for this start only (no grant). Not built yet: the live-grant indicator with
-   Revoke, the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
+   `parent_node_agent_id`). The terminal client signs v4 for this start only (no grant). The live grants an agent was given on other
+   machines are listed in its panel beside its local helper grants ("On Beta: up to 6 codex at a time without asking (4 free)"), each
+   revoked on the machine that keeps it. Not built yet: the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
 
 ## Consequences
 

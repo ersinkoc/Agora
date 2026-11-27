@@ -307,11 +307,23 @@ export function App() {
     const ok = await api.command(agent.machineId, { grantList: {} });
     return (ok.grantList?.grants ?? [])
       .filter((g) => g.scope === `agent:${local}` && (g.commands ?? []).includes('mesh.agent_start'))
-      .map((g) => ({ id: g.grantId ?? '', kind: g.kind ?? '', folder: g.folder ?? '', remaining: g.remaining ?? 0 }));
-  }, [api]);
-  const revokeGrant = useCallback(async (agent: AgentTileModel, id: string) => {
-    if (!api || !agent.machineId) return;
-    await api.command(agent.machineId, { grantRevoke: { grantId: id } });
+      .map((g) => ({ id: g.grantId ?? '', kind: g.kind ?? '', folder: g.folder ?? '', remaining: g.remaining ?? 0 }))
+      // ADR-0119 decision 12: the standing grants other machines gave this agent (or the chain it roots), each kept by that machine.
+      .concat(await remoteGrantsOf(agent.machineId, local));
+  }, [api, live]);
+  const remoteGrantsOf = useCallback(async (machine: string, local: string): Promise<HelperGrant[]> => {
+    if (!api || !live) return [];
+    const others = machines(live).filter((m) => m.online && m.id !== machine);
+    const lists = await Promise.all(others.map((m) => api.command(m.id, { grantList: {} }).then((ok) => [m, ok] as const, () => undefined)));
+    return lists.flatMap((x) => (x ? (x[1].grantList?.remoteGrants ?? [])
+      .filter((g) => g.originNode === machine && (g.originAgent === local || (g.chain && g.rootNode === machine && g.rootAgent === local)))
+      .map((g) => ({ id: g.grantId ?? '', kind: g.anyKind ? '' : g.kind ?? '', folder: g.folder ?? '', remaining: Math.max(0, (g.maxRunning ?? 0) - (g.running ?? 0)), machine: x[0].id, machineName: x[0].name, max: g.maxRunning ?? 0 })) : []));
+  }, [api, live]);
+  const revokeGrant = useCallback(async (agent: AgentTileModel, grant: HelperGrant) => {
+    // A standing grant is kept (and ended) by the machine that gave it; a local one by the agent's own machine.
+    const machine = grant.machine ?? agent.machineId;
+    if (!api || !machine) return;
+    await api.command(machine, { grantRevoke: { grantId: grant.id } });
   }, [api]);
   // The owner allowed it: sign the grant with this device's key, send it to the machine, then repeat what was refused (net/useGrantFlow.ts).
   const grants = useGrantFlow({ command: api?.command, sign: device ? (node, ask) => signGrant(device, node, ask, Date.now()) : undefined });

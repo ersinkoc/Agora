@@ -2,14 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { t } from '../i18n';
 
 // A live "more helpers like this" permission of one agent (ADR-0057), as its machine lists it.
-export interface HelperGrant { id: string; kind: string; folder: string; remaining: number }
+export interface HelperGrant {
+  id: string; kind: string; folder: string; remaining: number;
+  /** ADR-0119: a standing grant another machine gave (and keeps): that machine, its name, and how many may run at once there. */
+  machine?: string; machineName?: string; max?: number;
+}
 
 // ADR-0057: what an agent may still start without asking, with a way to take it back. Shown for an agent that has helpers.
 export function HelperGrants({ view, list, revoke, refresh }: {
   /** Whose permissions these are (the agent's id): the view a revoke belongs to. The functions may be new on every render. */
   view: string;
   list: () => Promise<HelperGrant[]>;
-  revoke: (id: string) => Promise<void>;
+  revoke: (grant: HelperGrant) => Promise<void>;
   refresh: number; // changes when the agent's helpers change, so the remaining count is read again
 }) {
   const [grants, setGrants] = useState<HelperGrant[]>([]);
@@ -34,11 +38,13 @@ export function HelperGrants({ view, list, revoke, refresh }: {
   useEffect(() => () => { scope.current += 1; }, [view]);
   if (grants.length === 0 && !failed) return null;
   return <div className="flex flex-col gap-1 border-b border-line bg-surface-1 px-3 py-2 text-xs" aria-label={t('helper-grants')}>
-    {grants.map((g) => <div key={g.id} className="flex flex-wrap items-center gap-2">
-      <span className="min-w-0 flex-1">{t('helper-grant-line', { count: g.remaining, kind: g.kind })} <code dir="ltr" className="break-all text-muted">{g.folder}</code></span>
+    {grants.map((g) => <div key={`${g.machine ?? ''}/${g.id}`} className="flex flex-wrap items-center gap-2">
+      <span className="min-w-0 flex-1" {...(g.machine ? { 'data-remote-grant': '' } : {})}>{g.machine
+        ? t('helper-grant-remote-line', { count: g.max ?? 0, kind: g.kind || t('helper-grant-any-kind'), machine: g.machineName || g.machine, n: g.remaining })
+        : t('helper-grant-line', { count: g.remaining, kind: g.kind })} <code dir="ltr" className="break-all text-muted">{g.folder}</code></span>
       <button type="button" className="button px-2 py-1 text-xs" onClick={() => {
         const view = scope.current;
-        void revoke(g.id).then(
+        void revoke(g).then(
           () => { if (scope.current === view) load(); },
           () => { if (scope.current === view) setFailed(true); },
         );

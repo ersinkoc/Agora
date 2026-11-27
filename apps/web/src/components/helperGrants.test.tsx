@@ -58,7 +58,7 @@ describe('HelperGrants', () => {
     ];
     const list = () => Promise.resolve(server.map((g) => ({ ...g })));
     const done = new Map<string, () => void>();
-    const revoke = (id: string) => new Promise<void>((r) => { done.set(id, () => { server = server.filter((g) => g.id !== id); r(); }); });
+    const revoke = ({ id }: { id: string }) => new Promise<void>((r) => { done.set(id, () => { server = server.filter((g) => g.id !== id); r(); }); });
     await act(async () => { root.render(<HelperGrants view="a" list={list} revoke={revoke} refresh={0} />); });
     const buttons = () => Array.from(host.querySelectorAll('button'));
     expect(buttons()).toHaveLength(2);
@@ -95,5 +95,17 @@ describe('HelperGrants', () => {
     await act(async () => { finish(); });
     expect(reads).toBe(before);
     expect(host.textContent).toContain('/b');
+  });
+});
+
+describe('a standing grant another machine gave', () => {
+  it('names that machine and is revoked there', async () => {
+    const revoked: string[] = [];
+    const list = async () => [{ id: 'ap-7', kind: 'codex', folder: '/w', remaining: 4, machine: 'beta', machineName: 'Beta', max: 6 }];
+    await act(async () => { root.render(<HelperGrants view="a" list={list} revoke={async (g) => { revoked.push(`${g.machine}/${g.id}`); }} refresh={0} />); });
+    const line = host.querySelector('[data-remote-grant]');
+    expect(line?.textContent).toContain('On Beta: up to 6 codex at a time without asking (4 free)');
+    await act(async () => { host.querySelector<HTMLButtonElement>('button')?.click(); });
+    expect(revoked).toEqual(['beta/ap-7']);
   });
 });

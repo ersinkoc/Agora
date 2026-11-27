@@ -217,7 +217,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <div data-start-full-readonly className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" /></div>
         <div data-skip-full-readonly className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" /></div>
       </div>
-      <HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }]} revoke={async () => {}} refresh={0} />
+      <div data-helper-grants><HelperGrants view="demo" list={async () => [{ id: 'ap-1', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 2 }, { id: 'ap-7', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 4, machine: 'beta', machineName: 'Beta', max: 6 }]} revoke={async () => {}} refresh={0} /></div>
       <DeviceRequest inline request={{ id: 'web-3fa9c1d24e5b6a70', name: 'Firefox · Linux', fingerprint: 'f947-3cb5-e304-81be-ecf2-64cd' }}
         machines={[{ id: 'laptop', name: 'laptop' }, { id: 'vps-1', name: 'vps-1' }]} onApprove={async () => true} onLater={() => {}} />
       {/* ADR-0065: a machine's request to join as the owner sees it, in each state. The clock is fixed so the gallery does not change by itself. */}

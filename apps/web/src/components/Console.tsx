@@ -95,7 +95,7 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   onResolve?: (a: ApprovalModel, approved: boolean, choice?: StartChoice, always?: boolean) => AnswerResult;
   // ADR-0057: what an agent may still start without asking, and taking that back.
   helperGrants?: (agent: AgentTileModel) => Promise<HelperGrant[]>;
-  revokeGrant?: (agent: AgentTileModel, id: string) => Promise<void>;
+  revokeGrant?: (agent: AgentTileModel, grant: HelperGrant) => Promise<void>;
   notice?: string;
   link: 'connecting' | 'live' | 'offline';
   // ADR-0067: sign this window out (its session ends at the hub); agents keep running.
