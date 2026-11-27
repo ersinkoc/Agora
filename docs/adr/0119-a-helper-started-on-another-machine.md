@@ -1,8 +1,11 @@
 # 0119. A helper started on another machine
-Status: Proposed
+Status: Accepted
 Date: 2026-11-26
 
-Not accepted. Nothing here may be built until the maintainer accepts it.
+Accepted: 2026-11-27 (the maintainer's explicit answer "Accept, with the defaults" to a question that summarised this revision: chains
+down to 3 levels, a standing grant from the first signed card, 6 running at once, 30 starts an hour, until the root run ends or 24 hours,
+skip-permissions always asked). The open questions' proposed answers stand, and the numbers in decision 12 are the defaults. Accepting
+this ADR approves its schema step (build order 1) as described here.
 
 Revised 2026-11-27 at the maintainer's request: "an agent must be able, on instruction or by message, to open agents on another
 machine or under another agent, again and again, without asking each time". Asked how, the maintainer chose **"approve once, then

@@ -45,7 +45,7 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
     independent review; **decision**: what `allow` does)
 - [ ] **M0.3 Proposed ADRs** (**decision**)
   - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
-  - [ ] ADR-0119 (a helper started on another machine): settles ADR-0057's open route; revised 2026-11-27 for standing grants and chains (the maintainer's "approve once, then free"); Proposed, nine open questions
+  - [x] ADR-0119 (a helper started on another machine): revised for standing grants and chains (the maintainer's "approve once, then free"), Accepted 2026-11-27 with the defaults; built as M7.1
   - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
 - [x] **M0.4 Other open PRs**: #1188 (Codex's input validation audit) merged on `main`; #1204 (title rules) closed earlier, its
   open point is in [follow-ups](follow-ups.md)
@@ -208,7 +208,8 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 
 Items already in M2 and M3 are not repeated here.
 
-- [ ] **M7.1 A helper on another machine** (ADR-0057): needs ADR-0119 (M0.3), then several **schema** steps
+- [ ] **M7.1 A helper on another machine** (ADR-0057, ADR-0119 Accepted 2026-11-27): schema (approved with the ADR), the target node
+  with standing grants, the hub, the asking node, the window
 - [x] **M7.2 Leases across a node restart** (ADR-0039): #1243, in 0.3.40
 - [x] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead, and
   `agora doctor` says the clock may be wrong. Left: the "needs to join again" card in the window (**schema** for the card)
