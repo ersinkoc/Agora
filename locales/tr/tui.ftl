@@ -539,6 +539,7 @@ tui-layout-panel-tasks = Ortak görevler ve dosyalar
 tui-layout-panel-messages = Ekip sohbeti
 tui-layout-panel-usage = Kullanım
 tui-layout-panel-preview = Önizleme
+tui-layout-panel-map = Harita
 tui-layout-panel-theme = Tema
 tui-layout-panel-plugin = Eklenti
 tui-layout-follows-attention = Seni bekleyeni izler

@@ -45,3 +45,13 @@ between them, in the web window and the desktop app"; **decision**: an ADR and a
 1. No graph library, a fixed radial layout: yes.
 2. Other people's windows on the map: not now (privacy, schema).
 3. The terminal client: names the panel only, until M8.9.
+
+## Status of the build
+1. The panel: done (2026-11-27). `apps/web/src/net/fleetMap.ts` (the radial layout as a pure function, routes and positions along
+   them; tests hold that the same fleet draws the same way, helpers sit further out, everything stays inside the frame, and 100 agents
+   lay out in under 4 ms), `components/FleetMap.tsx` (SVG fitted to the pane, marks and text the same size on screen at any pane size;
+   an agent opens on a click or Enter, a machine links to its page; a mesh message that arrives while the map is open travels from
+   sender to recipient, through the hub between two machines, at most 20 at once; reduced motion flashes the recipient instead). The
+   terminal client names the panel and says to open it in the window.
+2. Tasks, dispatches and handoffs moving on the map: not yet (the messages do).
+

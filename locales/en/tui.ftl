@@ -576,6 +576,7 @@ tui-layout-panel-tasks = Shared tasks and files
 tui-layout-panel-messages = Team chat
 tui-layout-panel-usage = Usage
 tui-layout-panel-preview = Preview
+tui-layout-panel-map = Map
 tui-layout-panel-theme = Theme
 tui-layout-panel-plugin = Plugin
 tui-layout-follows-attention = Follows what needs you

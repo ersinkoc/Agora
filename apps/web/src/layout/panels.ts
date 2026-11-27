@@ -59,6 +59,7 @@ export const BUILTIN_PANELS = [
   { id: 'messages', label: 'ide-tab-messages', kind: 'global', binds: 'nothing', streams: false },
   { id: 'usage', label: 'ide-tab-cost', kind: 'global', binds: 'nothing', streams: false },
   { id: 'preview', label: 'preview-panel', kind: 'global', binds: 'nothing', streams: false },
+  { id: 'map', label: 'map-panel', kind: 'global', binds: 'nothing', streams: false },
   { id: 'theme', label: 'theme-editor-title', kind: 'global', binds: 'nothing', streams: false },
   { id: 'terminal', label: 'focus-terminal', kind: 'tool', binds: 'agent', streams: true },
   { id: 'changes', label: 'ide-tab-changes', kind: 'tool', binds: 'agent', streams: false },

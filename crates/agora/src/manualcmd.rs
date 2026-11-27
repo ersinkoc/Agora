@@ -652,7 +652,7 @@ mod tests {
             .take_while(|l| l.starts_with("| `"))
             .filter_map(|l| l.split('`').nth(1))
             .collect();
-        assert_eq!(table.len(), 14);
+        assert_eq!(table.len(), 15);
         for p in &table {
             assert_ne!(draws(p), Draws::Unknown, "{p}");
         }

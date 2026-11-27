@@ -916,7 +916,7 @@ export function projectChoices(v: View): ProjectChoice[] {
 // machine's id, which the hub checked against its certificate, never the host name the machine reports for itself: a node could
 // call itself after the sender's machine.
 // `fromId` is the sender's key, so the team chat can draw its avatar; `toMachine` names the recipient's machine on a message between machines.
-export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string; fromId?: string; toMachine?: string }
+export interface MessageModel { from: string; to: string; body: string; atMs: number; crossMachine: boolean; via?: string; fromId?: string; toId?: string; toMachine?: string }
 
 // The newest messages first, with agent names instead of ids. A message between two machines says so.
 export function recentMessages(v: View, limit = 5): MessageModel[] {
@@ -926,7 +926,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
   return v.messages.slice(-limit).reverse().map((m) => {
     const crossMachine = m.to.includes('/') && machine(m.from) !== machine(m.to);
     return {
-      from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs, crossMachine, fromId: m.from,
+      from: label(m.from), to: label(m.to), body: m.body, atMs: m.atMs, crossMachine, fromId: m.from, toId: m.to,
       ...(crossMachine ? { toMachine: byId.get(m.to)?.machine ?? machine(m.to) } : {}),
       ...(m.via ? { via: m.via } : {}),
     };
