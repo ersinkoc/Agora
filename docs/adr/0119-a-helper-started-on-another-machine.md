@@ -4,6 +4,12 @@ Date: 2026-11-26
 
 Not accepted. Nothing here may be built until the maintainer accepts it.
 
+Revised 2026-11-27 at the maintainer's request: "an agent must be able, on instruction or by message, to open agents on another
+machine or under another agent, again and again, without asking each time". Asked how, the maintainer chose **"approve once, then
+free"**: the first cross-machine start is approved with the person's signature, and that approval can be a standing grant on the
+target, so later starts it covers start at once, until it ends or is revoked. This replaces the first draft's "no grant, ever, depth 1"
+(decisions 1, 3, 4 and the alternatives changed; decision 12 is new).
+
 Settles the route that ADR-0057 left open ("another machine only if the approval names it"). Touches ADR-0020 (the hub cannot
 widen node policy), ADR-0029 (the hub forwards commands), ADR-0031 (mesh content is untrusted; the hub writes `origin`), ADR-0060
 (agent ids are never given twice), ADR-0109 (run identity), ADR-0112 (the fleet view and solo mode) and the threat model.
@@ -41,16 +47,21 @@ it this task" is the next request agents make, and today it needs the person.
      already uses) and this node's `mesh.remote` is `true`. The asking node cannot know the target's capabilities; the hub
      checks them (decision 2);
    - needs `folder`, a full path on the target. The asker's folder means nothing on another machine, so there is no default;
-   - is allowed only to an agent the person started (depth 0). A helper never asks for a helper on another machine;
-   - counts against the asker's existing limits on its own node: one start in progress, 3 running helpers (local and remote
-     together), six starts a minute. A refusal here is the node's usual `AgentStartRefused` for its own agent;
+   - is allowed to an agent the person started (depth 0), and to a helper (here or on another machine) whose own start allowed
+     helpers to ask in turn (`helpers_may_start`, decision 12), down to depth 3 counted from the person's agent. Deeper is refused
+     (`mesh.start_denied`, nothing is asked);
+   - counts against the asker's existing limits on its own node: one start in progress, six starts a minute, and its running
+     helpers (local and remote together: 3, or the grant's number when one covers the start). A refusal here is the node's usual
+     `AgentStartRefused` for its own agent;
    - is checked against the prompt rules that need no manifest (control and invisible characters, leading `!`, `/`, ...). The
      target checks the rest against its own manifest.
 
    The node then sends a new node → hub request **`HelperStart`** (a new `CommandRequest` arm):
-   `{ start_id, target_node, kind, folder, prompt, worktree, settings[], launch_options[], from_agent, from_run_id, origin }`.
-   `start_id` is 16 random bytes the asking node chooses. `from_run_id` is the asking agent's run (ADR-0109). `origin` is empty;
-   the hub writes it.
+   `{ start_id, target_node, kind, folder, prompt, worktree, settings[], launch_options[], from_agent, from_run_id, origin,
+   depth, root_node, root_agent, root_run_id }`. `start_id` is 16 random bytes the asking node chooses. `from_run_id` is the asking
+   agent's run (ADR-0109). `origin` is empty; the hub writes it. `depth` and `root_*` name the person-started agent the chain began
+   with (the asker itself at depth 0); the asking node writes them from its own record of how its agent was started, so they are
+   its word, like `from_agent`.
 
 2. **The hub carries it and widens nothing.**
    - It accepts `HelperStart` only on a node's connection. From a window it is `protocol.invalid_message`.
@@ -81,29 +92,33 @@ it this task" is the next request agents make, and today it needs the person.
      (`agent.setting_unknown`, `agent.option_invalid`, `agent.option_forbidden`, ...). The prompt rules are checked in full.
    - Limits per asking machine (the hub-written `origin`, not the agent's word): 2 cards waiting at once, 6 running helpers. And
      3 running helpers per asking agent run, plus the node's own agent limit (`node.resource_limit`).
-   - **No grant, ever.** A start from another machine is never covered by a standing grant and offers none (`grant_allowed:
-     false`).
-   - **Depth 1.** The helper cannot ask for helpers, here or anywhere.
+   - **A standing grant may cover it** (decision 12). A start that matches a live grant on this node starts at once, with no card,
+     and is recorded as started under that grant. Anything else raises the card, which offers a grant (`grant_allowed: true`)
+     unless the start names a launch option that skips permissions (that is always asked, as locally).
+   - **Depth.** A helper may ask in turn only when its start allowed it (`helpers_may_start`), down to depth 3 (decision 1).
 
    ADR-0057 decision 3 ("the helper is never wider than its caller") cannot compare folders or confinement across two
-   machines. Its replacement is: the folder is always named and shown, never granted, and the target's own policy is the ceiling.
+   machines. Its replacement is: the folder is always named and shown (on the card, and in the grant the person signs), and the
+   target's own policy is the ceiling.
 
 4. **The card shows and signs both machines.** The target raises an `ApprovalRequested` with a new action **`agent.start.remote`**.
    A new action, so a window that does not know it never shows it as a local start. Its `detail` is JSON with:
    - `origin_node` (the hub's word), `origin_agent` and `origin_agent_kind` (the asking machine's word);
    - `node` (this machine, where the helper starts), `kind`, `folder`, `worktree`;
-   - `depth: 1`, `grant_allowed: false`, `settings` and `launch_options` as in ADR-0066 and ADR-0059;
+   - `depth`, `root_node`, `root_agent`, `grant_allowed`, `settings` and `launch_options` as in ADR-0066 and ADR-0059;
    - `prompt`, in full (16 KiB at most).
 
    The decision is signed over a new string:
 
    ```
-   agora-approval-start-v4\0node_id\0origin_node\0origin_agent\0approval_id\0verdict\0helper_grant\0helpers_may_start\0settings\0launch_options\0sha256(detail)
+   agora-approval-start-v4\0node_id\0origin_node\0origin_agent\0approval_id\0verdict\0helper_grant\0helpers_may_start\0settings\0launch_options\0sha256(grant)\0sha256(detail)
    ```
 
-   It is v3 with the two machines' words added. `helper_grant` and `helpers_may_start` must be `0`. The target refuses any other
-   value, and a v1–v3 or ADR-0028 signature on this action, with `approval.signature_invalid`. New vectors:
-   `schema/fixtures/signing/approval-start-v4.json` (node, web window, terminal client). The card has no grant choices.
+   It is v3 with the two machines' words and the grant added. `helper_grant` is how many helpers the grant lets run at once (0:
+   no grant), `helpers_may_start` is `0` or `1`, and `grant` is the grant's scope as canonical JSON (decision 12; empty when
+   `helper_grant` is 0), so what the person allowed is exactly what is signed. The target refuses a grant on a start that offered
+   none, and a v1–v3 or ADR-0028 signature on this action, with `approval.signature_invalid`. New vectors:
+   `schema/fixtures/signing/approval-start-v4.json` (node, web window, terminal client).
 
 5. **The first answer comes inside the forward's deadline.** The target answers the forwarded `HelperStart` as soon as the card
    is raised, with a new result **`HelperStartAccepted { approval_id, ttl_ms }`**. A refusal before asking (decision 3) is the
@@ -179,11 +194,33 @@ it this task" is the next request agents make, and today it needs the person.
       event's `agent_id` names a local agent.
     - The hub audits each `HelperStart`, its first answer and each `HelperStartResult`.
 
+12. **Standing grants on the target** (the maintainer's "approve once, then free"). The card offers, beside Allow and Deny, "Allow
+   later starts like this". Its scope, shown on the card, chosen there and signed (decision 4):
+   - **who may ask:** this asking agent's run (`origin_node`, `from_agent`, `from_run_id`), and, when "its helpers may ask too" is
+     ticked, every agent of the chain it roots (`root_node`, `root_agent`, `root_run_id`) asking from any machine of this hub;
+   - **what:** the kind asked, or any kind this node has with an agent integration (the grant rules of ADR-0057: never `shell`, a
+     shell or a wrapper); settings as shown on the card (a later start with other settings is asked); never a launch option that
+     skips permissions;
+   - **where:** this folder, or any folder below it (the person picks);
+   - **how many:** at most N of its helpers running at once on this node (default 6, at most 20), and at most 30 starts an hour;
+   - **until:** the root agent's run ends (default), or a time the person picks (at most 24 hours), whichever comes first.
+
+   A later `HelperStart` that matches every part starts at once: the target answers it with `HelperStartAccepted` and sends
+   `HelperStartResult` as soon as the helper runs, raises no card, and records `AgentStarted` with the grant's id and an audit row
+   `agent.start.remote.granted`. The hub's limits (decision 2) still apply. A grant lives in memory on the target (it ends when the
+   target's node restarts, as local grants do) and ends early when the root run ends (`HelperRelease`, decision 8), when revoked
+   (`GrantRevoke` with its id; `GrantList` lists remote grants with their scope, use and end), or when its machine is forgotten.
+   The window shows an indicator per machine while a remote grant is live ("Codex on mac may start agents here: 2 of 6 running"),
+   with Revoke.
+
 ## What the window and the terminal client show
 
 - **The card** reads in UI words: "Claude Code on mac wants to start Codex on blackview". Under it: the folder on blackview, a
   note that this is another machine, the settings, any "acts without asking" option with its confirmation, and the whole prompt.
-  There are no grant choices. Both clients sign v4.
+  Below the buttons, "Allow later starts like this" opens the grant's choices (decision 12) with their defaults; the person sees the
+  scope in plain words before signing. Both clients sign v4.
+- **A live grant** shows on the target machine's row and in the agent's details, with what it covers, how much of it is used and
+  Revoke.
 - **The tree.** The helper shows under its parent with a machine tag ("on blackview"). In blackview's own list it shows with
   "started by Claude Code on mac". A parent that has ended keeps the helper under it, as for a local helper. New Fluent keys go in
   English and Turkish.
@@ -195,13 +232,19 @@ it this task" is the next request agents make, and today it needs the person.
 New threat-model rows (numbers are the next free ones when built):
 
 - **A compromised or misled machine asks many machines** to start agents, or floods them with cards. Mitigations:
-  - every start needs a v4 decision signed by a device the target trusts and verified on the target;
-  - no grant, depth 1, and the target's own policy and its off switch;
+  - every start needs a v4 decision signed by a device the target trusts and verified on the target, or a live grant such a
+    decision created;
+  - a grant is bounded (one asker or one chain, one kind or integrated kinds, one folder tree, N running, 30 an hour, until the
+    root run ends or at most 24 hours), revocable at once, visible while live, and never covers skipping permissions; depth 3;
+    and the target's own policy and its off switch;
   - the hub limits per asking machine (12 a minute, 8 open), and the target limits per asking machine (2 cards, 6 helpers);
   - a solo hub, or a hub whose owner turned on `remote_helpers`.
 
-  Residual: the person can be worn down by cards; `origin_agent` is the asking machine's word (only `origin_node` is vouched by the
-  hub), and the card says so.
+  Residual: the person can be worn down by cards; `origin_agent` and the chain's `root_*` are the asking machine's word (only
+  `origin_node` is vouched by the hub), and the card says so. **Under a grant, starts happen out of the person's sight:** an agent
+  that was talked into it (T14), or a compromised machine of the hub claiming to be part of the granted chain, can start up to N
+  agents of the granted kinds in the granted folders on the target until the grant ends. That is the trade the maintainer chose; the
+  bounds above, the indicator, the audit rows and Revoke limit it.
 - **The prompt is untrusted content** written by an agent that may have been talked into it (T14). It is shown in full and
   signed by hash, and the target checks it against its own manifest's screen rules. After the first prompt, the helper treats
   messages from its parent as information (ADR-0031).
@@ -219,12 +262,12 @@ New threat-model rows (numbers are the next free ones when built):
    string and its vectors, and golden fixtures. Update `protocol.md`, `mesh-tools.md` (replacing the "not supported yet"
    sentence), `error-codes.md` (`mesh.remote_helpers_off`) and the threat model.
 2. **The target node:** take `HelperStart`, check, raise the card, verify v4, launch, send the result, answer `HelperFollow`
-   and `HelperRelease`. Tests use two nodes and `agora-fake-agent`.
+   and `HelperRelease`; keep, match, count, end and list standing grants (decision 12). Tests use two nodes and `agora-fake-agent`.
 3. **The hub:** route the four requests, write `origin`/`from_node`, apply the limits and the solo-hub rule, and audit.
 4. **The asking node:** `agent_start` with `node`, the wait, `agent_wait`/`agent_output` in slices, and `HelperRelease` on
    cancel, exit and stop.
-5. **The web window and the terminal client:** the card with v4 signing, and the tree with the machine tag. Screenshots in both
-   themes.
+5. **The web window and the terminal client:** the card with v4 signing and its grant choices, the live-grant indicator with
+   Revoke, and the tree with the machine tag. Screenshots in both themes.
 6. A changelog fragment with each user-visible step.
 
 ## Consequences
@@ -235,7 +278,8 @@ New threat-model rows (numbers are the next free ones when built):
   one node policy key, one hub setting, one error code. No published message changes meaning. ADR-0057's local behaviour is unchanged.
 - The hub learns more about the ask than for a local start (kind, folder, prompt hash in its audit). It still cannot approve,
   widen or change a start.
-- A cross-machine helper is shallower than a local one (depth 1, no grant), by design.
+- A cross-machine helper can be covered by a standing grant, like a local one, and can start helpers in turn down to depth 3 when
+  its grant allows; the grant's scope is signed on the target, so the hub still cannot widen it.
 
 ## Alternatives considered
 
@@ -251,8 +295,10 @@ New threat-model rows (numbers are the next free ones when built):
 - **Set `parent_agent_id` to the remote parent and add only `parent_node_id`:** the hub and the window qualify
   `parent_agent_id` with the helper's own node, and ids are `agent-N` per node. An older hub or window would hang the helper
   under an unrelated local agent. That changes the field's published meaning.
-- **A standing grant across machines:** it would let one signature start agents on another machine later, out of the person's
-  sight. Every cross-machine start is asked.
+- **No grant across machines (every start asked):** the first draft. The maintainer rejected it on 2026-11-27: agents must start
+  agents on other machines repeatedly without a card each time.
+- **A machine policy line with no card at all** ("agents of my machines may start agents here"): offered to the maintainer and not
+  chosen. Anyone who took over an agent could start agents on that machine freely, with no signature anywhere.
 
 ## Open questions for the maintainer
 
@@ -262,11 +308,13 @@ New threat-model rows (numbers are the next free ones when built):
    hub?
 3. Launch options that skip permissions on another machine: allowed with the same confirmation as locally (proposed), or refused
    for cross-machine starts at first?
-4. Depth: only a person-started agent may ask, and its remote helper never asks (proposed). Allow ADR-0057's helper-of-a-helper
-   chain across machines later?
+4. Depth: decided by the revision (chains allowed under a grant). Is 3 levels from the person's agent right?
 5. Limits: 12 a minute and 8 open per asking machine at the hub; 2 cards and 6 running helpers per asking machine at the target
    (proposed). Other numbers?
 6. Folder: a full path on the target (proposed). Should an agent also be able to say "this project's checkout on that machine",
    for the target to find?
 7. Undelivered results and releases are re-sent for 15 minutes after reconnection, then dropped, and the records live only for
    the node process's life (proposed). Keep them longer, or durably like ADR-0109?
+8. Grant defaults: N = 6 running at once (at most 20), 30 starts an hour, until the root run ends (at most 24 hours), this folder
+   (or below it, when picked), the kind asked (or any integrated kind, when picked). Other numbers?
+9. Should a grant survive a restart of the target's node (stored and signed), or end with it (proposed, as local grants)?

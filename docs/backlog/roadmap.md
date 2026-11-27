@@ -45,7 +45,7 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
     independent review; **decision**: what `allow` does)
 - [ ] **M0.3 Proposed ADRs** (**decision**)
   - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
-  - [ ] ADR-0119 (a helper started on another machine): settles ADR-0057's open route; on `main` as Proposed, seven open questions
+  - [ ] ADR-0119 (a helper started on another machine): settles ADR-0057's open route; revised 2026-11-27 for standing grants and chains (the maintainer's "approve once, then free"); Proposed, nine open questions
   - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
 - [x] **M0.4 Other open PRs**: #1188 (Codex's input validation audit) merged on `main`; #1204 (title rules) closed earlier, its
   open point is in [follow-ups](follow-ups.md)
