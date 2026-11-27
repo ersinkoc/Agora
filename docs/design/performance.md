@@ -74,6 +74,21 @@ after it was parsed) for a 200×50 terminal with a full 2000-line, 200-column hi
 p95 42 ms (923 KB, a colour every 4 characters, above the node's 512 KiB cap). With the node's p95 of 6.7 ms that keeps "terminal
 snapshot after switching" under 150 ms, and it is one paint: the screen is not drawn until the repaint has been parsed.
 
+### Screen detection (ADR-0117 step 1, 2026-11-28, on `0816d5bd`)
+
+`agora-bench detection [--ticks N]` (`bench/src/detection.rs`) replays every captured screen of the shipped terminal manifests onto 50
+terminals (the 24 screens repeated) and times one detection tick, `Detector::detect` on each terminal, as the supervisor's check does.
+Today the node reads the grid for detection under each terminal's lock, so one terminal's detection is how long that lock is held.
+Release build, Linux development machine, 300 ticks:
+
+| Figure | p50 | max |
+| --- | --- | --- |
+| One tick, 50 terminals | 886 µs | 1.08 ms |
+| One terminal (its lock held) | 19.6 µs | 74.6 µs |
+
+This is the baseline every later ADR-0117 step (the timing gate, hold rules, anchored regions and their per-tick row snapshot)
+reports against.
+
 ### Hub cold start against history size (architecture review R4, 2026-11-14)
 
 The hub rebuilds its view by replaying its whole event log at start (`View::rebuild`), so its cold start grows with history. Measured

@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         Some("footprint") => footprint(&args[1..]),
         Some("history") => history(&args[1..]),
         Some("transcript") => transcript(&args[1..]),
+        Some("detection") => detection(&args[1..]),
         Some("bestof") => bestof(&args[1..]),
         Some("compare") => cmp(&args[1..]),
         _ => {
@@ -226,6 +227,57 @@ fn cmp(args: &[String]) -> ExitCode {
 /// the bytes per attach, and the terminal snapshot after switching with a full history (budget 150 ms). With `--check`, exits 1 if
 /// the switch is over that budget.
 /// `agora-bench transcript [--runs N] [--commit SHA] [--out FILE]` (ADR-0089, ADR-0104 C1).
+fn detection(args: &[String]) -> ExitCode {
+    let (mut ticks, mut commit, mut out) = (200usize, "unknown".to_string(), None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--ticks" => match parse_value::<usize>(&mut it, "--ticks") {
+                Ok(v) => ticks = v.max(1),
+                Err(code) => return code,
+            },
+            "--commit" => match next_value(&mut it, "--commit") {
+                Ok(v) => commit = v.to_string(),
+                Err(code) => return code,
+            },
+            "--out" => match next_value(&mut it, "--out") {
+                Ok(v) => out = Some(v.to_string()),
+                Err(code) => return code,
+            },
+            _ => {
+                eprintln!("usage: agora-bench detection [--ticks N] [--commit SHA] [--out FILE]");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let r = match agora_bench::detection::run(&commit, ticks) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("agora-bench: detection: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!(
+        "detection: {} screens on {} terminals, {} ticks: tick p50 {:.1} us max {:.1} us; one terminal p50 {:.2} us max {:.2} us",
+        r.screens, r.terminals, r.ticks, r.tick_p50_us, r.tick_max_us, r.one_p50_us, r.one_max_us
+    );
+    if let Some(path) = out {
+        match serde_json::to_string_pretty(&r) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("agora-bench: {path}: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("agora-bench: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn transcript(args: &[String]) -> ExitCode {
     let (mut runs, mut commit, mut out) = (20usize, "unknown".to_string(), None);
     let mut it = args.iter();

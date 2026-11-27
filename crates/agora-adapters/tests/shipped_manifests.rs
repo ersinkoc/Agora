@@ -81,6 +81,26 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
                 f.display()
             );
             assert_eq!(why.checks.len(), manifest.rules.len(), "{}", f.display());
+            // ADR-0117 decision 5: file order breaks ties in priority, so two matching rules at the highest matching priority that say
+            // different states would be decided silently by their order in the file; no shipped screen may have that.
+            let matched: Vec<_> = why
+                .checks
+                .iter()
+                .filter(|c| c.outcome == RuleOutcome::Matched)
+                .collect();
+            if let Some(top) = matched.iter().map(|c| c.priority).max() {
+                let states: std::collections::BTreeSet<String> = matched
+                    .iter()
+                    .filter(|c| c.priority == top)
+                    .map(|c| format!("{:?}", c.state))
+                    .collect();
+                assert_eq!(
+                    states.len(),
+                    1,
+                    "{}: rules at priority {top} say {states:?}; file order would decide",
+                    f.display()
+                );
+            }
             let want = std::fs::read_to_string(f.with_extension("expect"));
             let screen = term.bottom_non_empty_lines(12).join("\n");
             let want = want.unwrap_or_else(|_| {

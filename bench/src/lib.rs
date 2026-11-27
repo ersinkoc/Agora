@@ -4,6 +4,7 @@
 //! and `terminals-20` run the real path: the fake agent floods a PTY and every chunk is fed to the VT backend,
 //! for one terminal and for twenty concurrent ones (`design/performance.md`).
 
+pub mod detection;
 pub mod footprint;
 pub mod history;
 pub mod transcript;

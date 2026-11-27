@@ -252,3 +252,9 @@ The maintainer resolved these questions on 2026-11-27.
 - Measure the idle confirmation delay separately from the working and blocked budget.
 - Build and enable signed rule updates only after a release pipeline can sign the list. Start with node-local opt-in and an owner-pinned key.
 - Reserve anchored regions in `[[ready]]` and `[[typed]]` for a separate review of the typing gate.
+
+## Status of the build
+
+1. Step 1: done (2026-11-28). The detection benchmark (`agora-bench detection`, baseline in `docs/design/performance.md` "Screen
+   detection") and the tie-break test of decision 5 in `crates/agora-adapters/tests/shipped_manifests.rs`, with its sentence in
+   `docs/specs/agent-manifest.md`. No shipped screen relies on file order to choose a state.
