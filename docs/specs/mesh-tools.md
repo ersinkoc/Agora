@@ -415,3 +415,11 @@ broker-stamped provenance, project-scoped `#channels`, inbox cursor, `ask` answe
 the task board with dependencies and owners, all-or-nothing leases over the core lease table, handoff (the message goes out
 first so a refused handoff moves nothing), and cleanup when an agent ends. Limits: 16 KiB bodies, 20 refs, 30 messages per
 minute per agent, 5 open asks. Every change queues a protocol event for the audit log. The transport (a local socket per agent, `agora mesh stdio`), the injection into each agent's MCP configuration (the manifest's `[mcp]`), routing across nodes (ADR-0031) and the shared board with its persistence (ADR-0039, ADR-0040) are described in the sections above. Not done: delivery fallback to the integration level's input path.
+
+
+### Shared-board Review
+
+On a shared board whose hub owner enabled Review (ADR-0125), the current owner's `task_complete` submits the summary
+and references for a person to review. `task_list` reports the `review` status and accepts that status as a filter.
+Dependencies stay blocked and the task keeps its reporting agent even if the agent stops. An owner accepts the
+report into Done or returns it to Backlog in the web window. A later report replaces the earlier report for the task.

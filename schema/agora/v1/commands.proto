@@ -141,6 +141,9 @@ message CommandRequest {
     ShareItemList share_item_list = 128;
     ShareItemRemove share_item_remove = 129;
     ShareItemGet share_item_get = 130;
+    // ADR-0125: these commands are answered by the hub and name no target node.
+    TaskReviewRead task_review_read = 131;
+    TaskReviewDecide task_review_decide = 132;
   }
 }
 
@@ -213,6 +216,7 @@ message CommandOk {
     // ADR-0122: the answers to `ShareItemList` and `ShareItemGet`.
     ShareItemListResult share_item_list = 43;
     ShareItemGetResult share_item_get = 44;
+    TaskReviewReport task_review_report = 45; // ADR-0125.
   }
 }
 
@@ -1132,4 +1136,28 @@ message ThemeCatalogTheme {
 
 message AcknowledgeTaskHandoff {
   string delivery_id = 1;
+}
+
+message TaskReviewRead {
+  string project_id = 1;
+  string task_id = 2;
+  uint64 report_revision = 3;
+}
+
+enum TaskReviewDecision {
+  TASK_REVIEW_DECISION_UNSPECIFIED = 0;
+  TASK_REVIEW_DECISION_ACCEPT = 1;
+  TASK_REVIEW_DECISION_RETURN = 2;
+}
+
+message TaskReviewDecide {
+  string project_id = 1;
+  string task_id = 2;
+  uint64 report_revision = 3;
+  TaskReviewDecision decision = 4;
+}
+
+message TaskReviewReport {
+  string summary = 1;
+  repeated string refs = 2;
 }

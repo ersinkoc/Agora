@@ -901,6 +901,7 @@ mod tests {
             title: title.into(),
             claimed_by_agent_id: owner.into(),
             done,
+            review: None,
         }
     }
 

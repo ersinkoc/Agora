@@ -2220,3 +2220,11 @@ catalog-gallery-asks = Görmek istedikleri
 catalog-gallery-copy-command = Komutu kopyala
 catalog-gallery-copied = Kopyalandı
 palette-gallery = Galeri: temalar ve eklentiler
+
+board-col-review = İnceleme
+board-col-review-empty = İnceleme bekleyen görev yok.
+board-review-read = Raporu oku
+board-review-return = Bekleyenlere geri gönder
+board-review-accept = Kabul et
+board-review-read-failed = Rapor yüklenemedi. Tekrar deneyin.
+board-review-decision-failed = Karar kaydedilemedi. Görevi kontrol edip tekrar deneyin.

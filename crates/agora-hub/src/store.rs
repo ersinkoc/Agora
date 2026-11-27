@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 20;
+const SCHEMA_VERSION: i64 = 21;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -563,6 +563,15 @@ impl SqliteStore {
                  COMMIT;",
             )?;
         }
+        if version < 21 {
+            // ADR-0125: old hubs must not open a board with a pending review as a normal claim.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS task_review_projects (project_id TEXT PRIMARY KEY);
+                 PRAGMA user_version = 21;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -670,6 +679,23 @@ impl SqliteStore {
         let conn = self.lock()?;
         conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
+    }
+
+    /// Local hub administration requests Review for a shared project.
+    pub fn enable_task_review(&self, project: &str) -> Result<(), StoreError> {
+        self.lock()?.execute(
+            "INSERT OR IGNORE INTO task_review_projects (project_id) VALUES (?1)",
+            [project],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn requested_review_projects(&self) -> Result<Vec<String>, StoreError> {
+        let conn = self.lock()?;
+        let mut query =
+            conn.prepare("SELECT project_id FROM task_review_projects ORDER BY project_id")?;
+        let projects = query.query_map([], |row| row.get(0))?;
+        Ok(projects.collect::<Result<_, _>>()?)
     }
 
     pub(crate) fn handoff_settings(&self) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -1329,7 +1355,7 @@ mod tests {
     /// popularity empty), one at 16 its plugins too, and each gains what came after. Its events stay.
     /// ADR-0122: a schema-19 database gains the shared items' tables, empty, and keeps what it had.
     #[test]
-    fn a_schema_19_database_gains_the_shared_items_tables() {
+    fn a_schema_19_database_gains_shared_items_and_task_review_tables() {
         let d = tmpdir("upgrade19");
         let path = d.join("hub.db");
         {
@@ -1337,7 +1363,10 @@ mod tests {
             s.append("n1", 1, 5, b"a").unwrap();
             s.lock()
                 .unwrap()
-                .execute_batch("DROP TABLE shared_items; DROP TABLE shared_item_refusals; PRAGMA user_version = 19;")
+                .execute_batch(
+                    "DROP TABLE shared_items; DROP TABLE shared_item_refusals; \
+                     DROP TABLE task_review_projects; PRAGMA user_version = 19;",
+                )
                 .unwrap();
         }
         let s = SqliteStore::open(&path).unwrap();
@@ -1345,8 +1374,12 @@ mod tests {
         let v: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 20);
-        for t in ["shared_items", "shared_item_refusals"] {
+        assert_eq!(v, SCHEMA_VERSION);
+        for t in [
+            "shared_items",
+            "shared_item_refusals",
+            "task_review_projects",
+        ] {
             let n: i64 = conn
                 .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
                 .unwrap();
@@ -1390,7 +1423,7 @@ mod tests {
                 .unwrap()
         };
         let fresh = store();
-        assert_eq!(version(&fresh), 20);
+        assert_eq!(version(&fresh), SCHEMA_VERSION);
         assert_eq!(tables(&fresh), all);
         // What schema 19 added, taken out first (its columns are on tables an older database has).
         let gallery = "DROP TABLE shared_items; DROP TABLE shared_item_refusals; \

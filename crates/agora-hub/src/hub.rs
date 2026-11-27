@@ -328,6 +328,7 @@ impl Hub {
         }
         // Upgrade queues created before ADR-0121. The write also initializes expired rows.
         hub.refresh_handoff_statuses(now_ms, true, |_| false)?;
+        hub.refresh_task_review_projects(now_ms)?;
         Ok(hub)
     }
 
@@ -505,6 +506,12 @@ impl Hub {
     pub fn view(&self) -> (View, u64) {
         let g = self.lock();
         (g.view.clone(), g.pos)
+    }
+
+    pub(crate) fn shadows_local_task(&self, event: &Event) -> bool {
+        event.producer_id != RESERVED_HUB_ID
+            && matches!(event.body, Some(Body::TaskChanged(_)))
+            && self.lock().view.shadows_local_task(event)
     }
 
     /// Passes one payload from a node's session through the store, the view and the subscribers.
@@ -1522,6 +1529,112 @@ impl Hub {
         }
         self.reconcile_board_runs(g, project, &key, now_ms)?;
         Ok((still_current(g) && self.boards.has(project)).then_some(key))
+    }
+
+    /// Publishes local administrative opt-ins once a project has a shared board.
+    pub(crate) fn refresh_task_review_projects(&self, now_ms: u64) -> Result<(), StoreError> {
+        let projects = self.store.requested_review_projects()?;
+        if projects.is_empty() {
+            return Ok(());
+        }
+        let mut g = self.lock();
+        for project in projects {
+            if g.view.review_projects.contains(&project) {
+                continue;
+            }
+            if crate::board::nodes_with(&g.view, &project).len() >= 2 {
+                self.emit(
+                    &mut g,
+                    Body::TaskReviewEnabled(agora_protocol::v1::TaskReviewEnabled {
+                        project_id: project,
+                    }),
+                    now_ms,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn task_review_read(
+        &self,
+        read: &agora_protocol::v1::TaskReviewRead,
+        now_ms: u64,
+    ) -> Result<agora_protocol::v1::TaskReviewReport, agora_protocol::Error> {
+        let project = agora_core::fold_project_id(&read.project_id);
+        let mut g = self.lock();
+        Self::review_available(&g, &project, &read.task_id, read.report_revision)?;
+        let (_, notices) = self.restore_board(&mut g, &project, now_ms);
+        for notice in &notices {
+            crate::server::board_notice(self, notice);
+        }
+        self.boards
+            .review_report(&project, &read.task_id, read.report_revision)
+    }
+
+    pub(crate) fn task_review_decide(
+        &self,
+        reviewer: &str,
+        decision: &agora_protocol::v1::TaskReviewDecide,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::v1::TaskReviewDecision;
+        use agora_protocol::{Error, ErrorCode};
+        let accept = match decision.decision() {
+            TaskReviewDecision::Accept => true,
+            TaskReviewDecision::Return => false,
+            TaskReviewDecision::Unspecified => {
+                return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "decision"))
+            }
+        };
+        let project = agora_core::fold_project_id(&decision.project_id);
+        let mut g = self.lock();
+        Self::review_available(&g, &project, &decision.task_id, decision.report_revision)?;
+        let internal = || Error::new(ErrorCode::Internal).with("incident_id", "board.review");
+        self.write_unrecorded(&mut g).map_err(|_| internal())?;
+        let (key, notices) = self.restore_board(&mut g, &project, now_ms);
+        for notice in &notices {
+            crate::server::board_notice(self, notice);
+        }
+        self.reconcile_board_runs(&mut g, &project, &key, now_ms)
+            .map_err(|_| internal())?;
+        let before = self.boards.checkpoint(&project);
+        let events = self.boards.review_decide(
+            &project,
+            &decision.task_id,
+            decision.report_revision,
+            reviewer,
+            accept,
+            now_ms,
+        )?;
+        if !events.is_empty()
+            && self
+                .store_board(&mut g, &project, &key, events, (&[], None), now_ms)
+                .is_err()
+        {
+            self.boards.restore(&project, before);
+            return Err(internal());
+        }
+        Ok(())
+    }
+
+    fn review_available(
+        g: &Inner,
+        project: &str,
+        task: &str,
+        revision: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        if !g.view.review_projects.contains(project)
+            || !g.view.tasks.contains_key(&format!("{project}/{task}"))
+        {
+            return Err(Error::new(ErrorCode::TaskNotFound).with("task_id", task));
+        }
+        if revision == 0 {
+            return Err(
+                Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "report_revision")
+            );
+        }
+        Ok(())
     }
 
     /// ADR-0112: `fleet_status`, answered for a solo hub, or a team hub whose owner turned it on; refused `board.not_allowed`
@@ -3797,6 +3910,197 @@ mod tests {
             .encode_to_vec(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_review_opt_in_waits_for_online_sharing() {
+        let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+        let (_id, mut links) = stage_handoff(&hub, Vec::new());
+        let generation = hub.view().0.nodes["receiver"].link_generation;
+        assert!(hub.node_link_closed(links.pop().unwrap(), generation, false, 10, 11));
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(12).unwrap();
+        assert!(!hub.view().0.review_projects.contains("p"));
+        let _receiver = hub.node_link_opened("receiver", Vec::new(), 13).unwrap();
+        hub.refresh_task_review_projects(14).unwrap();
+        assert!(hub.view().0.review_projects.contains("p"));
+    }
+
+    #[test]
+    fn review_persists_reports_blocks_dependencies_and_refuses_a_stale_decision() {
+        use agora_protocol::v1::{
+            TaskReviewDecide, TaskReviewDecision, TaskReviewRead, TaskReviewState,
+        };
+        use serde_json::json;
+        let (hub, path) = hub_on_file("board-review");
+        let (task, _links) = stage_handoff(&hub, Vec::new());
+        let dependent = board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_create",
+            json!({"title": "dependent", "depends_on": [task]}),
+        ));
+        let dependent = dependent["task_id"].as_str().unwrap();
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(15).unwrap();
+        let submit = |hub: &Hub, summary| {
+            board_result(call_task_board(
+                hub,
+                "giver",
+                "task_complete",
+                json!({"task_id": task, "summary": summary, "refs": ["test:result"]}),
+            ));
+        };
+        let decide = |revision, decision: TaskReviewDecision| TaskReviewDecide {
+            project_id: "p".into(),
+            task_id: task.clone(),
+            report_revision: revision,
+            decision: decision as i32,
+        };
+        let read = |revision| TaskReviewRead {
+            project_id: "p".into(),
+            task_id: task.clone(),
+            report_revision: revision,
+        };
+        submit(&hub, "first report");
+        let key = format!("p/{task}");
+        emit_node_event(
+            &hub,
+            "receiver",
+            2,
+            Body::TaskChanged(agora_protocol::v1::TaskChanged {
+                project_id: "p".into(),
+                task_id: task.clone(),
+                title: "colliding local task".into(),
+                claimed_by_agent_id: "a".into(),
+                done: true,
+            }),
+        );
+        let (view, pos) = hub.view();
+        assert_eq!(view.task_reviews[&key].state(), TaskReviewState::Pending);
+        assert_eq!(view.tasks[&key].owner, "giver/a");
+        assert_eq!(view.tasks[&key].title, "handoff");
+        assert!(!view.tasks[&key].done);
+        let snapshot = crate::server::snapshot_of(&view, pos);
+        assert_eq!(snapshot.review_enabled_project_ids, ["p"]);
+        let legacy = snapshot.tasks.iter().find(|t| t.task_id == task).unwrap();
+        assert!(!legacy.done);
+        assert_eq!(legacy.claimed_by_agent_id, "giver/a");
+        let blocked = call_task_board(
+            &hub,
+            "receiver",
+            "task_claim",
+            json!({"task_id": dependent}),
+        );
+        assert!(matches!(
+            blocked.verdict,
+            crate::board::Verdict::Done { is_error: true, .. }
+        ));
+        drop(hub);
+
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let _links: Vec<_> = ["giver", "receiver"]
+            .into_iter()
+            .map(|n| {
+                hub.board_join_settled(n, "p");
+                hub.node_link_opened(n, Vec::new(), 20).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            hub.view().0.task_reviews[&key].state(),
+            TaskReviewState::Pending
+        );
+        let report = hub.task_review_read(&read(1), 22).unwrap();
+        assert_eq!(report.summary, "first report");
+        assert_eq!(report.refs, ["test:result"]);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER refuse_review BEFORE INSERT ON settings WHEN NEW.key = 'board.p' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert_eq!(
+            hub.task_review_decide("owner", &decide(1, TaskReviewDecision::Return), 23)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::Internal
+        );
+        assert_eq!(
+            hub.view().0.task_reviews[&key].state(),
+            TaskReviewState::Pending
+        );
+        connection
+            .execute_batch("DROP TRIGGER refuse_review;")
+            .unwrap();
+        let first_decision = decide(1, TaskReviewDecision::Return);
+        hub.task_review_decide("owner", &first_decision, 24)
+            .unwrap();
+        assert!(hub.view().0.tasks[&key].owner.is_empty());
+        let returned_at = hub.view().1;
+        hub.task_review_decide("owner", &first_decision, 25)
+            .unwrap();
+        assert_eq!(hub.view().1, returned_at);
+        board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_claim",
+            json!({"task_id": task}),
+        ));
+        assert_eq!(
+            hub.task_review_read(&read(1), 26).unwrap().summary,
+            "first report"
+        );
+        submit(&hub, "second report");
+        assert_eq!(
+            hub.task_review_decide("owner", &first_decision, 27)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::TaskReviewStale
+        );
+        assert_eq!(
+            hub.task_review_read(&read(1), 28).unwrap_err().code,
+            agora_protocol::ErrorCode::TaskReviewStale
+        );
+        let accept = decide(2, TaskReviewDecision::Accept);
+        let other = decide(2, TaskReviewDecision::Return);
+        // Both calls use the same report revision. Exactly one decision can commit.
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| hub.task_review_decide("owner", &accept, 29));
+            let b = hub.task_review_decide("owner", &other, 30);
+            (a.join().unwrap(), b)
+        });
+        assert_ne!(a.is_ok(), b.is_ok());
+        a.or(b).unwrap();
+        let (accepted_revision, accepted_text) = if hub.view().0.tasks[&key].done {
+            (2, "second report")
+        } else {
+            assert!(hub.view().0.tasks[&key].owner.is_empty());
+            board_result(call_task_board(
+                &hub,
+                "giver",
+                "task_claim",
+                json!({"task_id": task}),
+            ));
+            submit(&hub, "third report");
+            hub.task_review_decide("owner", &decide(3, TaskReviewDecision::Accept), 31)
+                .unwrap();
+            (3, "third report")
+        };
+        board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_claim",
+            json!({"task_id": dependent}),
+        ));
+        let state = hub.view().0.task_reviews[&key].state();
+        drop(connection);
+        drop(hub);
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert_eq!(hub.view().0.task_reviews[&key].state(), state);
+        assert_eq!(
+            hub.task_review_read(&read(accepted_revision), 32)
+                .unwrap()
+                .summary,
+            accepted_text
+        );
+        drop(hub);
+        remove_db(&path);
     }
 
     fn restart_receiver(hub: &Hub, evidence: &[u8]) {

@@ -413,7 +413,10 @@ impl Scope {
             Body::LeaseGranted(e) => self.lease_visible(node, &e.agent_id),
             Body::LeaseReleased(e) => self.lease_visible(node, &e.agent_id),
             // The shared board spans machines, so no single grant covers it.
-            Body::TaskChanged(_) | Body::TaskHandoffDeliveryChanged(_) => false,
+            Body::TaskChanged(_)
+            | Body::TaskHandoffDeliveryChanged(_)
+            | Body::TaskReviewChanged(_)
+            | Body::TaskReviewEnabled(_) => false,
             // ADR-0122: shared items are the owner's (they reach every agent on every machine).
             Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.

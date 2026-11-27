@@ -2313,6 +2313,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::UsageReport(_) => "usage.report",
         Cmd::Enroll(_) => "enroll",
         Cmd::TaskUpdate(_) => "task.update",
+        Cmd::TaskReviewRead(_) => "task.review.read",
+        Cmd::TaskReviewDecide(_) => "task.review.decide",
         Cmd::TaskDispatch(_) => "task.dispatch",
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",

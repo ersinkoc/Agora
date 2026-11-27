@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use agora_protocol::v1::command_request::Command as C;
-use agora_protocol::v1::CommandRequest;
+use agora_protocol::v1::{self, CommandRequest};
 use agora_protocol::{Error, ErrorCode};
 
 use crate::scope::Scope;
@@ -46,6 +46,8 @@ pub enum Route {
     AcknowledgeTaskHandoff {
         delivery_id: String,
     },
+    TaskReviewRead(v1::TaskReviewRead),
+    TaskReviewDecide(v1::TaskReviewDecide),
     /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
     ThemeCatalogList,
     ThemeCatalogGet {
@@ -77,7 +79,12 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
     let may = req.command.as_ref().is_some_and(|c| {
         // ADR-0109: only the hub can issue a durable handoff delivery.
         !matches!(c, C::DeliverTaskHandoff(_))
-            && (!matches!(c, C::AcknowledgeTaskHandoff(_)) || who.role == Role::Owner)
+            && (!matches!(
+                c,
+                C::AcknowledgeTaskHandoff(_) | C::TaskReviewRead(_) | C::TaskReviewDecide(_)
+            ) || who.role == Role::Owner)
+            && (!matches!(c, C::TaskReviewRead(_) | C::TaskReviewDecide(_))
+                || who.projects.is_none())
             // ADR-0122: a shared item reaches every agent on every machine: the owner's alone (a node asks on its own connection).
             && (!matches!(c, C::ShareItemPublish(_) | C::ShareItemRemove(_) | C::ShareItemList(_)) || who.role == Role::Owner)
             && !matches!(c, C::ShareItemGet(_))
@@ -109,6 +116,11 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         Some(C::AcknowledgeTaskHandoff(cmd)) => Route::AcknowledgeTaskHandoff {
             delivery_id: cmd.delivery_id.clone(),
         },
+        Some(C::TaskReviewRead(_) | C::TaskReviewDecide(_)) if names_a_node => {
+            Route::TargetNotAllowed
+        }
+        Some(C::TaskReviewRead(read)) => Route::TaskReviewRead(read.clone()),
+        Some(C::TaskReviewDecide(decision)) => Route::TaskReviewDecide(decision.clone()),
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
         Some(C::ThemeCatalogList(_) | C::ThemeCatalogGet(_)) if names_a_node => {
@@ -330,6 +342,42 @@ mod tests {
             route(&who(Role::Owner), None, &get),
             Route::Forbidden { .. }
         ));
+    }
+
+    #[test]
+    fn review_commands_stay_at_the_hub_and_decisions_require_an_owner() {
+        let command = |command| CommandRequest {
+            command: Some(command),
+            ..Default::default()
+        };
+        let read = command(C::TaskReviewRead(v1::TaskReviewRead::default()));
+        let mut decide = command(C::TaskReviewDecide(v1::TaskReviewDecide::default()));
+        let mut owner = who(Role::Owner);
+        owner.projects = None;
+        assert!(matches!(
+            route(&owner, None, &read),
+            Route::TaskReviewRead(_)
+        ));
+        assert!(matches!(
+            route(&owner, None, &decide),
+            Route::TaskReviewDecide(_)
+        ));
+        for role in [Role::Member, Role::Viewer] {
+            let scoped = Access {
+                projects: Some(["n/p".to_string()].into()),
+                ..who(role)
+            };
+            assert!(matches!(
+                route(&scoped, None, &read),
+                Route::Forbidden { .. }
+            ));
+            assert!(matches!(
+                route(&scoped, None, &decide),
+                Route::Forbidden { .. }
+            ));
+        }
+        decide.target_node = "node".into();
+        assert_eq!(route(&owner, None, &decide), Route::TargetNotAllowed);
     }
 
     /// A person's writes past the limit are refused until the span has passed; only the first refusal of a span is worth a row; other

@@ -208,6 +208,9 @@ pub struct TaskView {
 pub struct View {
     /// Shared-board tasks (ADR-0040), keyed `<project>/<task id>`.
     pub tasks: BTreeMap<String, TaskView>,
+    /// ADR-0125: metadata only. Completion reports stay with the board.
+    pub(crate) task_reviews: BTreeMap<String, agora_protocol::v1::TaskReview>,
+    pub(crate) review_projects: BTreeSet<String>,
     // Shared with subscription snapshots. Delivery events are the only writers.
     pub(crate) handoff_deliveries:
         Arc<BTreeMap<String, (u64, agora_protocol::v1::TaskHandoffDeliveryChanged)>>,
@@ -494,6 +497,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         // holds its node) are the hub's own facts.
         Body::NodeLink(_) => return Err("node_link"),
         Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
+        Body::TaskReviewChanged(_) => return Err("task_review_changed"),
+        Body::TaskReviewEnabled(_) => return Err("task_review_enabled"),
         // ADR-0122: the hub's word on a shared item; a node speaks only for itself when it refuses one.
         Body::ShareItemChanged(_) => return Err("share_item_changed"),
         Body::ShareItemRefused(e) => &e.node_id,
@@ -800,11 +805,30 @@ impl View {
         out
     }
 
+    /// Once a Review-enabled board owns a row, a node-local task with a reused id cannot replace it.
+    pub(crate) fn shadows_local_task(&self, event: &Event) -> bool {
+        let Some(Body::TaskChanged(task)) = &event.body else {
+            return false;
+        };
+        if event.producer_id == RESERVED_HUB_ID {
+            return false;
+        }
+        let project = agora_core::fold_project_id(&task.project_id);
+        self.review_projects.contains(project.as_ref())
+            && self
+                .tasks
+                .get(&format!("{project}/{}", task.task_id))
+                .is_some_and(|t| t.board_revision.is_some())
+    }
+
     pub fn apply(&mut self, ev: &Event) {
         self.apply_positioned(0, ev);
     }
 
     fn apply_positioned(&mut self, pos: u64, ev: &Event) {
+        if self.shadows_local_task(ev) {
+            return;
+        }
         // ADR-0115: an older node's project id for a repository on a case-insensitive host is read folded, and its spelling kept.
         self.note_spelling(ev);
         let folded = fold_event(ev);
@@ -1331,6 +1355,16 @@ impl View {
             Body::TaskHandoffDeliveryChanged(_) => {}
             // ADR-0122: nothing kept in the view yet (the hub's store keeps the items; build step 2).
             Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => {}
+            Body::TaskReviewEnabled(e) if producer == RESERVED_HUB_ID => {
+                self.review_projects.insert(e.project_id.clone());
+            }
+            Body::TaskReviewChanged(e) if producer == RESERVED_HUB_ID => {
+                let key = format!("{}/{}", e.project_id, e.task_id);
+                if let Some(review) = &e.review {
+                    self.task_reviews.insert(key, review.clone());
+                }
+            }
+            Body::TaskReviewEnabled(_) | Body::TaskReviewChanged(_) => {}
             Body::TaskChanged(t) => {
                 // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
                 let owner = match (

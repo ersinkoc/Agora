@@ -2330,3 +2330,11 @@ catalog-gallery-asks = It asks to see
 catalog-gallery-copy-command = Copy the command
 catalog-gallery-copied = Copied
 palette-gallery = Gallery: themes and plugins
+
+board-col-review = Review
+board-col-review-empty = No tasks awaiting review.
+board-review-read = Read report
+board-review-return = Return to Backlog
+board-review-accept = Accept
+board-review-read-failed = Could not load this report. Try again.
+board-review-decision-failed = Could not save this decision. Check the task and try again.

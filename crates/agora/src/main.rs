@@ -627,7 +627,7 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
         ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "remote-helpers"
-        | "themes" | "plugin" | "plugins"]
+        | "task-review" | "themes" | "plugin" | "plugins"]
             if !hubcli::hub_dir(opts).is_dir() =>
         {
             Box::new(hubcli::not_here)
@@ -638,6 +638,7 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         ["hub", "user"] => Box::new(hubcli::hub_user),
         ["hub", "fleet"] => Box::new(hubcli::hub_fleet),
         ["hub", "remote-helpers"] => Box::new(hubcli::hub_remote_helpers),
+        ["hub", "task-review"] => Box::new(hubcli::hub_task_review),
         ["hub", "plugin"] => Box::new(hubcli::hub_plugin),
         ["hub", "metrics-token"] => Box::new(hubcli::hub_metrics_token),
         ["hub", "audit"] => Box::new(hubcli::hub_audit),

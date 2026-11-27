@@ -71,7 +71,7 @@ export function viewOf(i: ViewInputs): PluginView {
     })),
     boards: Object.freeze(i.boards.map((b) => Object.freeze({
       project: b.project,
-      tasks: Object.freeze(b.tasks.filter(() => tasks++ < MAX_TASKS).map((t): TaskFacts => Object.freeze({ id: t.id, title: cut(t.title, 500) as string, status: t.status, owner: t.owner }))),
+      tasks: Object.freeze(b.tasks.filter(() => tasks++ < MAX_TASKS).map((t): TaskFacts => Object.freeze({ id: t.id, title: cut(t.title, 500) as string, status: t.status === 'review' ? 'claimed' : t.status, owner: t.owner }))),
     }))),
     ...(chat ? { chat: { connect: chat.connect.bind(chat) } } : {}),
     ...(a && load ? { diff: () => load(a), changesKey: `${a.id}:${a.filesChanged ?? 0}:${a.state}` } : {}),

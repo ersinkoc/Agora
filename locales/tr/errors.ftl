@@ -93,6 +93,7 @@ mesh-unavailable = Ağ yeniden bağlanıyor. Biraz sonra tekrar deneyin.
 mesh-start_denied = Başlatma reddedildi ({ $approval_id }).
 task-not_found = { $task_id } görevi bulunamadı.
 task-not_open = { $task_id } görevi zaten alınmış veya bitmiş.
+task-review_stale = { $task_id } görevinin bu incelemesi değişti. Güncel raporu açıp tekrar deneyin.
 task-blocked = { $task_id } görevi { $depends_on } görevini bekliyor.
 task-not_owner = { $task_id } görevi başka bir ajana ait.
 lease-not_found = { $lease_id } kilidi bulunamadı.

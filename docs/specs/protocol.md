@@ -1764,3 +1764,18 @@ shared board's team access. Once the hub persists expiry it never retries the de
 empty target node. A delivery must be unresolved. The hub removes its reservation and records acknowledgment in one
 transaction. A repeated request for an acknowledged outcome succeeds while that outcome remains in history. A missing,
 invalid or ineligible delivery ID is `protocol.invalid_message` with `field = delivery_id`.
+
+
+### Shared-board Review (ADR-0125)
+
+A hub operator opts in per shared project with `agora hub task-review enable PROJECT_ID`. The hub confirms the opt-in
+through `TaskReviewEnabled` when it sees both nodes of the shared board online. It puts the enabled project IDs and
+report metadata into the snapshot and sends metadata that did not fit at the snapshot position. Only the hub can
+publish `TaskReviewChanged` and `TaskReviewEnabled`. A pending report keeps the legacy `TaskChanged.done` flag false.
+The report payload stays with the board and a window with board access fetches it through `TaskReviewRead`.
+
+`TaskReviewDecide` names the project, task, report revision and accept or return decision. It is handled on the hub
+without a target node. The hub requires the authenticated owner, records the reviewer from that session and commits
+the board and events together. A repeated identical decision by the same reviewer succeeds without a second event.
+A stale revision or conflicting decision returns `task.review_stale`. Hub database version 21 prevents an older hub
+from loading the board as ordinary claims.

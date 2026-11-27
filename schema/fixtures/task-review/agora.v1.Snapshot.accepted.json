@@ -1,0 +1,21 @@
+{
+  "pos": "27",
+  "tasks": [
+    {
+      "taskId": "t-1",
+      "projectId": "p",
+      "title": "Prepare a report",
+      "claimedByAgentId": "n/a",
+      "done": true,
+      "review": {
+        "reportRevision": "1",
+        "reportingAgentId": "n/a",
+        "reportedAtMs": "1720",
+        "state": "TASK_REVIEW_STATE_ACCEPTED",
+        "reviewerId": "owner",
+        "decidedAtMs": "1900"
+      }
+    }
+  ],
+  "reviewEnabledProjectIds": ["p"]
+}

@@ -136,6 +136,7 @@ message TaskSnapshot {
   // `<node>/<agent>` for a shared board; empty while open.
   string claimed_by_agent_id = 4;
   bool done = 5;
+  TaskReview review = 6; // ADR-0125.
 }
 
 message LeaseSnapshot {
@@ -165,6 +166,7 @@ message Snapshot {
   repeated PositionedEvent recent_messages = 12;
   // ADR-0121: bounded delivery states, oldest to newest by hub event sequence.
   repeated TaskHandoffDeliveryChanged task_handoff_deliveries = 13;
+  repeated string review_enabled_project_ids = 14; // ADR-0125.
 }
 
 // hub -> client for every live or replayed event.

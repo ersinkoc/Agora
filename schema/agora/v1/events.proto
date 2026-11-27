@@ -75,6 +75,9 @@ message Event {
     // ADR-0122: the hub says a shared item changed; a node says it will not give one to its agents.
     ShareItemChanged share_item_changed = 92;
     ShareItemRefused share_item_refused = 93;
+    // ADR-0125: the hub owns shared-board review.
+    TaskReviewChanged task_review_changed = 94;
+    TaskReviewEnabled task_review_enabled = 95;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -508,4 +511,31 @@ message WorkspaceStatusChanged {
   uint32 insertions = 3;
   uint32 deletions = 4;
   string head_commit = 5;
+}
+
+enum TaskReviewState {
+  TASK_REVIEW_STATE_UNSPECIFIED = 0;
+  TASK_REVIEW_STATE_PENDING = 1;
+  TASK_REVIEW_STATE_ACCEPTED = 2;
+  TASK_REVIEW_STATE_RETURNED = 3;
+}
+
+// ADR-0125: the latest report and review decision. Report text is fetched separately.
+message TaskReview {
+  uint64 report_revision = 1;
+  string reporting_agent_id = 2;
+  uint64 reported_at_ms = 3;
+  TaskReviewState state = 4;
+  string reviewer_id = 5;
+  uint64 decided_at_ms = 6;
+}
+
+message TaskReviewChanged {
+  string project_id = 1;
+  string task_id = 2;
+  TaskReview review = 3;
+}
+
+message TaskReviewEnabled {
+  string project_id = 1;
 }

@@ -1,3 +1,4 @@
+import { BoardReviewContext } from './components/BoardReview';
 import { AcknowledgeHandoffContext } from './components/BoardHandoffs';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
@@ -726,6 +727,16 @@ export function App() {
     <AcknowledgeHandoffContext.Provider value={api && ownsMachines(role) ? async (deliveryId) => {
       await api.command('', { acknowledgeTaskHandoff: { deliveryId } });
     } : undefined}>
+    <BoardReviewContext.Provider value={api ? {
+      read: async (request) => {
+        const response = await api.command('', { taskReviewRead: request });
+        if (!response.taskReviewReport) throw new Error('task.review_stale');
+        return response.taskReviewReport;
+      },
+      decide: ownsMachines(role) && link === 'live' ? async (request) => {
+        await api.command('', { taskReviewDecide: request });
+      } : undefined,
+    } : undefined}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
       {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined} heldGrants={hub && api ? heldGrants : undefined} revokeHeld={hub && changes ? revokeHeld : undefined}
@@ -767,6 +778,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </GiveContext.Provider>
+    </BoardReviewContext.Provider>
     </AcknowledgeHandoffContext.Provider>
     </ChatActionsContext.Provider>
     </CloseAgentContext.Provider>

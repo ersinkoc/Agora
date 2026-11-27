@@ -28,7 +28,7 @@ export function ProjectBoard({ board: b, machines = [] }: { board: BoardModel; m
       <ul className="m-0 grid list-none gap-1 p-0 text-[0.8125rem]">
         {b.tasks.map(task => <li key={task.id} className="flex items-baseline justify-between gap-2">
           <span className={`min-w-0 line-clamp-2 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`} title={visible(task.title)}>{visible(task.title)}</span>
-          <span className="shrink-0"><Tag>{task.status === 'open' ? t('board-open') : task.status === 'done' ? t('board-done') : visible(task.owner)}</Tag></span>
+          <span className="shrink-0"><Tag>{task.status === 'open' ? t('board-open') : task.status === 'done' ? t('board-done') : task.status === 'review' ? t('board-col-review') : visible(task.owner)}</Tag></span>
         </li>)}
       </ul>
       {b.leases.length > 0 && <ul className="m-0 grid list-none gap-1 border-t border-line p-0 pt-1.5 text-xs text-muted">

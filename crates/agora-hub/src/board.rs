@@ -9,13 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use agora_core::{AgentId, LeaseTable, TaskId};
-use agora_mesh::broker::{AgentInfo, Limits, Mesh};
+use agora_mesh::broker::{AgentInfo, Limits, Mesh, ReviewReport};
 use agora_mesh::mcp::{
     board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
     BOARD_TOOLS,
 };
-use agora_protocol::v1::event::Body;
+use agora_protocol::v1::{event::Body, TaskReview, TaskReviewReport, TaskReviewState};
 use agora_protocol::{Error, ErrorCode};
+use prost::Message;
 use serde_json::{json, Value};
 
 use crate::projection::View;
@@ -161,6 +162,19 @@ struct Joins {
 
 /// A project's board at one moment (see [`Boards::checkpoint`]).
 pub struct Checkpoint(Option<Mesh>);
+
+// Reuse the metadata's protobuf encoding inside the board's JSON snapshot.
+fn review_json(report: &ReviewReport) -> Value {
+    json!({"metadata": report.metadata.encode_to_vec(), "refs": report.refs})
+}
+
+fn stored_review(value: &Value) -> Option<ReviewReport> {
+    let bytes = serde_json::from_value::<Vec<u8>>(value["metadata"].clone()).ok()?;
+    Some(ReviewReport {
+        metadata: TaskReview::decode(bytes.as_slice()).ok()?,
+        refs: serde_json::from_value(value["refs"].clone()).ok()?,
+    })
+}
 
 /// Whether a board tool can change the board (everything but reading the task list).
 pub fn changes_board(tool: &str) -> bool {
@@ -539,6 +553,7 @@ impl Boards {
                     "done": t.status == TaskStatus::Done,
                     "owner": t.owner.as_ref().map(AgentId::as_str),
                     "summary": t.summary,
+                    "review": t.review.as_ref().map(review_json),
                 })
             })
             .collect();
@@ -822,34 +837,78 @@ impl Boards {
             }
         }
         let text = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
-        let tasks: Vec<TaskEntry> = task_values
-            .iter()
-            .map(|t| {
-                let owner = t["owner"].as_str().map(AgentId::new);
-                let done = t["done"].as_bool().unwrap_or(false);
-                TaskEntry {
-                    id: agora_core::TaskId::new(text(t, "id")),
-                    project: project.to_string(),
-                    title: text(t, "title"),
-                    detail: text(t, "detail"),
-                    depends_on: t["depends_on"]
-                        .as_array()
-                        .map(|d| {
-                            d.iter()
-                                .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    status: match (&owner, done) {
-                        (None, _) => TaskStatus::Open,
-                        (Some(_), false) => TaskStatus::Claimed,
-                        (Some(_), true) => TaskStatus::Done,
-                    },
-                    owner,
-                    summary: t["summary"].as_str().map(str::to_string),
+        let mut tasks = Vec::with_capacity(task_values.len());
+        for t in task_values {
+            let owner = t["owner"].as_str().map(AgentId::new);
+            let done = t["done"].as_bool().unwrap_or(false);
+            let review: Option<ReviewReport> = if t["review"].is_null() {
+                None
+            } else {
+                let Some(meta) = stored_review(&t["review"]) else {
+                    return;
+                };
+                let Some(summary) = t["summary"].as_str() else {
+                    return;
+                };
+                let r = &meta.metadata;
+                let state_ok = match r.state() {
+                    TaskReviewState::Pending => {
+                        !done
+                            && r.reviewer_id.is_empty()
+                            && owner
+                                .as_ref()
+                                .is_some_and(|a| a.as_str() == r.reporting_agent_id)
+                    }
+                    TaskReviewState::Accepted => {
+                        done && !r.reviewer_id.is_empty()
+                            && owner
+                                .as_ref()
+                                .is_some_and(|a| a.as_str() == r.reporting_agent_id)
+                    }
+                    TaskReviewState::Returned => !done && !r.reviewer_id.is_empty(),
+                    TaskReviewState::Unspecified => false,
+                };
+                if !state_ok
+                    || r.report_revision == 0
+                    || !qualified_agent(&r.reporting_agent_id)
+                    || Limits::default()
+                        .check_content(summary, &meta.refs)
+                        .is_err()
+                {
+                    return;
                 }
-            })
-            .collect();
+                Some(meta)
+            };
+            tasks.push(TaskEntry {
+                id: agora_core::TaskId::new(text(t, "id")),
+                project: project.to_string(),
+                title: text(t, "title"),
+                detail: text(t, "detail"),
+                depends_on: t["depends_on"]
+                    .as_array()
+                    .map(|d| {
+                        d.iter()
+                            .filter_map(|x| x.as_str().map(agora_core::TaskId::new))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                status: match (&owner, done) {
+                    (None, _) => TaskStatus::Open,
+                    (Some(_), true) => TaskStatus::Done,
+                    (Some(_), false)
+                        if review
+                            .as_ref()
+                            .is_some_and(|r| r.metadata.state() == TaskReviewState::Pending) =>
+                    {
+                        TaskStatus::Review
+                    }
+                    (Some(_), false) => TaskStatus::Claimed,
+                },
+                owner,
+                summary: t["summary"].as_str().map(str::to_string),
+                review,
+            });
+        }
         let Some(next) = v["next"].as_u64() else {
             return;
         };
@@ -1024,6 +1083,38 @@ impl Boards {
         }
     }
 
+    pub(crate) fn review_report(
+        &self,
+        project: &str,
+        task: &str,
+        revision: u64,
+    ) -> Result<TaskReviewReport, Error> {
+        let boards = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mesh = boards
+            .get(project)
+            .ok_or_else(|| Error::new(ErrorCode::TaskNotFound).with("task_id", task))?;
+        mesh.review_report(task, revision)
+            .map_err(|e| e.to_error(&mesh.limits()))
+    }
+
+    pub(crate) fn review_decide(
+        &self,
+        project: &str,
+        task: &str,
+        revision: u64,
+        reviewer: &str,
+        accept: bool,
+        now_ms: u64,
+    ) -> Result<Vec<Body>, Error> {
+        let mut boards = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let mesh = boards
+            .get_mut(project)
+            .ok_or_else(|| Error::new(ErrorCode::TaskNotFound).with("task_id", task))?;
+        mesh.review_decide(task, revision, reviewer, accept, now_ms)
+            .map_err(|e| e.to_error(&mesh.limits()))?;
+        Ok(mesh.take_events())
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Runs one board tool for `agent` of `node` (both as the hub knows them: `node` from the connection's certificate).
     pub fn call(
@@ -1053,6 +1144,7 @@ impl Boards {
             return bad("arguments_json");
         }
         let nodes = nodes_with(view, project);
+        let review_enabled = view.review_projects.contains(project);
         // A node can only speak for a project represented by its checkout, workspace or running session. A board is in use while two nodes share the project, and (ADR-0039
         // amendment A) while it still holds a task that is not done or a lease that has not ended: a node that drops must not make
         // the other one fall back to a local broker that knows nothing of the hub's tasks.
@@ -1080,6 +1172,9 @@ impl Boards {
         let mesh = guard
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
+        if review_enabled {
+            mesh.enable_review();
+        }
         Self::sync(mesh, view, project, now_ms);
         mesh.release_orphans();
         mesh.expire_leases(now_ms);

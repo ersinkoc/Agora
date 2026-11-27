@@ -869,6 +869,7 @@ impl McpConnection {
                     Ok(None) => None,
                     Ok(Some("open")) => Some(TaskStatus::Open),
                     Ok(Some("claimed")) => Some(TaskStatus::Claimed),
+                    Ok(Some("review")) => Some(TaskStatus::Review),
                     Ok(Some("done")) => Some(TaskStatus::Done),
                     _ => return bad(),
                 };
@@ -878,7 +879,7 @@ impl McpConnection {
                 };
                 done(mesh.task_list(me, status).map(|ts| json!(ts.iter().filter(|t| only.is_none_or(|id| t.id.as_str() == id)).map(|t| json!({
                     "task_id": t.id.as_str(), "title": t.title, "detail": t.detail,
-                    "status": match t.status { TaskStatus::Open => "open", TaskStatus::Claimed => "claimed", TaskStatus::Done => "done" },
+                    "status": match t.status { TaskStatus::Open => "open", TaskStatus::Claimed => "claimed", TaskStatus::Review => "review", TaskStatus::Done => "done" },
                     "owner": t.owner.as_ref().map(AgentId::as_str),
                     "depends_on": t.depends_on.iter().map(agora_core::TaskId::as_str).collect::<Vec<_>>(),
                     "summary": t.summary,
@@ -915,7 +916,7 @@ impl McpConnection {
                     return reply(id, error_result(&e, &limits));
                 }
                 done(
-                    mesh.task_complete(me, t, summary)
+                    mesh.task_complete_with_refs(me, t, summary, &refs, now)
                         .map(|()| json!({"ok": true})),
                 )
             }

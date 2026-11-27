@@ -3,9 +3,9 @@ import { visible as showHidden } from '../net/hidden';
 
 // ADR-0095 step 1: the three columns of a project's board, over the statuses the mesh board already has (no message changes).
 // Backlog = open (nobody holds it), Doing = claimed, Done = done. Pure: no I/O, no state.
-export type ColumnId = 'backlog' | 'doing' | 'done';
+export type ColumnId = 'backlog' | 'doing' | 'review' | 'done';
 export const COLUMN_ORDER: readonly ColumnId[] = ['backlog', 'doing', 'done'];
-const STATUS_COLUMN: Record<BoardTaskModel['status'], ColumnId> = { open: 'backlog', claimed: 'doing', done: 'done' };
+const STATUS_COLUMN: Record<BoardTaskModel['status'], ColumnId> = { open: 'backlog', claimed: 'doing', review: 'review', done: 'done' };
 
 // A spammed board must not freeze the window: a column draws this many cards, more on request.
 export const COLUMN_PAGE = 200;
@@ -15,10 +15,11 @@ export const HELD_SHOWN = 3;
 
 export interface Column { id: ColumnId; total: number; cards: BoardTaskModel[] }
 
-export function columnsOf(tasks: readonly BoardTaskModel[], shown: Partial<Record<ColumnId, number>> = {}): Column[] {
-  const all: Record<ColumnId, BoardTaskModel[]> = { backlog: [], doing: [], done: [] };
+export function columnsOf(tasks: readonly BoardTaskModel[], shown: Partial<Record<ColumnId, number>> = {}, review = false): Column[] {
+  const all: Record<ColumnId, BoardTaskModel[]> = { backlog: [], doing: [], review: [], done: [] };
   for (const task of tasks) all[STATUS_COLUMN[task.status] ?? 'backlog'].push(task);
-  return COLUMN_ORDER.map((id) => ({ id, total: all[id].length, cards: all[id].slice(0, Math.max(COLUMN_PAGE, shown[id] ?? 0)) }));
+  const order: readonly ColumnId[] = review || all.review.length ? ['backlog', 'doing', 'review', 'done'] : COLUMN_ORDER;
+  return order.map((id) => ({ id, total: all[id].length, cards: all[id].slice(0, Math.max(COLUMN_PAGE, shown[id] ?? 0)) }));
 }
 
 // Control characters (C0, C1) and bidirectional controls/isolates never reach the screen; the rest is shown as plain text.

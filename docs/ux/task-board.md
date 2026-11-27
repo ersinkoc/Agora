@@ -65,3 +65,9 @@ two different projects with the same name stay separate. Each card shows its ful
 and an expandable **Machines and folders** list with enrollment IDs and paths. Copies of one project share a card,
 even when machine host names match. Git subdirectories describe the same checkout root; non-Git folders retain
 their own paths. A selected-directory agent's held paths appear under its workspace's project as well.
+
+
+**Review** (ADR-0125). A shared board with Review enabled has a Review column. Select **Read report** to see the agent's
+summary and references. The hub owner can **Accept** the report into Done or **Return to Backlog** so the task can be
+given again. Dependencies stay blocked until the prerequisite is accepted. The terminal client still uses its three
+columns and shows pending reports in Doing.

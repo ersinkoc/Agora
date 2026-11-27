@@ -6,6 +6,7 @@ use crate::ids::{AgentId, TaskId};
 pub enum TaskState {
     Open,
     Claimed(AgentId),
+    Review(AgentId),
     Done(AgentId),
 }
 
@@ -55,6 +56,29 @@ impl Task {
             }
             _ => Err(TaskError::NotClaimedByAgent),
         }
+    }
+
+    pub fn submit_for_review(&mut self, agent: &AgentId) -> Result<(), TaskError> {
+        match &self.state {
+            TaskState::Claimed(by) if by == agent => {
+                self.state = TaskState::Review(agent.clone());
+                Ok(())
+            }
+            _ => Err(TaskError::NotClaimedByAgent),
+        }
+    }
+
+    /// The caller authorizes the decision. A report can be accepted or returned while it is pending.
+    pub fn decide_review(&mut self, accept: bool) -> Result<(), TaskError> {
+        let TaskState::Review(agent) = &self.state else {
+            return Err(TaskError::NotClaimedByAgent);
+        };
+        self.state = if accept {
+            TaskState::Done(agent.clone())
+        } else {
+            TaskState::Open
+        };
+        Ok(())
     }
 
     /// Give a claimed task back (also the first half of a handoff).

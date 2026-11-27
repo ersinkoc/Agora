@@ -94,6 +94,7 @@ mesh-unavailable = The mesh is reconnecting. Try again in a moment.
 mesh-start_denied = The start was refused ({ $approval_id }).
 task-not_found = Task { $task_id } was not found.
 task-not_open = Task { $task_id } is already taken or done.
+task-review_stale = This review of task { $task_id } has changed. Open the current report and try again.
 task-blocked = Task { $task_id } waits for { $depends_on }.
 task-not_owner = Task { $task_id } belongs to another agent.
 lease-not_found = Lease { $lease_id } was not found.

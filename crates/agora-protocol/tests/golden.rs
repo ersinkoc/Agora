@@ -188,3 +188,34 @@ fn node_startup_with_retained_agent_run_matches_fixture() {
         if online.retained_agent_runs.len() == 1 && online.retained_agent_runs[0].run_id.len() == 16)
     );
 }
+
+#[test]
+fn shared_board_review_matches_additive_fixtures() {
+    let pool = pool();
+    let path = dir().join("../task-review");
+    for (ty, case) in [
+        ("Event", "pending"),
+        ("Snapshot", "accepted"),
+        ("CommandRequest", "return"),
+    ] {
+        let name = format!("agora.v1.{ty}");
+        let json = std::fs::read_to_string(path.join(format!("{name}.{case}.json"))).expect("JSON");
+        let desc = pool.get_message_by_name(&name).expect("descriptor");
+        let mut de = serde_json::Deserializer::from_str(&json);
+        let bytes = DynamicMessage::deserialize(desc, &mut de)
+            .expect("fixture")
+            .encode_to_vec();
+        let bin = path.join(format!("{name}.{case}.bin"));
+        if std::env::var_os("AGORA_WRITE_FIXTURES").is_some() && !bin.exists() {
+            std::fs::write(&bin, &bytes).expect("new fixture");
+        }
+        assert_eq!(std::fs::read(bin).expect("binary fixture"), bytes);
+        use agora_protocol::v1;
+        let round_trip = match ty {
+            "Event" => v1::Event::decode(bytes.as_slice()).map(|e| e.encode_to_vec()),
+            "Snapshot" => v1::Snapshot::decode(bytes.as_slice()).map(|s| s.encode_to_vec()),
+            _ => v1::CommandRequest::decode(bytes.as_slice()).map(|r| r.encode_to_vec()),
+        };
+        assert_eq!(round_trip.expect("typed fixture"), bytes);
+    }
+}

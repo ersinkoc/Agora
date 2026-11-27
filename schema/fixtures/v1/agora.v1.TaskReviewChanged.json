@@ -1,0 +1,12 @@
+{
+  "projectId": "x",
+  "taskId": "x",
+  "review": {
+    "reportRevision": "1",
+    "reportingAgentId": "x",
+    "reportedAtMs": "1",
+    "state": "TASK_REVIEW_STATE_PENDING",
+    "reviewerId": "x",
+    "decidedAtMs": "1"
+  }
+}

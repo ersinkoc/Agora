@@ -904,6 +904,7 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 title: t.title.clone(),
                 claimed_by_agent_id: t.owner.clone(),
                 done: t.done,
+                review: None,
             })
             .collect(),
         leases: view
@@ -916,8 +917,36 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
             })
             .collect(),
         task_handoff_deliveries: Vec::new(),
+        review_enabled_project_ids: Vec::new(),
     };
     let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
+    for project in &view.review_projects {
+        let size = prost::encoding::key_len(14)
+            + prost::encoding::encoded_len_varint(project.len() as u64)
+            + project.len();
+        if size <= remaining {
+            remaining -= size;
+            snapshot.review_enabled_project_ids.push(project.clone());
+        }
+    }
+    for task in &mut snapshot.tasks {
+        if let Some(review) = view
+            .task_reviews
+            .get(&format!("{}/{}", task.project_id, task.task_id))
+        {
+            let len = task.encoded_len();
+            let metadata = review.encoded_len();
+            let extra = prost::encoding::key_len(6)
+                + prost::encoding::encoded_len_varint(metadata as u64)
+                + metadata;
+            let size = extra + prost::encoding::encoded_len_varint((len + extra) as u64)
+                - prost::encoding::encoded_len_varint(len as u64);
+            if size <= remaining {
+                remaining -= size;
+                task.review = Some(review.clone());
+            }
+        }
+    }
     if owner {
         let mut statuses: Vec<_> = view.handoff_deliveries.values().collect();
         statuses.sort_unstable_by_key(|(seq, status)| {
@@ -1076,6 +1105,9 @@ where
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
+        if scope.is_none() {
+            send_review_overflow(&mut conn, view, &body, *pos).await?;
+        }
         if owner && scope.is_none() && !view.handoff_deliveries.is_empty() {
             // Active reservations must stay reachable even when the base snapshot fills the frame.
             let included: std::collections::BTreeSet<_> = body
@@ -1123,7 +1155,7 @@ where
     }
     drop(snapshot);
     for d in &subscription.backlog {
-        send_shown(&mut conn, d, owner).await?;
+        send_shown(&mut conn, hub, d, owner).await?;
     }
     let mut checked = tokio::time::Instant::now();
     let (relays, mut relay_frames) = hub.router().client();
@@ -1162,7 +1194,7 @@ where
             match subscription.live.try_recv() {
                 Ok(d) => {
                     if scope.as_mut().is_none_or(|s| s.admit(&d.event)) {
-                        send_shown(&mut conn, &d, owner).await?;
+                        send_shown(&mut conn, hub, &d, owner).await?;
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1386,6 +1418,23 @@ where
             let outcome = result.as_ref().map_or_else(|e| e.code.as_str(), |()| "ok");
             audit(hub, who, "task_handoff.acknowledge", "", outcome);
             Some(match result {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::TaskReviewRead(req) => {
+            Some(match hub.task_review_read(&req, now_ms()) {
+                Ok(report) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::TaskReviewReport(report)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::TaskReviewDecide(req) => {
+            Some(match hub.task_review_decide(&who.user, &req, now_ms()) {
                 Ok(()) => ok_empty(client_request_id.clone()),
                 Err(e) => refuse(e),
             })
@@ -1681,8 +1730,60 @@ where
 }
 
 /// [`send_positioned`], with what only the owner may see taken out for anyone else (ADR-0069: a machine's full executable path).
+async fn send_review_overflow<S>(
+    conn: &mut Conn<S>,
+    view: &View,
+    snapshot: &v1::Snapshot,
+    pos: u64,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use v1::event::Body;
+    let mut omitted = Vec::new();
+    for project in &view.review_projects {
+        if snapshot
+            .review_enabled_project_ids
+            .binary_search(project)
+            .is_err()
+        {
+            omitted.push(Body::TaskReviewEnabled(v1::TaskReviewEnabled {
+                project_id: project.clone(),
+            }));
+        }
+    }
+    for task in &snapshot.tasks {
+        if task.review.is_none() {
+            let key = format!("{}/{}", task.project_id, task.task_id);
+            if let Some(review) = view.task_reviews.get(&key) {
+                omitted.push(Body::TaskReviewChanged(v1::TaskReviewChanged {
+                    project_id: task.project_id.clone(),
+                    task_id: task.task_id.clone(),
+                    review: Some(review.clone()),
+                }));
+            }
+        }
+    }
+    for body in omitted {
+        send_positioned(
+            conn,
+            &crate::hub::Delivered {
+                pos,
+                event: v1::Event {
+                    producer_id: crate::ca::RESERVED_HUB_ID.to_string(),
+                    body: Some(body),
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn send_shown<S>(
     conn: &mut Conn<S>,
+    hub: &Hub,
     d: &crate::hub::Delivered,
     owner: bool,
 ) -> Result<(), ServeError>
@@ -1695,6 +1796,9 @@ where
             Some(v1::event::Body::TaskHandoffDeliveryChanged(_))
         )
     {
+        return Ok(());
+    }
+    if hub.shadows_local_task(&d.event) {
         return Ok(());
     }
     // ADR-0115: a window gets an older node's project id folded, as the snapshot has it.
@@ -3278,7 +3382,19 @@ async fn run_with(
 ) {
     tokio::select! {
         () = crate::handoff::run(&state.hub) => {}
+        () = refresh_review_projects(&state.hub) => {}
         () = accept_connections(listener, Arc::clone(&state), tls) => {}
+    }
+}
+
+async fn refresh_review_projects(hub: &Hub) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if let Err(e) = hub.refresh_task_review_projects(now_ms()) {
+            crate::log_line!("task review projects: {e}");
+        }
     }
 }
 
@@ -3428,6 +3544,41 @@ mod snapshot_budget_tests {
         padding(view).push_str(&detail);
         padding(&mut base).push_str(&detail);
         assert_eq!(snapshot(&base).encoded_len(), DEFAULT_MAX_PAYLOAD - bytes);
+    }
+
+    #[test]
+    fn a_full_snapshot_leaves_review_metadata_for_positioned_replay() {
+        let mut view = fixture("");
+        view.messages = Arc::default();
+        record(
+            &mut view,
+            5,
+            crate::ca::RESERVED_HUB_ID,
+            Body::TaskChanged(v1::TaskChanged {
+                task_id: "t-1".into(),
+                project_id: "p".into(),
+                title: "Review this".into(),
+                claimed_by_agent_id: "n1/a".into(),
+                done: false,
+            }),
+        );
+        let snapshot = |view: &View| snapshot_of(view, SNAPSHOT_POS);
+        leave_space(&mut view, 0, snapshot);
+        view.review_projects.insert("p".into());
+        view.task_reviews.insert(
+            "p/t-1".into(),
+            v1::TaskReview {
+                report_revision: 1,
+                state: v1::TaskReviewState::Pending as i32,
+                reporting_agent_id: "n1/a".into(),
+                ..Default::default()
+            },
+        );
+        let result = snapshot(&view);
+        assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
+        assert!(result.review_enabled_project_ids.is_empty());
+        assert!(result.tasks[0].review.is_none());
+        assert!(!result.tasks[0].done);
     }
 
     #[test]

@@ -761,6 +761,41 @@ pub fn hub_remote_helpers(say: &Say, o: &Opts) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// ADR-0125: configure opt-in on the hub's own machine. The running hub publishes it once the project is shared.
+pub fn hub_task_review(say: &Say, o: &Opts) -> ExitCode {
+    let [op, project] = o.positional.as_slice() else {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    };
+    if op != "enable"
+        || project.is_empty()
+        || project.len() > 4096
+        || project.chars().any(char::is_control)
+    {
+        say.err(key!("cli-bad-arguments"), &[]);
+        return ExitCode::from(2);
+    }
+    let project = agora_core::fold_project_id(project);
+    let dir = hub_dir(o);
+    let result = private_hub_dir(&dir)
+        .map_err(|e| e.to_string())
+        .and_then(|()| SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string()))
+        .and_then(|store| {
+            store
+                .enable_task_review(&project)
+                .map_err(|e| e.to_string())
+        });
+    if let Err(reason) = result {
+        say.err(key!("cli-hub-failed"), &[("reason", reason.into())]);
+        return ExitCode::from(1);
+    }
+    say.out(
+        key!("cli-hub-task-review-enabled"),
+        &[("project", project.as_ref().into())],
+    );
+    ExitCode::SUCCESS
+}
+
 /// `agora hub fleet on|off|status` (ADR-0112): whether agents see every machine and agent of a hub that has people besides the owner.
 /// A hub with no people but the owner always answers; the switch is kept in the hub's settings and read on every call, so a running
 /// hub follows it without a restart.

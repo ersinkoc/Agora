@@ -1,0 +1,9 @@
+{
+  "requestId": "r-7",
+  "taskReviewDecide": {
+    "projectId": "p",
+    "taskId": "t-1",
+    "reportRevision": "2",
+    "decision": "TASK_REVIEW_DECISION_RETURN"
+  }
+}

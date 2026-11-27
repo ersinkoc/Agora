@@ -818,6 +818,22 @@ describe('terminal history (ADR-0100 decision 2)', () => {
   });
 });
 
+it('folds trusted Review metadata even when it follows a full snapshot at the same position', () => {
+  const v = fromSnapshot({ pos: 7, tasks: [{ projectId: 'p', taskId: 't-1', title: 'Original', claimedByAgentId: 'n/a' }] });
+  const metadata = {
+    body: 'taskReviewChanged' as const,
+    taskReviewChanged: {
+      projectId: 'p', taskId: 't-1', review: { reportRevision: 1, state: agora.v1.TaskReviewState.TASK_REVIEW_STATE_PENDING },
+    },
+  };
+  applyEvent(v, 7, { ...metadata, producerId: 'n' });
+  expect(v.reviews.size).toBe(0);
+  applyEvent(v, 7, { ...metadata, producerId: 'hub' });
+  applyEvent(v, 7, { producerId: 'hub', body: 'taskReviewEnabled', taskReviewEnabled: { projectId: 'p' } });
+  applyEvent(v, 8, { producerId: 'n', body: 'taskChanged', taskChanged: { projectId: 'p', taskId: 't-1', title: 'Collision', done: true } });
+  expect(boards(v)[0]).toMatchObject({ reviewEnabled: true, tasks: [{ title: 'Original', status: 'review' }] });
+});
+
 it('folds handoff delivery status from snapshot and hub events without changing the task owner', () => {
   const row = { deliveryId: 'one', projectId: 'p', taskId: 't-1', receiverAgentId: 'west/a', state: 1 };
   const view = fromSnapshot({

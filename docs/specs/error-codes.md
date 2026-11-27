@@ -78,6 +78,7 @@ or a local response timeout has a localized retry message.
 | `mesh.unavailable` | — | ADR-0075: this agent's `agora mesh stdio` bridge lost its connection to the node (the node is restarting or updating) and is reconnecting. The call was not delivered or its answer was lost; the agent may repeat it. Carried as the `data` of a JSON-RPC error with code -32000 (the bridge answers, the node never sees it). Also a mesh tool's error from the node when it has not reserved ids yet (#965, mesh-tools.md "Message ids"): nothing was sent, and the agent may repeat it. Also the node's temporary refusal of a durable task handoff it could not store now (ADR-0109, protocol.md "Durable cross-node task handoffs") |
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
+| `task.review_stale` | `task_id` | The completion report revision or decision no longer matches the shared board |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
 | `task.not_owner` | `task_id` | Only the claiming agent may do this to the task |
 | `lease.not_found` | `lease_id` | No such lease held by the caller |

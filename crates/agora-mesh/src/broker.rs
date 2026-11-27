@@ -13,9 +13,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use agora_core::{AgentId, LeaseError, LeaseTable, Task, TaskError, TaskId, TaskState};
+use agora_core::{AgentId, LeaseError, LeaseTable, Task, TaskId, TaskState};
 use agora_protocol::v1::event::Body;
-use agora_protocol::v1::{HandoffCreated, LeaseGranted, LeaseReleased, MessagePosted, TaskChanged};
+use agora_protocol::v1::{
+    HandoffCreated, LeaseGranted, LeaseReleased, MessagePosted, TaskChanged, TaskReview,
+    TaskReviewChanged, TaskReviewReport, TaskReviewState,
+};
 use agora_protocol::{Error, ErrorCode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +129,7 @@ pub enum MeshError {
     TaskUnknown(String),
     /// The task is not open (claimed or done).
     TaskNotOpen(String),
+    TaskReviewStale(String),
     /// A dependency of the task is not done yet.
     TaskBlocked {
         task: String,
@@ -172,6 +176,9 @@ impl MeshError {
             }
             Self::TaskUnknown(t) | Self::DependencyUnknown(t) => {
                 Error::new(ErrorCode::TaskNotFound).with("task_id", t.as_str())
+            }
+            Self::TaskReviewStale(t) => {
+                Error::new(ErrorCode::TaskReviewStale).with("task_id", t.as_str())
             }
             Self::TaskNotOpen(t) => Error::new(ErrorCode::TaskNotOpen).with("task_id", t.as_str()),
             Self::TaskBlocked { task, depends_on } => Error::new(ErrorCode::TaskBlocked)
@@ -221,6 +228,13 @@ struct Ask {
     answer: Option<(String, AgentId)>,
 }
 
+/// The task's latest report and review, kept with the board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewReport {
+    pub metadata: TaskReview,
+    pub refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskEntry {
     pub id: TaskId,
@@ -231,12 +245,14 @@ pub struct TaskEntry {
     pub status: TaskStatus,
     pub owner: Option<AgentId>,
     pub summary: Option<String>,
+    pub review: Option<ReviewReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Open,
     Claimed,
+    Review,
     Done,
 }
 
@@ -247,6 +263,7 @@ struct TaskRec {
     detail: String,
     depends_on: Vec<TaskId>,
     summary: Option<String>,
+    review: Option<ReviewReport>,
 }
 
 /// At most this many tasks and leases of one project go to the shared board when it becomes shared (ADR-0039 amendment B); the hub
@@ -300,6 +317,7 @@ pub struct Mesh {
     asks: BTreeMap<String, Ask>,
     tasks: BTreeMap<TaskId, TaskRec>,
     retained_claims: BTreeMap<TaskId, AgentId>,
+    review_enabled: bool,
     leases: BTreeMap<String, LeaseTable>,
     batches: BTreeMap<String, LeaseBatch>,
     next: u64,
@@ -325,6 +343,7 @@ impl Mesh {
             asks: BTreeMap::new(),
             tasks: BTreeMap::new(),
             retained_claims: BTreeMap::new(),
+            review_enabled: false,
             leases: BTreeMap::new(),
             batches: BTreeMap::new(),
             next: 1,
@@ -1120,7 +1139,9 @@ impl Mesh {
         if let Some(t) = self.tasks.get(id) {
             let owner = match t.task.state() {
                 TaskState::Open => String::new(),
-                TaskState::Claimed(a) | TaskState::Done(a) => a.as_str().to_string(),
+                TaskState::Claimed(a) | TaskState::Review(a) | TaskState::Done(a) => {
+                    a.as_str().to_string()
+                }
             };
             self.events.push(Body::TaskChanged(TaskChanged {
                 task_id: id.as_str().to_string(),
@@ -1136,6 +1157,7 @@ impl Mesh {
         let (status, owner) = match t.task.state() {
             TaskState::Open => (TaskStatus::Open, None),
             TaskState::Claimed(a) => (TaskStatus::Claimed, Some(a.clone())),
+            TaskState::Review(a) => (TaskStatus::Review, Some(a.clone())),
             TaskState::Done(a) => (TaskStatus::Done, Some(a.clone())),
         };
         TaskEntry {
@@ -1147,6 +1169,7 @@ impl Mesh {
             status,
             owner,
             summary: t.summary.clone(),
+            review: t.review.clone(),
         }
     }
 
@@ -1180,6 +1203,7 @@ impl Mesh {
                 detail: detail.to_string(),
                 depends_on: deps,
                 summary: None,
+                review: None,
             },
         );
         self.task_changed(&id);
@@ -1202,8 +1226,14 @@ impl Mesh {
             let mut task = Task::new(e.id.clone(), e.title.clone());
             if let Some(owner) = &e.owner {
                 let _ = task.claim(owner);
-                if e.status == TaskStatus::Done {
-                    let _ = task.complete(owner);
+                match e.status {
+                    TaskStatus::Done => {
+                        let _ = task.complete(owner);
+                    }
+                    TaskStatus::Review => {
+                        let _ = task.submit_for_review(owner);
+                    }
+                    _ => {}
                 }
             }
             self.tasks.insert(
@@ -1214,6 +1244,7 @@ impl Mesh {
                     detail: e.detail.clone(),
                     depends_on: e.depends_on.clone(),
                     summary: e.summary.clone(),
+                    review: e.review.clone(),
                 },
             );
         }
@@ -1467,19 +1498,123 @@ impl Mesh {
         id: &str,
         summary: &str,
     ) -> Result<(), MeshError> {
+        self.task_complete_with_refs(by, id, summary, &[], 0)
+    }
+
+    /// ADR-0125: enabled by the shared board's hub. A node-local broker never enables Review.
+    pub fn enable_review(&mut self) {
+        self.review_enabled = true;
+    }
+
+    pub fn task_complete_with_refs(
+        &mut self,
+        by: &AgentId,
+        id: &str,
+        summary: &str,
+        refs: &[String],
+        now_ms: u64,
+    ) -> Result<(), MeshError> {
         let tid = self.visible_task(by, id)?;
-        if summary.len() > self.limits.max_body_bytes {
-            return Err(MeshError::BodyTooLarge);
-        }
+        self.limits.check_content(summary, refs)?;
         let rec = self
             .tasks
             .get_mut(&tid)
             .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
-        rec.task
-            .complete(by)
-            .map_err(|_: TaskError| MeshError::NotTaskOwner(id.to_string()))?;
+        let not_owner = |_| MeshError::NotTaskOwner(id.to_string());
+        if self.review_enabled {
+            let next = rec
+                .review
+                .as_ref()
+                .map_or(Some(1), |r| r.metadata.report_revision.checked_add(1))
+                .ok_or(MeshError::IdsUnreserved)?;
+            rec.task.submit_for_review(by).map_err(not_owner)?;
+            rec.review = Some(ReviewReport {
+                metadata: TaskReview {
+                    report_revision: next,
+                    reporting_agent_id: by.as_str().to_string(),
+                    reported_at_ms: now_ms,
+                    state: TaskReviewState::Pending as i32,
+                    ..TaskReview::default()
+                },
+                refs: refs.to_vec(),
+            });
+        } else {
+            rec.task.complete(by).map_err(not_owner)?;
+        }
         rec.summary = Some(summary.to_string());
         self.task_changed(&tid);
+        if self.review_enabled {
+            self.review_changed(&tid);
+        }
+        Ok(())
+    }
+
+    fn review_changed(&mut self, id: &TaskId) {
+        if let Some((rec, review)) = self
+            .tasks
+            .get(id)
+            .and_then(|r| r.review.as_ref().map(|m| (r, m)))
+        {
+            self.events.push(Body::TaskReviewChanged(TaskReviewChanged {
+                project_id: rec.project.clone(),
+                task_id: id.as_str().to_string(),
+                review: Some(review.metadata.clone()),
+            }));
+        }
+    }
+
+    pub fn review_report(&self, id: &str, revision: u64) -> Result<TaskReviewReport, MeshError> {
+        let rec = self
+            .tasks
+            .get(&TaskId::new(id))
+            .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
+        let report = rec
+            .review
+            .as_ref()
+            .filter(|r| r.metadata.report_revision == revision)
+            .ok_or_else(|| MeshError::TaskReviewStale(id.into()))?;
+        Ok(TaskReviewReport {
+            summary: rec.summary.clone().unwrap_or_default(),
+            refs: report.refs.clone(),
+        })
+    }
+
+    /// This entry point is for the board's authenticated hub command only.
+    pub fn review_decide(
+        &mut self,
+        id: &str,
+        revision: u64,
+        reviewer: &str,
+        accept: bool,
+        now_ms: u64,
+    ) -> Result<(), MeshError> {
+        let tid = TaskId::new(id);
+        let rec = self
+            .tasks
+            .get_mut(&tid)
+            .ok_or_else(|| MeshError::TaskUnknown(id.into()))?;
+        let stale = || MeshError::TaskReviewStale(id.into());
+        let review = rec
+            .review
+            .as_mut()
+            .filter(|r| r.metadata.report_revision == revision)
+            .ok_or_else(stale)?;
+        let decided = if accept {
+            TaskReviewState::Accepted
+        } else {
+            TaskReviewState::Returned
+        };
+        match review.metadata.state() {
+            state if state == decided && review.metadata.reviewer_id == reviewer => return Ok(()),
+            TaskReviewState::Pending => {}
+            _ => return Err(stale()),
+        }
+        rec.task.decide_review(accept).map_err(|_| stale())?;
+        review.metadata.state = decided as i32;
+        review.metadata.reviewer_id = reviewer.to_string();
+        review.metadata.decided_at_ms = now_ms;
+        self.task_changed(&tid);
+        self.review_changed(&tid);
         Ok(())
     }
 

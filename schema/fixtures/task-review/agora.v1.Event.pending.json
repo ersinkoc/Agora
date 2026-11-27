@@ -1,0 +1,14 @@
+{
+  "producerId": "hub",
+  "seq": "20",
+  "taskReviewChanged": {
+    "projectId": "p",
+    "taskId": "t-1",
+    "review": {
+      "reportRevision": "1",
+      "reportingAgentId": "n/a",
+      "reportedAtMs": "1720",
+      "state": "TASK_REVIEW_STATE_PENDING"
+    }
+  }
+}
