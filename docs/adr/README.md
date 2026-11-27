@@ -145,3 +145,9 @@ Date: YYYY-MM-DD
 | 0127 | Show accepted task notices | Accepted |
 | 0128 | Notify the parent agent on task acceptance | Accepted |
 | 0129 | A live map of the fleet | Accepted |
+| 0130 | Notify the dispatcher and project on task acceptance | Proposed |
+| 0131 | An idle agent can ask for the next task | Proposed |
+| 0132 | Show negotiated node capabilities in the window | Proposed |
+| 0133 | Shared MCP servers can restart within an agent run | Proposed |
+| 0134 | Agent accounts are configured on the node | Proposed |
+| 0135 | Bound hub replay with projection checkpoints | Proposed |

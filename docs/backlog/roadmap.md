@@ -49,14 +49,17 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   Shared-board Review is implemented under [ADR-0125](../adr/0125-review-a-task-before-accepting-it.md).
   The owner's web window shows recently accepted tasks ([ADR-0127](../adr/0127-show-accepted-task-notices.md)).
   [ADR-0128](../adr/0128-notify-the-parent-agent-on-task-acceptance.md) delivers durable opt-in acceptance notices to a
-  cross-machine helper's verified parent agent. Notices to the dispatcher and project channel remain open.
+  cross-machine helper's verified parent agent. Notices to the dispatcher and project channel await the
+  [ADR-0130 decision](../adr/0130-notify-the-dispatcher-and-project-on-task-acceptance.md). The opt-in pull model for
+  automatic pickup awaits the [ADR-0131 decision](../adr/0131-an-idle-agent-can-ask-for-the-next-task.md).
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (ADR-0122 Accepted 2026-11-27): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
   cannot widen it); secrets stay on the node (ADR-0084). Built: the hub's store, the node's verification and launch-time injection for
   Claude Code, Settings → Shared with agents for MCP servers, secrets through the node's launcher (Amendment A) and each agent's
-  started-with list in its pane; left: skills per kind, the URL bridge for secret headers, Codex (flags would show a secret)
+  started-with list in its pane; left: skills per kind, additional kinds, and the restart and URL bridge behavior in
+  [ADR-0133](../adr/0133-shared-mcp-servers-can-restart-within-an-agent-run.md) (**decision**).
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
   hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
   Recovery (the maintainer, 2026-11-27): a whole-machine power loss (hub, node, supervisors, holder and agents killed at once) brings
@@ -70,8 +73,9 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   lists, the fleet's and the board picker's filter)
 - [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
   and ADR-0118 (M0.3, **decision**)
-- [ ] **M8.8 The map**: a live graph of the hub, machines, windows, agents and helpers, with the mesh messages, tasks and handoffs
-  moving between them, in the web window and the desktop app (**decision**: ADR and a graph-drawing dependency first)
+- [x] **M8.8 The map**. [ADR-0129](../adr/0129-a-live-map-of-the-fleet.md) chose a fixed radial layout with no new dependency.
+  The web panel shows this window, the hub, machines, agents and helpers, and animates messages, task assignments and delivered
+  handoffs. The desktop app uses the same window. The terminal client names the panel as part of the accepted scope.
 - [ ] **M8.9 The terminal client catches up** with the web window (after M8.1 to M8.8)
 
 ---
@@ -98,6 +102,7 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
   - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
   - [x] ADR-0119 (a helper started on another machine): revised for standing grants and chains (the maintainer's "approve once, then free"), Accepted 2026-11-27 with the defaults; built as M7.1
   - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
+  See the [decision notes for ADR-0117, ADR-0118 and ADR-0114 Amendment B](../reviews/2026-11-27-adr-decisions.md).
 - [x] **M0.4 Other open PRs**: #1188 (Codex's input validation audit) merged on `main`; #1204 (title rules) closed earlier, its
   open point is in [follow-ups](follow-ups.md)
 - [x] **M0.5 Release 0.3.40** (2026-11-26), blackview and `win` updated; mac asked. Left: **win**, a real `shutdown /r` check of #1231's
@@ -106,7 +111,8 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
 ## M1. Prove it on real machines
 
 Most capabilities have tests but no recorded run on a real machine. This milestone writes that evidence down, finds what breaks, and
-fixes it.
+fixes it. [ADR-0135](../adr/0135-bound-hub-replay-with-projection-checkpoints.md) tracks the hub cold-start remeasurement and the
+checkpoint and retention decision.
 
 - [ ] **M1.1 Real-machine checklist**
   - [x] one checklist line per capability in `docs/capabilities.md` (what to do, what to see), in `docs/reviews/real-machine-checklist.md`
@@ -158,9 +164,9 @@ fixes it.
   part is ADR-0088 Amendment A (Accepted 2026-11-27)
 - [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
   the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
-- [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello
-  with the hub, none in the snapshot), so it learns that a machine cannot take a task only from a refusal (#885). Carry each node's
-  negotiated capabilities in the snapshot (append-only), then hide actions a machine cannot do before anyone tries
+- [ ] **M2.13 The window knows what each machine can do** (**schema**). The web window learns unsupported actions only from
+  a refusal (#885). [ADR-0132](../adr/0132-show-negotiated-node-capabilities-in-the-window.md) proposes scoped snapshot
+  and live updates, starting with task dispatch.
 - [x] **M2.14 The terminal repaint carries the program's modes and its history** (ADR-0100, **schema** for step 2)
   - [x] step 1, the modes in the repaint (#953); step 2, the history before the repaint when a window asks (#959); step 3, the web
     window and the terminal client ask for it (#964)
@@ -193,7 +199,8 @@ fixes it.
 - [ ] **M3.8 Direct client ↔ node terminal path** (ADR-0023): measured against the relay first; built only if the budget needs it
 - [ ] **M3.9 Any machine can be the hub** (ADR-0086, staged)
   - [ ] export and import; the signed hub record (**schema**); manual takeover with partition tests; continuous replication with a drill; automatic takeover (3+ machines)
-- [ ] **M3.10 Agent login and accounts** (design only): an ADR first (**decision**), then build
+- [ ] **M3.10 Agent login and accounts**. [ADR-0134](../adr/0134-agent-accounts-are-configured-on-the-node.md)
+  (**decision**) proposes node-local account management, with selection from the window as a separate schema step.
 - [x] **M3.11 A structured agent can be allowed always** (ADR-0101, Accepted 2026-11-22; the agent decides how long it keeps the answer)
   - [x] part A, steps 1 to 3 (**schema**, bridge and node, hub): #1007, merged
   - [x] part B, steps 4 to 6 (the window, the terminal client, docs): #1012
