@@ -36,10 +36,12 @@ client after them). Already built: the mesh across machines, the shared board an
 helpers with grants, cross-node handoff recovery, the fleet view for agents, `inbox_wait`, the terminal holder (Linux, macOS),
 resume after a restart, Codex plan limits, the model in the agent snapshot, Shell recognising agents started in it (ADR-0094).
 
-- [ ] **M8.1 Agents start agents on any machine** (ADR-0119 Accepted, = M7.1): schema, the target node with standing grants, the hub,
-  the asking node, the window's card and grant indicator; then a two-machine run on blackview and mac. Built on main: steps 1 to 5
-  (schema, target node, hub, asking node with following, the card with its standing grant, the agent panel and the Machines page);
-  left: the two-machine run
+- [x] **M8.1 Agents start agents on any machine** (ADR-0119 Accepted, = M7.1). Verified on 2026-11-27 with separate test nodes
+  on blackview (Linux) and mac (macOS), both on 0.3.42. A disposable hub on blackview served the web build from `eaf0cbfc`.
+  The Blackview agent requested a fake helper in the Mac checkout. The browser's one-time signed approval was resolved on
+  the Mac. The hub recorded the helper in the same portable project with its Blackview parent, the browser showed that
+  relationship, and the parent followed the helper over the mesh. A separate two-node rehearsal on Blackview with the same
+  release and web build also verified that a standing grant covered a later matching start.
 - [ ] **M8.2 The board drives the work** (ADR-0095): the Review column and subtasks (M3.2, **schema**); dispatch to an agent on any
   machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
   open task it is allowed (an automation rule: **decision**, ADR first)
@@ -246,8 +248,8 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 
 Items already in M2 and M3 are not repeated here.
 
-- [ ] **M7.1 A helper on another machine** (ADR-0057, ADR-0119 Accepted 2026-11-27): schema (approved with the ADR), the target node
-  with standing grants, the hub, the asking node, the window (built; what is left is tracked under M8.1)
+- [x] **M7.1 A helper on another machine** (ADR-0057, ADR-0119 Accepted 2026-11-27): schema, target node, hub, asking node and
+  window built. The physical Blackview-to-Mac run is recorded in M8.1.
 - [x] **M7.2 Leases across a node restart** (ADR-0039): #1243, in 0.3.40
 - [x] **M7.3 A node with a clock behind** (ADR-0085 Amendment A): keeps its request, accepts a certificate up to 24 h ahead, and
   `agora doctor` says the clock may be wrong. Left: the "needs to join again" card in the window (**schema** for the card)
