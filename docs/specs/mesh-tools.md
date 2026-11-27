@@ -43,7 +43,8 @@ it:** when a window or the terminal client sends a line into the agent's termina
 prompts it (`AgentPrompt`), every `inbox_wait` the agent has open is answered at once with what its inbox holds (`[]` when nothing)
 and a second content block `{"reason":"person"}`; the tool's description tells the agent to end its turn then and answer the person,
 and not to wait again until they are done. Keys before Enter do not end it: the agent holds them in its input box, and each would
-otherwise make a model turn while the person types. A prompt another agent gives it (a dispatched task) does not end it; a wait begun
+otherwise make a model turn while the person types. A pasted text with several lines holds `\n` and ends it before it is
+submitted: at most one early answer, harmless. A prompt another agent gives it (a dispatched task) does not end it; a wait begun
 after the input waits as before.
 It reads exactly what `inbox` reads and the content is the same untrusted data.
 
