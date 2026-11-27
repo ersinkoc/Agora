@@ -128,7 +128,7 @@ export async function startStack({ viewport = { width: 1440, height: 900 }, scal
       children.push(child);
       await new Promise(resolve => setTimeout(resolve, 3000));
       nodeRun(['node', 'trust', trust[3], trust[4]]);
-      return { run: nodeRun, env: nodeEnv, home: nodeHome, stop: () => child.kill() };
+      return { run: nodeRun, env: nodeEnv, home: nodeHome, signal: (signal) => child.kill(signal), stop: () => child.kill() };
     };
     return { page, run, start, addNode, errors, close, env, bin, origin, work, proj, home, hubDir, stopHub, startHub };
   } catch (e) {
