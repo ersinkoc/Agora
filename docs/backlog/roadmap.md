@@ -1,4 +1,4 @@
-# Roadmap (from 2026-11-21, updated 2026-11-26)
+# Roadmap (from 2026-11-21, updated 2026-11-27)
 
 The order the work is done in. One milestone at a time, top to bottom; inside a milestone, the tasks in their order unless a task waits
 on a gate. From 2026-11-26 work lands straight on `main` after local tests (fmt, clippy, the affected tests, the web checks, docs
@@ -22,6 +22,40 @@ it. What is left of M0 is decisions. The order from here: the community mileston
 Accepted work (M2, M3, M7), with real-machine proof (M1) alongside.
 The [architecture gap review](../reviews/2026-11-26-architecture-gap-review.md) is the source of M5 and M6; its gap numbers (G1 to G15)
 are cited in the tasks.
+
+---
+
+## M8. Orchestration that runs itself (the maintainer's goal, 2026-11-27): first in the order
+
+The maintainer: Agora must be easy to install and must run many agents on many machines and projects from one screen, coordinating
+themselves like a machine: the board in active use, tasks handed out and handed on, messages, agents started on this or another
+machine, others told when a task is done, skills and MCP servers shared through the hub, agents that never stop (also while the hub or
+a node updates), every agent's provider, model, effort, limits, folder and worktree visible, an agent started by hand in a terminal
+caught at once, and a map of what runs where and what it sends and receives, in the web window and the desktop app (the terminal
+client after them). Already built: the mesh across machines, the shared board and leases, dispatch of a task to an agent, local
+helpers with grants, cross-node handoff recovery, the fleet view for agents, `inbox_wait`, the terminal holder (Linux, macOS),
+resume after a restart, Codex plan limits, the model in the agent snapshot, Shell recognising agents started in it (ADR-0094).
+
+- [ ] **M8.1 Agents start agents on any machine** (ADR-0119 Accepted, = M7.1): schema, the target node with standing grants, the hub,
+  the asking node, the window's card and grant indicator; then a two-machine run on blackview and mac
+- [ ] **M8.2 The board drives the work** (ADR-0095): the Review column and subtasks (M3.2, **schema**); dispatch to an agent on any
+  machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
+  open task it is allowed (an automation rule: **decision**, ADR first)
+- [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (follow-up); a reply keeps its link across machines (M3.6,
+  **schema**); completion and handoff notices in the inbox and the window
+- [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**, ADR first): the owner publishes a skill or an MCP server
+  definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
+  cannot widen it); secrets stay on the node (ADR-0084)
+- [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
+  hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
+- [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (**schema**); plan limits
+  for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
+  sizes and free disk in the window (M3.7's schema part)
+- [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
+  and ADR-0118 (M0.3, **decision**)
+- [ ] **M8.8 The map**: a live graph of the hub, machines, windows, agents and helpers, with the mesh messages, tasks and handoffs
+  moving between them, in the web window and the desktop app (**decision**: ADR and a graph-drawing dependency first)
+- [ ] **M8.9 The terminal client catches up** with the web window (after M8.1 to M8.8)
 
 ---
 
