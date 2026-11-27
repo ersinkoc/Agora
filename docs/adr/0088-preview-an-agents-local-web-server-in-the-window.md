@@ -3,6 +3,7 @@ Status: Accepted
 Date: 2026-11-19
 
 Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0088'i kabul ediyorum"). The open questions' proposed answers stand.
+Amended: Amendment A (Proposed, 2026-11-27) answers how the hub carries a preview (step 3); it waits for the maintainer's decision.
 
 Builds on ADR-0020 (signed approvals), ADR-0067 (remote access and the screen password), ADR-0068 (a customizable workspace) and ADR-0070
 (the hub owns whether a machine is online). Touches the threat model (networking) and the invariant "Secrets never leave the node".
@@ -61,6 +62,43 @@ port and to open the node's control port: all must fail).
 2. Node forwarder and policy checks, with the escape tests.
 3. Hub relay, origin per forward, audit.
 4. Web Browser pane.
+
+## Amendment A (Proposed, 2026-11-27): how the hub carries a preview (step 3)
+
+The step-3 questions the decision left open (`docs/specs/preview.md`, "Not decided"), answered for the maintainer's decision. It
+changes decision 4's "the hub does not parse them" for one thing only: the head of each HTTP request, as below.
+
+1. **A preview origin is a port of the hub's, one per open forward.** The hub listens on a small pool of extra ports (default the 16
+   ports after its own; `agora hub run --preview-ports 7450-7465`), the same TLS certificate, and gives each forward it carries one
+   free port while the forward is open (released when it ends). Each forward is then its own origin: its page cannot read another
+   forward's or the window's storage, and the window's session token lives in the window's `localStorage`, which a page on another
+   port never sees (the hub sets no cookie of its own). A hub with no free port, or reached through one host name and port only (a
+   tunnel or a path-only proxy), answers `preview.unavailable` with `no_origin` and opens nothing. Per-forward host names (a wildcard
+   name) are a later option for hubs that have one.
+2. **Only the opener connects** (the maintainer, 2026-11-27). The window asks the hub, with its session, for an entry ticket for a
+   forward (`POST /api/preview/<forward>/enter`). The hub gives one only to the person whose device opened it (the forward's
+   `creator`): 32 random bytes, single use, 60 seconds. The frame loads `https://<hub>:<port>/.agora-preview/enter?t=<ticket>`; the
+   hub answers with a cookie for that port, `agora_preview=<forward token>` (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no
+   `Domain`), and a redirect to `/`. The forward token is random, bound to the forward and the person, and ends with the forward, the
+   person's sign-out or removal, or after 8 hours.
+3. **The hub reads every request head, and only the head.** Browsers send a host's cookies to every port of that host, so every
+   request on a preview port carries the cookies of every forward on that host. For each request (HTTP/1.1, keep-alive included) the
+   hub reads the request line and headers (at most 16 KiB, else 431), requires a valid `agora_preview` token for this port's forward,
+   **removes that cookie** (and every `agora_preview` cookie) before the bytes go on, and passes the rest unchanged. A WebSocket
+   upgrade is checked the same way, and after its `101` the connection is relayed as opaque bytes. Bodies and responses are never
+   read. Without a valid token: 401 and nothing reaches the node. HTTP/2 is not offered on preview ports (ALPN `http/1.1` only), so
+   the head is always readable.
+4. **The screen password applies** (ADR-0067): a remote window gets an entry ticket only after it, as for any command. Audit rows:
+   `preview.enter` (forward, port, person), never content.
+5. **What the window shows.** A Browser pane with the forward's address (path only), reload, open in a new tab (the same entry flow),
+   phone and tablet sizes, and the forward's end time. The frame is `sandbox="allow-scripts allow-forms allow-same-origin
+   allow-popups"` on the preview's own origin, which is safe there because that origin is not the window's.
+6. **Suggestions and changes** go to the opener only (`PreviewSuggested` to the project's owner and the person who started the agent
+   that suggested it, `PreviewChanged` to the opener), until a wider rule is decided.
+
+Threat-model rows to add: a preview page reading another forward's cookies (cookies are shared across ports; the hub strips its own
+and a dev server's cookies are the person's own apps), a leaked entry ticket (single use, 60 s, opener only), and the head parser
+(bounded, rejects malformed heads, never reads bodies).
 
 ## Status of the build
 1. Schema: done. `schema/agora/v1/preview.proto` (commands 102..105, results 26..28, events 80..81, frame kinds 20..22), capability

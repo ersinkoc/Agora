@@ -139,7 +139,8 @@ fixes it.
 - [ ] **M2.7 The node updates in place** (ADR-0075): the exec handoff (Unix), then Windows; agents keep running through an update
 - [ ] **M2.8 Plan limits for more tools** (ADR-0091): Claude Code's windows, from its own files, read like Codex's
 - [ ] **M2.9 ACP registry** (ADR-0092): the next steps after the conversion (the reviewed list in a release, "Add an agent" reads it)
-- [ ] **M2.10 Preview a local web server** (ADR-0088): node forwarder, hub relay, the Browser pane (schema is in)
+- [ ] **M2.10 Preview a local web server** (ADR-0088): node forwarder (done), hub relay, the Browser pane (schema is in); the hub's
+  part is written as ADR-0088 Amendment A (**decision**: Proposed 2026-11-27)
 - [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
   the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
 - [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello
