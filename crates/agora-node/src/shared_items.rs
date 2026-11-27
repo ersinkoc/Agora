@@ -1955,7 +1955,7 @@ mod tests {
     /// removed item or an ended agent tells the launcher to close.
     #[test]
     fn a_shared_server_restarts_within_its_agents_run_within_bounds() {
-        let d = temp("restart");
+        let d = temp("server-restart");
         let s = open(
             &d,
             SharePolicy {

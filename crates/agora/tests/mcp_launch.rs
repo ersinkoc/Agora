@@ -52,6 +52,42 @@ fn gone(pid: u32) {
     }
 }
 
+/// The launcher's next connection, or a failure after 60 s: a launcher that exits instead of asking (as it did on macOS) fails the test
+/// instead of leaving it blocked in `accept` forever. Past the deadline a connection of its own unblocks the accept.
+fn accept_within(
+    listener: &agora_platform::LocalListener,
+    socket: &Path,
+) -> agora_platform::LocalStream {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let (done, fired) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let watchdog = {
+        let (done, fired, socket) = (Arc::clone(&done), Arc::clone(&fired), socket.to_path_buf());
+        std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(60);
+            while !done.load(Ordering::SeqCst) {
+                if Instant::now() >= until {
+                    fired.store(true, Ordering::SeqCst);
+                    let _ = agora_platform::local_connect(&socket);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let conn = listener.accept().unwrap();
+    done.store(true, Ordering::SeqCst);
+    let _ = watchdog.join();
+    assert!(
+        !fired.load(Ordering::SeqCst),
+        "the launcher did not connect within 60 s"
+    );
+    conn
+}
+
 fn launcher(socket: &Path) -> std::process::Child {
     Command::new(AGORA)
         .args(["mcp-launch", "--socket"])
@@ -79,7 +115,7 @@ fn the_launcher_reports_its_server_closes_it_when_told_and_waits_for_room() {
 
     // First ask: the node is still letting the previous server go; the launcher asks again on a new connection.
     let mut child = launcher(&socket);
-    let first = listener.accept().unwrap();
+    let first = accept_within(&listener, &socket);
     let mut r = BufReader::new(first.try_clone().unwrap());
     let ask = read(&mut r);
     assert_eq!(ask["method"], "agora/shared_launch");
@@ -90,7 +126,7 @@ fn the_launcher_reports_its_server_closes_it_when_told_and_waits_for_room() {
     drop(r);
 
     // Second ask: granted; the server starts and its process id is said on the same connection.
-    let second = listener.accept().unwrap();
+    let second = accept_within(&listener, &socket);
     let mut r = BufReader::new(second.try_clone().unwrap());
     assert_eq!(read(&mut r)["method"], "agora/shared_launch");
     let mut w = second;
@@ -140,7 +176,7 @@ fn the_launcher_reports_its_server_closes_it_when_told_and_waits_for_room() {
         .is_ok_and(|s| s.success())
     {
         let mut child = launcher(&socket);
-        let conn = listener.accept().unwrap();
+        let conn = accept_within(&listener, &socket);
         let mut r = BufReader::new(conn.try_clone().unwrap());
         assert_eq!(read(&mut r)["method"], "agora/shared_launch");
         let mut w = conn;

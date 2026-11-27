@@ -105,8 +105,13 @@ fn ask(socket: &Path, item: &str, launch_id: &str) -> std::io::Result<(Answer, L
     let mut reader = BufReader::new(writer.try_clone()?);
     let mut line = String::new();
     (&mut reader).take(MAX_ANSWER).read_line(&mut line)?;
-    writer.set_read_timeout(None)?;
-    Ok((read_answer(&line), Link { reader, writer }))
+    let answer = read_answer(&line);
+    // Only a granted launch keeps the connection: a refusing node has closed it already, and macOS refuses a socket timeout with
+    // EINVAL once the peer has closed (as `unixhold.rs` notes), which would end the launcher instead of letting it ask again.
+    if !matches!(answer, Answer::Refused(_)) {
+        writer.set_read_timeout(None)?;
+    }
+    Ok((answer, Link { reader, writer }))
 }
 
 /// Asks, and asks again for a few seconds while the node is still letting the previous server go.
