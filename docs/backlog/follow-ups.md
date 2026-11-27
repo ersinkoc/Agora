@@ -67,7 +67,23 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   and everything it starts, is outside that terminal's job object (WHITE 2026-11-27: `cmd` -> `pwsh` -> `claude`/`codex`, the job lists
   only `cmd`; Windows PowerShell 5.1 and `cmd` children are inside). So the job's limits (`make_job`: process memory, CPU time) do not
   reach them. A stop still ends them: closing the pseudoconsole ended `pwsh` + `claude` after 1.3 s and `pwsh` + the `codex` tree after
-  23 ms. Find out why (packaged-app activation) and whether a nested job or a per-process limit can hold them.
+  23 ms.
+  - **Why** (probe on WHITE 2026-11-27, PowerShell 7.7 from the Store):
+    - `pwsh` on `PATH` is an App Execution Alias (reparse tag `0x8000001B`).
+    - Starting it activates the package: the process runs from `C:\Program Files\WindowsApps\…\pwsh.exe`, shows the shell as its
+      parent, and is in a job of its own, not the terminal's (`IsProcessInJob`: ours false, any true).
+    - What `pwsh` then starts breaks away into **no job at all** (any false). Terminating the terminal's job leaves `pwsh` running.
+  - **What can hold them, after the fact:**
+    - `AssignProcessToJobObject(terminal job, pwsh)` fails with error 5: a process already in a job joins only an empty job or one in its
+      own job tree.
+    - A **fresh empty job** does take `pwsh`, nested under the package's job.
+    - A child in no job joins the terminal's job directly.
+    - Children `pwsh` starts after that are again in no job, so holding them needs a repeated sweep: per terminal, every descendant of
+      the shell found outside its job goes into it, and a process already in another job goes into a fresh empty job with the same limits
+      and kill-on-close.
+    - Anything started and ended between two sweeps, or orphaned by an ended parent, is missed.
+  - **decision:** build that sweep (with the 1 s process snapshot `foreground_pid` already reads), or document the gap as a limit of the
+    job on Windows.
 - **Performance budgets missed on Windows 11** (ADR-0022, tracked, not relaxed): node cold start 2 760 ms cold / 197 ms warm against
   200 ms (mostly serial `git.exe` spawns; the side-by-side identity queries are merged, not measured on Windows yet); keystroke → echo p95
   18.21 / 17.45 ms against 16 ms (likely the ~15.6 ms timer tick in ConPTY, not measured alone).
