@@ -2483,11 +2483,9 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
                         && frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM
                     {
                         // ADR-0088: data, credit and the end of a relayed preview connection.
+                        // The inbox stays registered until its connection is over (a new connection on the stream seals it first).
                         if let Some(inbox) = previews.get(&frame.stream_id) {
                             inbox.push(frame.kind, &frame.payload);
-                        }
-                        if frame.kind == agora_protocol::frame::STREAM_CLOSE {
-                            previews.remove(&frame.stream_id);
                         }
                     }
                 }
@@ -2603,11 +2601,18 @@ fn handle_request(
     // ADR-0088: one relayed connection to a preview forward, on the stream the request arrived on.
     if let Cmd::PreviewConnect(c) = cmd {
         previews.retain(|_, i| !i.finished());
-        let outcome = if previews.contains_key(&frame.stream_id) {
-            // A stream still carrying a connection takes no second one.
-            Err(invalid("stream_id"))
-        } else {
-            preview_connect(ctx, c, frame.stream_id, writer, alive, stop, previews)
+        let outcome = match previews.get(&frame.stream_id) {
+            // A stream still carrying a connection the client has not ended takes no second one.
+            Some(old) if !old.peer_closed() => Err(invalid("stream_id")),
+            old => {
+                // The client ended the old one: sealed first, so none of its frames can follow on the stream once the new
+                // connection is answered (review of d267e547).
+                if let Some(old) = old {
+                    old.seal();
+                }
+                previews.remove(&frame.stream_id);
+                preview_connect(ctx, c, frame.stream_id, writer, alive, stop, previews)
+            }
         };
         let (result, after) = match outcome {
             Ok((ok, after)) => (Ok(ok), Some(after)),

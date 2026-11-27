@@ -736,3 +736,70 @@ fn the_window_going_over_the_byte_rate_ends_the_connection_with_budget() {
     let fs = frames(&mut c, 3, is_close);
     assert_eq!(end_of(&fs).reason, v1::PreviewCloseReason::Budget as i32);
 }
+
+/// A server that writes one byte value without end on each connection, a new value per connection (`a`, `b`, ...).
+fn streamer() -> u32 {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = u32::from(l.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        for (i, s) in l.incoming().enumerate() {
+            let Ok(mut s) = s else { return };
+            let byte = b'a' + u8::try_from(i % 26).unwrap();
+            std::thread::spawn(move || {
+                let block = [byte; 4096];
+                while s.write_all(&block).is_ok() {}
+            });
+        }
+    });
+    port
+}
+
+#[test]
+fn a_stream_used_again_right_after_a_close_carries_nothing_of_the_old_connection() {
+    let e = env("reuse", "");
+    let _n = node(&e);
+    let port = streamer();
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    for round in 0..40 {
+        let req = CommandRequest {
+            request_id: format!("reuse-{round}"),
+            command: Some(Cmd::PreviewConnect(v1::PreviewConnect {
+                forward_id: id.clone(),
+            })),
+            ..Default::default()
+        };
+        if round > 0 {
+            // The old connection is still sending: end it and use the stream again at once.
+            c.send_frame(3, STREAM_CLOSE, Vec::new()).unwrap();
+        }
+        c.send_frame(3, 0, req.encode_to_vec()).unwrap();
+        // Frames in the order they came: everything after the answer must be the new connection's.
+        let mut answered = false;
+        let mut after: Vec<u8> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while after.len() < 4 * 1024 && std::time::Instant::now() < deadline {
+            let Ok(Some(f)) = c.read_frame(Some(Duration::from_millis(100))) else {
+                continue;
+            };
+            if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                let r = CommandResponse::decode(f.payload.as_slice()).unwrap();
+                if r.request_id == req.request_id {
+                    assert_eq!(code(&r), "ok", "round {round}");
+                    answered = true;
+                }
+            } else if answered && f.stream_id == 3 && f.kind == kinds::PREVIEW_DATA {
+                after.extend(f.payload);
+            }
+        }
+        assert!(answered, "round {round}");
+        assert!(
+            !after.is_empty(),
+            "round {round}: the new connection sent nothing"
+        );
+        assert!(
+            after.iter().all(|b| *b == after[0]),
+            "round {round}: bytes of two connections on one stream"
+        );
+    }
+}

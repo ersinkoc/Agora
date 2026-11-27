@@ -73,6 +73,13 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   cover it.
 - The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
   them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
+- **Step 2b-ii (review of d267e547):** a slow reader of the control connection (later the uplink) holds its shared writer while a
+  preview send waits, and every other stream on that connection waits too (answers, terminal output; through the uplink, everything for
+  the hub). Credit bounds one connection, but 64 x 256 KiB can be in flight. Before the hub link carries previews: a cap on preview bytes
+  in flight per local connection, a lower-priority preview queue on the writer, or a write deadline that ends the preview connection
+  (`BUDGET`) instead of holding the writer; measured with the benchmark.
+- **Step 2b-ii:** who may connect to a forward through the hub (its creator only, or any person who may see the machine), checked on
+  the node as the open is.
 - The default budgets are "no limit" for the rate and the forward's total (only the chunk, the window and the connection caps hold):
   choose real defaults once previews run against real dev servers.
 

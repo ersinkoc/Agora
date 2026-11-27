@@ -36,6 +36,13 @@ pub struct Inbox {
     st: Mutex<In>,
     cv: Condvar,
     chunk: u64,
+    /// `true` once the connection is over. Every frame the connection sends is written while this lock is held and reads `false`,
+    /// and the end is written under it too, so no frame of this connection can follow its end or reach a later connection on the
+    /// same stream (review of d267e547).
+    gate: Mutex<bool>,
+    /// The window said the connection is over (`PREVIEW_END`, `STREAM_CLOSE`) or the local connection went: nothing more is sent, and
+    /// nothing is said back.
+    peer_closed: AtomicBool,
 }
 
 struct In {
@@ -65,7 +72,57 @@ impl Inbox {
             }),
             cv: Condvar::new(),
             chunk: u64::from(b.chunk),
+            gate: Mutex::new(false),
+            peer_closed: AtomicBool::new(false),
         }
+    }
+
+    fn gate(&self) -> std::sync::MutexGuard<'_, bool> {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sends one frame of this connection, only while it is not over; whether it went out. `sent` runs under the gate once it did,
+    /// so what it counts is in the end's counters exactly when the frame went out before the end.
+    fn send_open(&self, send: &Send, kind: u8, payload: Vec<u8>, sent: impl FnOnce()) -> bool {
+        let g = self.gate();
+        if *g || self.peer_closed.load(Ordering::Acquire) {
+            return false;
+        }
+        let ok = send(kind, payload).is_ok();
+        if ok {
+            sent();
+        }
+        drop(g);
+        ok
+    }
+
+    /// Ends the connection if it is not over yet: `say` runs under the gate (it writes the end), unless the window already ended it.
+    /// Whether this call ended it.
+    fn close(&self, say: impl FnOnce()) -> bool {
+        let mut g = self.gate();
+        if *g {
+            return false;
+        }
+        *g = true;
+        if !self.peer_closed.load(Ordering::Acquire) {
+            say();
+        }
+        drop(g);
+        self.st().finished = true;
+        self.cv.notify_all();
+        true
+    }
+
+    /// The stream is about to carry a new connection: once this returns, nothing of this one is sent any more (a send in progress
+    /// is waited for). Its threads stop at their next look.
+    pub fn seal(&self) {
+        self.peer_closed.store(true, Ordering::Release);
+        *self.gate() = true;
+        let mut st = self.st();
+        st.peer_done = true;
+        st.finished = true;
+        drop(st);
+        self.cv.notify_all();
     }
 
     fn st(&self) -> std::sync::MutexGuard<'_, In> {
@@ -92,7 +149,10 @@ impl Inbox {
                 Ok(c) => st.may_send = st.may_send.saturating_add(u64::from(c.bytes)),
                 Err(_) => st.violation = true,
             },
-            kinds::PREVIEW_END | STREAM_CLOSE => st.peer_done = true,
+            kinds::PREVIEW_END | STREAM_CLOSE => {
+                self.peer_closed.store(true, Ordering::Release);
+                st.peer_done = true;
+            }
             _ => {}
         }
         drop(st);
@@ -101,18 +161,19 @@ impl Inbox {
 
     /// The local connection that carried the stream went: the connection ends without a word.
     pub fn gone(&self) {
+        self.peer_closed.store(true, Ordering::Release);
         self.st().peer_done = true;
         self.cv.notify_all();
     }
 
-    /// Whether the connection is over (its stream may carry a new `PreviewConnect`).
-    pub fn finished(&self) -> bool {
-        self.st().finished
+    /// Whether the window ended the connection (or the local connection went).
+    pub fn peer_closed(&self) -> bool {
+        self.peer_closed.load(Ordering::Acquire)
     }
 
-    fn finish(&self) {
-        self.st().finished = true;
-        self.cv.notify_all();
+    /// Whether the connection is over: nothing of it is sent any more.
+    pub fn finished(&self) -> bool {
+        *self.gate()
     }
 }
 
@@ -125,7 +186,6 @@ struct Conn {
     alive: Arc<AtomicBool>,
     /// The node is stopping.
     stop: Arc<AtomicBool>,
-    ended: AtomicBool,
     to_target: AtomicU64,
     from_target: AtomicU64,
     tcp: TcpStream,
@@ -152,37 +212,38 @@ impl Conn {
         None
     }
 
-    /// Ends the connection once: with a reason, `PREVIEW_END` (the bytes both ways) then `STREAM_CLOSE`; without one, quietly.
+    /// Ends the connection once: with a reason, `PREVIEW_END` (the bytes both ways) then `STREAM_CLOSE`, written under the gate so
+    /// nothing follows them; without one (or when the window ended it), quietly.
     fn end(&self, reason: Option<Reason>) {
-        if self.ended.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        self.inbox.finish();
-        let _ = self.tcp.shutdown(Shutdown::Both);
-        if let Some(reason) = reason {
-            let end = v1::PreviewEnd {
-                reason: reason as i32,
-                bytes_to_target: self.to_target.load(Ordering::Acquire),
-                bytes_from_target: self.from_target.load(Ordering::Acquire),
-            };
-            let _ = (self.send)(kinds::PREVIEW_END, end.encode_to_vec());
-            let _ = (self.send)(STREAM_CLOSE, Vec::new());
+        let closed = self.inbox.close(|| {
+            if let Some(reason) = reason {
+                let end = v1::PreviewEnd {
+                    reason: reason as i32,
+                    bytes_to_target: self.to_target.load(Ordering::Acquire),
+                    bytes_from_target: self.from_target.load(Ordering::Acquire),
+                };
+                let _ = (self.send)(kinds::PREVIEW_END, end.encode_to_vec());
+                let _ = (self.send)(STREAM_CLOSE, Vec::new());
+            }
+        });
+        if closed || self.inbox.peer_closed.load(Ordering::Acquire) {
+            let _ = self.tcp.shutdown(Shutdown::Both);
         }
     }
 
     fn is_ended(&self) -> bool {
-        self.ended.load(Ordering::Acquire)
+        self.inbox.finished()
     }
 
-    /// Counts `n` bytes against the forward's total and this connection's rate; whether both still hold. `wait`: this side may
-    /// wait for the next second instead of going over the rate (bytes it reads); the window's bytes cannot wait, so going over ends.
-    fn spend(&self, n: u64, wait: bool) -> bool {
+    /// Counts `n` bytes against the forward's total and this connection's rate. `wait`: this side may wait for the next second
+    /// instead of going over the rate (bytes it read); the window's bytes cannot wait, so going over ends the connection.
+    fn spend(&self, n: u64, wait: bool) -> Spent {
         let b = self.budgets();
         if !self.lease.live.count(n, b.total) {
-            return false;
+            return Spent::Over;
         }
         if b.rate == 0 {
-            return true;
+            return Spent::Ok;
         }
         let rate = u64::from(b.rate);
         loop {
@@ -192,19 +253,28 @@ impl Conn {
             }
             if r.1 + n <= rate {
                 r.1 += n;
-                return true;
+                return Spent::Ok;
             }
             if !wait || n > rate {
-                return false;
+                return Spent::Over;
             }
             let left = Duration::from_secs(1).saturating_sub(r.0.elapsed());
             drop(r);
             std::thread::sleep(left.min(POLL));
             if self.is_ended() || self.outside().is_some() {
-                return true;
+                return Spent::Ended;
             }
         }
     }
+}
+
+/// What [`Conn::spend`] found.
+enum Spent {
+    Ok,
+    /// Over the rate or the forward's total.
+    Over,
+    /// The connection ended while it waited: nothing more is sent.
+    Ended,
 }
 
 /// Connects to `port` on the loopback (in the order `localhost` resolves, the two literals only); `None` when nothing answers.
@@ -226,14 +296,15 @@ pub fn connect_result(b: &Budgets) -> v1::PreviewConnectResult {
 
 /// Ends a connection over the budget at once (`BUDGET`, no bytes either way), after its answer went out.
 pub fn refuse_over_budget(inbox: &Inbox, send: &Send) {
-    inbox.finish();
-    let end = v1::PreviewEnd {
-        reason: Reason::Budget as i32,
-        bytes_to_target: 0,
-        bytes_from_target: 0,
-    };
-    let _ = send(kinds::PREVIEW_END, end.encode_to_vec());
-    let _ = send(STREAM_CLOSE, Vec::new());
+    inbox.close(|| {
+        let end = v1::PreviewEnd {
+            reason: Reason::Budget as i32,
+            bytes_to_target: 0,
+            bytes_from_target: 0,
+        };
+        let _ = send(kinds::PREVIEW_END, end.encode_to_vec());
+        let _ = send(STREAM_CLOSE, Vec::new());
+    });
 }
 
 /// Relays `tcp` on the stream until either side ends it, the forward ends, the node stops or the local connection goes. Starts the
@@ -256,7 +327,6 @@ pub fn start(
         lease,
         alive,
         stop,
-        ended: AtomicBool::new(false),
         to_target: AtomicU64::new(0),
         from_target: AtomicU64::new(0),
         tcp,
@@ -308,14 +378,22 @@ fn from_target(c: &Conn, mut tcp: TcpStream) {
         match tcp.read(&mut buf[..want]) {
             Ok(0) => return c.end(Some(Reason::TargetGone)),
             Ok(n) => {
-                if !c.spend(n as u64, true) {
-                    return c.end(Some(Reason::Budget));
+                match c.spend(n as u64, true) {
+                    Spent::Ok => {}
+                    Spent::Over => return c.end(Some(Reason::Budget)),
+                    Spent::Ended => return c.end(c.outside().flatten()),
                 }
                 c.inbox.st().may_send -= n as u64;
-                if (c.send)(kinds::PREVIEW_DATA, buf[..n].to_vec()).is_err() {
+                // Through the gate: once the connection is over, what was read is dropped, never sent after the end.
+                let counted = || {
+                    c.from_target.fetch_add(n as u64, Ordering::AcqRel);
+                };
+                if !c
+                    .inbox
+                    .send_open(&c.send, kinds::PREVIEW_DATA, buf[..n].to_vec(), counted)
+                {
                     return c.end(None);
                 }
-                c.from_target.fetch_add(n as u64, Ordering::AcqRel);
             }
             Err(e)
                 if matches!(
@@ -353,8 +431,10 @@ fn to_target(c: &Conn, mut tcp: TcpStream) {
         }
         if !bytes.is_empty() {
             let n = bytes.len() as u64;
-            if !c.spend(n, false) {
-                return c.end(Some(Reason::Budget));
+            match c.spend(n, false) {
+                Spent::Ok => {}
+                Spent::Over => return c.end(Some(Reason::Budget)),
+                Spent::Ended => return c.end(c.outside().flatten()),
             }
             if tcp.write_all(&bytes).is_err() {
                 return c.end(Some(Reason::TargetGone));
@@ -364,7 +444,12 @@ fn to_target(c: &Conn, mut tcp: TcpStream) {
             let credit = v1::PreviewCredit {
                 bytes: u32::try_from(n).unwrap_or(u32::MAX),
             };
-            if (c.send)(kinds::PREVIEW_CREDIT, credit.encode_to_vec()).is_err() {
+            if !c.inbox.send_open(
+                &c.send,
+                kinds::PREVIEW_CREDIT,
+                credit.encode_to_vec(),
+                || {},
+            ) {
                 return c.end(None);
             }
         }
@@ -426,12 +511,63 @@ mod tests {
         assert!(violated(&i));
     }
 
+    /// Review of d267e547: once a connection is over nothing of it is sent, and sealing a stream for a new connection waits for a
+    /// send already under way, so no old frame can follow the new connection's answer.
+    #[test]
+    fn nothing_is_sent_after_the_end_and_a_seal_waits_for_a_send_under_way() {
+        let i = Arc::new(Inbox::new(&small()));
+        let sent = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let slow: Send = {
+            let sent = Arc::clone(&sent);
+            Arc::new(move |kind, _| {
+                std::thread::sleep(Duration::from_millis(300));
+                sent.lock().unwrap().push(kind);
+                Ok(())
+            })
+        };
+        let (i2, s2) = (Arc::clone(&i), Arc::clone(&slow));
+        let under_way =
+            std::thread::spawn(move || i2.send_open(&s2, kinds::PREVIEW_DATA, vec![1], || {}));
+        std::thread::sleep(Duration::from_millis(50));
+        let began = Instant::now();
+        i.seal();
+        assert!(
+            began.elapsed() >= Duration::from_millis(200),
+            "the seal waited for the send under way"
+        );
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![kinds::PREVIEW_DATA],
+            "and that send was finished when it returned"
+        );
+        assert!(under_way.join().unwrap());
+        assert!(
+            !i.send_open(&slow, kinds::PREVIEW_DATA, vec![2], || {}),
+            "nothing after the seal"
+        );
+        assert!(!i.close(|| panic!("no end is said twice")));
+
+        let j = Inbox::new(&small());
+        assert!(j.close(|| {}));
+        assert!(
+            !j.send_open(&slow, kinds::PREVIEW_CREDIT, vec![], || {}),
+            "nothing after the end"
+        );
+        let k = Inbox::new(&small());
+        k.push(STREAM_CLOSE, &[]);
+        assert!(
+            !k.send_open(&slow, kinds::PREVIEW_DATA, vec![3], || {}),
+            "nothing after the window ended it"
+        );
+        assert!(k.close(|| panic!("nothing is said back to a window that ended it")));
+    }
+
     #[test]
     fn the_end_from_the_window_and_a_finished_connection() {
         let i = Inbox::new(&small());
         i.push(STREAM_CLOSE, &[]);
         assert!(i.st().peer_done);
-        i.finish();
+        assert!(i.close(|| {}));
         i.push(kinds::PREVIEW_DATA, b"late");
         assert!(i.st().buf.is_empty(), "frames after the end are dropped");
         assert!(i.finished());

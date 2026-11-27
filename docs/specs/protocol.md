@@ -1005,7 +1005,10 @@ either as "previews are not available here" and never assumes an open worked fro
   ends the stream with reason `BUDGET`. So does a connection over the node's connection caps (32 at a time per forward, 64 for the node):
 its `PreviewConnect` is still answered `ok`, and the stream ends at once with `BUDGET` and no bytes either way, so `BUDGET` also means
 "over the connection budget" (the maintainer's choice, 2026-11-27, instead of a new error code). A side that receives `PREVIEW_END`
-or `STREAM_CLOSE` from the other says nothing back; there is no half-close (an end ends both directions). The node writes every byte
+or `STREAM_CLOSE` from the other says nothing back; there is no half-close (an end ends both directions). Frames the other side had
+already sent may still arrive after a side ended a stream; it drops them. Nothing of a connection is sent after its own `PREVIEW_END`,
+and once the next `PreviewConnect` on the same stream is answered, nothing of the old connection follows (the node seals it first); a
+stream whose connection the client has not ended takes no second `PreviewConnect` (`protocol.invalid_message {field: stream_id}`). The node writes every byte
 it read from the program before it says `TARGET_GONE`, and the `PREVIEW_END` counters are the bytes relayed each way. The node never
 reads or changes the bytes (`Host`, `Origin` and every header reach the program as sent). Preview frames are the lowest priority (section 6): they never delay terminal bytes, and input
   outranks them. `PreviewCloseReason`: `CLOSED`, `EXPIRED`, `NODE_STOPPED`, `TARGET_GONE`, `BUDGET`, `PROTOCOL`, `POLICY`. Constants:
