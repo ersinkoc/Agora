@@ -55,7 +55,7 @@ export interface Removed { uid: string; at: number }
 export function removedOf(v: unknown): Removed[] {
   const by = new Map<string, number>();
   if (Array.isArray(v)) {
-    for (const e of v.slice(0, MAX_REMOVED * 2)) {
+    for (const e of v) {
       const uid = (e as { uid?: unknown })?.uid;
       if (typeof uid === 'string' && UID.test(uid)) by.set(uid, Math.max(by.get(uid) ?? 0, timeOf((e as { at?: unknown }).at)));
     }

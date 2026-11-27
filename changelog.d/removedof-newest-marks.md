@@ -1,0 +1,1 @@
+- A theme removed on another device no longer comes back when the saved list has more than 400 earlier removal marks (ADR-0113)

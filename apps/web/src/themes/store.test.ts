@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHOICE_KEY, MAX_USER_THEMES, MODE_KEY, USER_KEY, createThemeStore, loadState } from './store';
+import { CHOICE_KEY, MAX_USER_THEMES, MODE_KEY, USER_KEY, createThemeStore, loadState, removedOf } from './store';
 import { BUILT_IN, baseTokens, serialiseTheme, themeFile } from './tokens';
 
 function memory(init: Record<string, string> = {}) {
@@ -13,6 +13,24 @@ function page() {
 }
 const sand = BUILT_IN.find((b) => b.id === 'sand')!;
 const slate = BUILT_IN.find((b) => b.id === 'slate')!;
+
+describe('removal marks read from storage', () => {
+  const uid = (n: number) => n.toString(16).padStart(24, '0');
+  const marks = (count: number, base: number) => Array.from({ length: count }, (_, i) => ({ uid: uid(i + 1), at: base + i }));
+
+  it('keeps the newest mark even when it comes after the reader prefix', () => {
+    // Control: the same newest mark inside the prefix has always survived.
+    expect(removedOf([{ uid: uid(999), at: 1000 }, ...marks(400, 1)])[0]).toEqual({ uid: uid(999), at: 1000 });
+    // This newer mark follows the 400-entry prefix, so it must still win.
+    const list = [...marks(400, 1), { uid: uid(998), at: 1 }, { uid: uid(999), at: 1000 }];
+    expect(removedOf(list)[0], 'newest mark after 400 entries').toEqual({ uid: uid(999), at: 1000 });
+  });
+
+  it('keeps the latest edit of one id even when it comes after the reader prefix', () => {
+    const list = [...marks(400, 1), { uid: uid(1), at: 1000 }];
+    expect(removedOf(list).filter((r) => r.uid === uid(1))).toEqual([{ uid: uid(1), at: 1000 }]);
+  });
+});
 
 describe('the chosen theme', () => {
   it('follows the system with Light and Dark when nothing is stored, and when storage throws', () => {
