@@ -312,6 +312,8 @@ cli-devices-none = No device is registered on the hub yet. Sign in from the wind
 cli-devices-none-new = Every device registered on the hub is already trusted on this machine.
 cli-devices-declined = Nothing was trusted.
 cli-devices-not-asked = Nothing was trusted: this is not an interactive terminal. Run "agora node trust --from-hub" on this machine, or pass --yes with --fingerprint for each device.
+cli-devices-ready-command = After comparing the fingerprints above with the ones each device shows, trust them with:
+  { $command }
 cli-devices-unmatched = No device the hub lists has the fingerprint { $fingerprint }; it was not trusted.
 cli-devices-not-enrolled = This machine is not enrolled with a hub. Run "agora node enroll" first.
 cli-node-in-use = Another node already runs on the data folder { $dir } (or on its control socket). Nothing was read or changed. Stop that node first, or use another data folder.

@@ -320,7 +320,23 @@ pub fn offer(say: &Say, o: &Opts, devices: &[DeviceInfo]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
     } else {
+        // Nobody to ask (Claude Code's `!`, a script): the command that trusts exactly the devices listed above, ready to run once the
+        // person has compared the fingerprints.
         say.out(key!("cli-devices-not-asked"), &[]);
+        let wanted: Vec<String> = mine
+            .iter()
+            .filter(|p| allowed(p))
+            .map(|(d, _)| format!("--fingerprint {}", fingerprint(&d.public_key)))
+            .collect();
+        if !wanted.is_empty() {
+            say.out(
+                key!("cli-devices-ready-command"),
+                &[(
+                    "command",
+                    format!("agora node trust --from-hub --yes {}", wanted.join(" ")).into(),
+                )],
+            );
+        }
         return ExitCode::SUCCESS;
     };
     if let Some(parent) = file.parent() {

@@ -300,6 +300,8 @@ cli-devices-none = Hub'da henüz kayıtlı cihaz yok. Pencereden oturum açın, 
 cli-devices-none-new = Hub'da kayıtlı her cihaza bu makinede zaten güveniliyor.
 cli-devices-declined = Hiçbir cihaza güvenilmedi.
 cli-devices-not-asked = Hiçbir cihaza güvenilmedi: bu etkileşimli bir terminal değil. Bu makinede "agora node trust --from-hub" çalıştırın ya da her cihaz için --yes ile --fingerprint verin.
+cli-devices-ready-command = Yukarıdaki parmak izlerini her cihazın gösterdiğiyle karşılaştırdıktan sonra şununla güvenin:
+  { $command }
 cli-devices-unmatched = Hub'ın listelediği hiçbir cihazın parmak izi { $fingerprint } değil; güvenilmedi.
 cli-devices-not-enrolled = Bu makine bir hub'a kayıtlı değil. Önce "agora node enroll" çalıştırın.
 cli-node-in-use = { $dir } veri klasöründe (ya da onun denetim soketinde) zaten başka bir düğüm çalışıyor. Hiçbir şey okunmadı ya da değiştirilmedi. Önce o düğümü durdurun ya da başka bir veri klasörü kullanın.

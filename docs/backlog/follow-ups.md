@@ -8,21 +8,12 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **A node launcher for shared MCP servers that need secrets** (ADR-0122, agora-ac's review of afafe8f3): today a server naming
-  `{secret:NAME}` is not given (`secret_needs_launcher`). Write it in the file as `agora mcp shared --item NAME --socket <agent socket>`,
-  which asks the node over the agent's own socket for the item it was given (judged again), puts the secrets into the real server's
-  environment only and runs it (stdio passed through); for a URL server with secret headers, a small stdio-to-HTTP bridge adds them.
+- **Shared MCP servers at a URL whose headers need a secret** (ADR-0122 Amendment A point 4): still refused (`secret_needs_launcher`);
+  the launcher could become a small stdio-to-HTTP bridge that adds the headers. Also a `share.launch` audit row on the node.
 - **Shared MCP servers for Codex and WrongStack** (ADR-0122 step 3b): Codex takes MCP servers only as `-c mcp_servers.NAME...` overrides,
   which would put a filled secret on its command line (readable by other processes of the machine); find a way that keeps secrets off
   the command line (its config file under a node-owned `CODEX_HOME` overlay, or an env var it reads) and check it on a real version
   before its manifest gets a `shared_flag`. WrongStack's `--mcp-config` has not been checked for a second file either.
-- **`agora node trust --from-hub` outside a terminal** (the maintainer, 2026-11-27, through Claude Code's `!`): it lists the devices and
-  their fingerprints, then stops with "not an interactive terminal". Print the ready command for the listed devices
-  (`--yes --fingerprint A --fingerprint B`) under the list, so the person compares and runs it in one step.
-- **A CSP error in the window's console on every load** (seen by the maintainer, 2026-11-27): `long.js` (bundled through protobufjs) tries a
-  tiny WebAssembly module for 64-bit multiplication, the hub's page policy refuses it (no `'wasm-unsafe-eval'`, on purpose), and the
-  library falls back to plain JavaScript. Harmless, but noisy: take the probe out of the bundle (a `long` build without it, or an alias),
-  never by widening the page policy.
 - **The hub's own CA is not name-constrained**: a person who adds it to a device's trusted roots to silence the warning trusts it for
   every site. Constrain new CAs to the hub's names, and steer people to `agora remote tailscale --serve` (a real certificate) first.
 - **Durable node handoff writes**: the node writes, syncs and prunes records while it holds the broker mutex. Measure worst-case contention before moving I/O out of the lock.
