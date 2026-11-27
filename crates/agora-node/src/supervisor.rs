@@ -4535,7 +4535,7 @@ impl Supervisor {
         let inputs = term.inputs();
         if inputs != entry.inputs_seen {
             entry.inputs_seen = inputs;
-            entry.gate.input();
+            entry.gate.input(now);
         }
         let current = entry.agent.state();
         // While the state is the agent's own report, a screen reading changes nothing (`Agent::observe`): the gate is not asked, so

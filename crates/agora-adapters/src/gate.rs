@@ -8,6 +8,11 @@
 //! - Everything else (a reading of `working` or `blocked`, anything from a state at rest) is applied at once, as without the gate.
 //!
 //! Pure: the clock is passed in, no I/O. The node's facts and an agent's own reports bypass it ([`Gate::clear`]).
+//!
+//! What counts as the person's input is every write to the terminal (`agora-node`'s `InputHandle`). The node's own writes are counted
+//! too, and they never reach a blocked agent: a helper's first prompt is typed only into a screen its `[[ready]]` rules match (an empty
+//! input box) and Enter only after its `[[typed]]` rules matched, and a dispatched task is pasted only between turns (ADR-0057, ADR-0095).
+//! A prompt sent from the window (`AgentPrompt`) is the person's.
 
 use std::time::{Duration, Instant};
 
@@ -29,9 +34,14 @@ pub struct Gate {
     hold_since: Option<Instant>,
     /// While blocked: a reading other than blocked is waiting for the hold to end.
     holding: bool,
-    /// The person's input since the last reading: the hold ends at the next one.
-    released: bool,
+    /// When the person's input arrived: the hold ends at the next reading without the dialog, unless a reading still showing it came
+    /// after [`RELEASE_GRACE`] (the dialog was drawn again after the input, so the input was not an answer: an arrow key, a filter).
+    released: Option<Instant>,
 }
+
+/// How long after the person's input a reading may still show the dialog before the input no longer counts as its answer: a check can
+/// land before the agent redraws after Enter. Never longer than the kind's blocked hold.
+pub const RELEASE_GRACE: Duration = Duration::from_millis(300);
 
 impl Gate {
     /// Offers one screen reading against the current state; `Some` is the state to apply now.
@@ -46,11 +56,19 @@ impl Gate {
             self.pending = None;
             self.holding = false;
             // The dialog still shows: the hold starts again from the next reading without it. The person's input is kept for that
-            // reading (a check can land before the agent redraws after an answer).
+            // reading only within the grace (a check can land before the agent redraws after Enter); a dialog still shown after it was
+            // drawn again after the input, which was then a move within it, not an answer.
             self.hold_since = None;
+            let grace = RELEASE_GRACE.min(t.blocked_hold);
+            if self
+                .released
+                .is_some_and(|at| now.saturating_duration_since(at) >= grace)
+            {
+                self.released = None;
+            }
             return None;
         }
-        let released = std::mem::take(&mut self.released);
+        let released = self.released.take().is_some();
         let at_rest = matches!(reading, AgentState::Idle | AgentState::Done);
         if current == AgentState::Working && at_rest && !t.idle_confirm.is_zero() {
             return match self.pending {
@@ -99,14 +117,14 @@ impl Gate {
         self.pending.is_some() || self.holding
     }
 
-    /// The person sent input to the terminal: a blocked hold ends at the next reading.
-    pub fn input(&mut self) {
-        self.released = true;
+    /// The person sent input to the terminal at `now`: a blocked hold ends at the next reading without the dialog (see [`RELEASE_GRACE`]).
+    pub fn input(&mut self, now: Instant) {
+        self.released = Some(now);
     }
 
     /// The state was set some other way (a node fact, the agent's own report): nothing pending stays.
     pub fn clear(&mut self) {
-        self.released = false;
+        self.released = None;
         self.apply();
     }
 }
@@ -181,9 +199,28 @@ mod tests {
         );
         assert_eq!(g.offer(Blocked, Blocked, ms(t0, 4200), &T), None);
         // Answered by the person: shown at once, also when a check lands before the agent redraws.
-        g.input();
+        g.input(ms(t0, 4240));
         assert_eq!(g.offer(Blocked, Blocked, ms(t0, 4250), &T), None);
         assert_eq!(g.offer(Blocked, Working, ms(t0, 4300), &T), Some(Working));
+    }
+
+    #[test]
+    fn a_move_within_the_dialog_is_not_its_answer() {
+        let (mut g, t0) = (Gate::default(), Instant::now());
+        assert_eq!(g.offer(Working, Blocked, t0, &T), Some(Blocked));
+        // An arrow key: the dialog is drawn again after it (a reading past the grace still shows it), then a redraw caught midway.
+        g.input(ms(t0, 1000));
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 1400), &T), None);
+        assert_eq!(
+            g.offer(Blocked, Idle, ms(t0, 1500), &T),
+            None,
+            "the hold still runs"
+        );
+        assert!(g.waiting());
+        // Enter: a check before the agent redraws still shows the dialog, and the next reading is the answer.
+        g.input(ms(t0, 2000));
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 2050), &T), None);
+        assert_eq!(g.offer(Blocked, Working, ms(t0, 2100), &T), Some(Working));
     }
 
     #[test]

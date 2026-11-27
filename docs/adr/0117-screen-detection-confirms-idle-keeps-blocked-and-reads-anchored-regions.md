@@ -264,7 +264,8 @@ The maintainer resolved these questions on 2026-11-27.
    count moved (`TerminalHandle::inputs`, every write through `InputHandle` counted), and clears the gate on every state that is not
    the screen's. Review of e1b6b760: the hold is measured from the first reading without the dialog (never from the last check that saw it, so a check
    after a back-off cannot take one redraw for an answer); a check with no opinion drops an idle being confirmed; the person's input is kept
-   until a reading without the dialog; the gate is not asked while the state is the agent's own report; a new process starts its input
+   until a reading without the dialog, but only within 300 ms (agora-ac's read of f4c336b1: an arrow key or a filter typed in a permission
+   dialog is followed by the dialog drawn again, and must not end the hold; the node's own typing never reaches a blocked agent); the gate is not asked while the state is the agent's own report; a new process starts its input
    count and the gate afresh; every write of input goes through `InputHandle` (no way to write past the count). `crates/agora-node/tests/detection_gate.rs`:
    glimpses of the input box between working lines are said idle once under `idle_confirm_ms = 600`, each time without. Detection benchmark after it: tick p50 905 µs, one terminal p50 20.1 µs (baseline
    886 µs and 19.6 µs; the gate is in the supervisor, not in `detect`). Left: timed captures of the real Claude Code and Codex, then
