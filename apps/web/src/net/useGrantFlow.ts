@@ -7,7 +7,15 @@ import { declineGive, isGive, resendGive } from './give';
 import { grantFor, type GrantAsk } from './grant';
 import type { CommandBody } from './live';
 
-export interface GrantQuestion { id: number; node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean }
+/** `reason`: why Allow failed, as a locale key, when the machine said why (an untrusted device: `approval-not-trusted`). */
+export interface GrantQuestion { id: number; node: string; body: CommandBody; ask: GrantAsk; busy: boolean; failed: boolean; reason?: string }
+
+/** The locale key for a refused grant, from the machine's code: a device the machine does not trust yet is told how to fix it (trying
+ *  again would never help); anything else is the plain failure. */
+export function grantFailureKey(e: unknown): string {
+  const code = typeof e === 'object' && e !== null ? (e as { code?: string }).code : undefined;
+  return code === 'approval.signature_invalid' ? 'approval-not-trusted' : 'grant-failed';
+}
 
 type Command = (node: string, body: CommandBody) => Promise<agora.v1.CommandOk.$Properties>;
 /** `sign` makes the grant (`signGrant` with this device's key); undefined when the window cannot sign (no hub link, no device key). */
@@ -50,9 +58,9 @@ export function useGrantFlow(deps: GrantDeps) {
       // A resize is sent again with the next one, and a refused subscription is tried again on its own stream by the window: neither is
       // resent here (a subscription on the commands stream is refused).
       else if (!('terminalResize' in g.body) && !('terminalSubscribe' in g.body) && !('chatSubscribe' in g.body)) await command(g.node, g.body).catch(() => {});
-    } catch {
+    } catch (e) {
       busy.current = false;
-      if (live.current === g.id) setQuestion({ ...g, busy: false, failed: true });
+      if (live.current === g.id) setQuestion({ ...g, busy: false, failed: true, reason: grantFailureKey(e) });
     }
   }, [question]);
 

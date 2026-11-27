@@ -750,7 +750,7 @@ export function App() {
           onStart={hub && api && live && changes ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api && changes ? forgetAgent : undefined} onResume={hub && api && changes ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
           start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} />}
-      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
+      {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} reason={grantAsk.reason} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. My machines
           shows every request in full itself, so nothing floats there. */}
       {pairing.ui && pairing.ui.cards[0] && !showsHome && !isMachinesHash(hash) && <PairRequest key={pairing.ui.cards[0].id} request={pairing.ui.cards[0]} offline={pairing.ui.offline} onAnswer={(a, r) => pairing.ui!.onAnswer(pairing.ui!.cards[0]!, a, r)} />}
