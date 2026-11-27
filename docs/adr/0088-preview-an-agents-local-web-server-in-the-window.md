@@ -78,13 +78,16 @@ changes decision 4's "the hub does not parse them" for one thing only: the head 
 2. **Only the opener connects** (the maintainer, 2026-11-27). The window asks the hub, with its session, for an entry ticket for a
    forward (`POST /api/preview/<forward>/enter`). The hub gives one only to the person whose device opened it (the forward's
    `creator`): 32 random bytes, single use, 60 seconds. The frame loads `https://<hub>:<port>/.agora-preview/enter?t=<ticket>`; the
-   hub answers with a cookie for that port, `agora_preview=<forward token>` (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`, no
-   `Domain`), and a redirect to `/`. The forward token is random, bound to the forward and the person, and ends with the forward, the
+   hub answers with a cookie named for that port, `agora_preview_<port>=<forward token>` (`HttpOnly`, `Secure`, `SameSite=Strict`,
+   `Path=/`, no `Domain`; one name per port, because a browser keeps one cookie per name, host and path whatever the port, so one
+   shared name would let a second preview log the first out), and a redirect to `/` with `Referrer-Policy: no-referrer` and
+   `Cache-Control: no-store` (the ticket was in the URL; the hub never logs a query string). The forward token is random, bound to the forward and the person, and ends with the forward, the
    person's sign-out or removal, or after 8 hours.
 3. **The hub reads every request head, and only the head.** Browsers send a host's cookies to every port of that host, so every
    request on a preview port carries the cookies of every forward on that host. For each request (HTTP/1.1, keep-alive included) the
-   hub reads the request line and headers (at most 16 KiB, else 431), requires a valid `agora_preview` token for this port's forward,
-   **removes that cookie** (and every `agora_preview` cookie) before the bytes go on, and passes the rest unchanged. A WebSocket
+   hub reads the request line and headers (at most 16 KiB, else 431), requires a valid `agora_preview_<port>` token for this port's
+   forward (another port's name is not accepted), **removes every `agora_preview_*` cookie** before the bytes go on, and passes the
+   rest unchanged. A WebSocket
    upgrade is checked the same way, and after its `101` the connection is relayed as opaque bytes. Bodies and responses are never
    read. Without a valid token: 401 and nothing reaches the node. HTTP/2 is not offered on preview ports (ALPN `http/1.1` only), so
    the head is always readable.
@@ -92,13 +95,23 @@ changes decision 4's "the hub does not parse them" for one thing only: the head 
    `preview.enter` (forward, port, person), never content.
 5. **What the window shows.** A Browser pane with the forward's address (path only), reload, open in a new tab (the same entry flow),
    phone and tablet sizes, and the forward's end time. The frame is `sandbox="allow-scripts allow-forms allow-same-origin
-   allow-popups"` on the preview's own origin, which is safe there because that origin is not the window's.
-6. **Suggestions and changes** go to the opener only (`PreviewSuggested` to the project's owner and the person who started the agent
+   allow-popups"` on the preview's own origin, which is safe there because that origin is not the window's; without
+   `allow-popups-to-escape-sandbox`, so a popup the previewed app opens stays sandboxed (open in a new tab goes through the entry flow).
+6. **The programs behind different forwards share one cookie jar** (decide (a) or (b)). Cookies ignore the port, so app A's
+   `session=` goes with every request to app B's port; B can also set cookies over A's names, or set so many that every preview's
+   head goes over 16 KiB (431). Two forwards may front different programs (another project, an agent's server).
+   - **(a) Proposed: partition the jar.** On a response head, `Set-Cookie: n=v` becomes `p<port>_n=v`; on a request head, only this
+     port's `p<port>_*` cookies go on, with the prefix taken off. The hub then reads response heads too (a second, equally bounded
+     exception to "does not parse"; bodies still never), and a page's `document.cookie` sees prefixed names (a script that reads its
+     own cookies by name breaks; most dev servers set `HttpOnly` session cookies and are unaffected).
+   - **(b)** Keep the jar shared, say so plainly in the window and the threat model (cookies are shared among the previews open on
+     one hub), and leave per-forward host names as the real fix.
+7. **Suggestions and changes** go to the opener only (`PreviewSuggested` to the project's owner and the person who started the agent
    that suggested it, `PreviewChanged` to the opener), until a wider rule is decided.
 
-Threat-model rows to add: a preview page reading another forward's cookies (cookies are shared across ports; the hub strips its own
-and a dev server's cookies are the person's own apps), a leaked entry ticket (single use, 60 s, opener only), and the head parser
-(bounded, rejects malformed heads, never reads bodies).
+Threat-model rows to add: cookies across previews (shared by the browser across ports; the hub strips its own, and point 6 decides
+whether it also partitions the apps' cookies), a leaked entry ticket (single use, 60 s, opener only, no referrer, not logged), and
+the head parser (bounded, rejects malformed heads, never reads bodies).
 
 ## Status of the build
 1. Schema: done. `schema/agora/v1/preview.proto` (commands 102..105, results 26..28, events 80..81, frame kinds 20..22), capability
