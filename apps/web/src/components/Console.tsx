@@ -49,7 +49,7 @@ import type { MenuItem } from '../layout/Menu';
 import { BUILTIN_REGISTRY, type HostActions, homeView } from '../layout/builtinPanels';
 import { usePlugins } from '../plugins/usePlugins';
 import { withPlugins } from '../plugins/registry';
-import { TOOL_PANELS, type PanelSources, type PanelState } from '../layout/panels';
+import { TOOL_PANELS, type PanelSources, type PanelState, type PreviewActions, type PreviewState } from '../layout/panels';
 import { CloseAgentContext } from './CloseAgent';
 import { ChatActionsContext } from './chatActions';
 import { GiveContext } from './GiveTask';
@@ -66,7 +66,7 @@ const isNarrow = () => typeof window !== 'undefined' && !!window.matchMedia?.(NA
 
 // The one window, laid out like an editor: the agents on the left as a tree, the terminals you are watching as tabs in the
 // middle (or side by side), details on the right, and a status bar. Everything is derived from props.
-export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest, watching }: {
+export function Console({ agents, machines, usage, projects = [], approvals, messages, boards = [], terminalFor, chatOf, sendPrompt, chooseOption, loadDiff, loadHistory, filesOf, onOpen, onStart, onNewTerminal, onCommand, onForget, onResume, start, onResolve, helperGrants, revokeGrant, notice, link, onLock, onRetry, pairing, guest, watching, previews }: {
   agents: readonly AgentTileModel[];
   machines: readonly MachineModel[];
   usage?: UsageSummary;
@@ -108,6 +108,8 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   guest?: boolean;
   // ADR-0106: the hub said this person is a viewer; the window only watches.
   watching?: boolean;
+  // ADR-0088: the previews this window may show, and its paths to open, close and enter one.
+  previews?: { state: PreviewState; actions: PreviewActions };
 }) {
   const cleared = useSyncExternalStore(subscribeDismissed, dismissedIds, dismissedIds);
   // What was cleared stays hidden only while the agent is closed: one that runs again (a new run under the same id) is back in the list.
@@ -328,13 +330,14 @@ export function Console({ agents, machines, usage, projects = [], approvals, mes
   };
   // What the panes' panels may see and do (ADR-0068 rung 3, layout/panels.ts): read-only slices of this window's state, the reads the
   // window can make, and its own paths for every command (those the app installs as context included). The panels get nothing else.
-  const panelState: PanelState = Object.freeze({ fleet, machines, approvals, attention, changed, messages, boards, usage, projects, now, link, notice, guest, watching, forgetError, resumeError, resuming });
+  const panelState: PanelState = Object.freeze({ fleet, machines, approvals, attention, changed, messages, boards, usage, projects, now, link, notice, guest, watching, forgetError, resumeError, resuming, previews: previews?.state });
   const panelSources: PanelSources = Object.freeze({ chatOf, filesOf, loadDiff, loadHistory, helperGrants });
   const panelActions: HostActions = Object.freeze({
     openAgent: onOpen, openFromHome: openFromFleet, openTool, review: setReviewing, history: setHistory, browse: setBrowsing,
     showNeeds: () => { setRailTab('needs'); setShowDetails(true); }, showChanges: () => { setRailTab('changes'); setShowDetails(true); },
     dismiss, forget: onForget ? removeClosed : undefined, resume, start: onStart, newTerminal: onNewTerminal ? () => onNewTerminal() : undefined, retry: onRetry,
     resolve: onResolve, sendPrompt, chooseOption, revokeGrant, answers: banners, pairing, closeAgent, chat: chatActions, give,
+    previews: previews?.actions,
   });
   const welcome = homeView(panelState, panelActions);
   // The panels: the built-ins, then the panels of the plugins this browser loaded and the person granted (ADR-0114; none in safe mode).

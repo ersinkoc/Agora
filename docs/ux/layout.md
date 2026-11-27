@@ -45,6 +45,7 @@ Bind   = { "agent": string } | { "follow": "attention" | "selection" }
 | `tasks` | shared tasks and files |
 | `messages` | team chat between agents |
 | `usage` | tokens, context and time (no money) |
+| `preview` | an agent's local web app, on its own origin (ADR-0088): the previews this browser opened, opening a port on a machine, the machines' suggestions; an older window shows it as an unknown panel |
 | `theme` | the theme editor (`themes.md`); added in rung 2, an older window shows it as an unknown panel |
 | `empty` | a chooser: an agent, "what needs you next", "the selected agent", or one of the panels above |
 

@@ -21,6 +21,7 @@ import type { PairingUi } from '../components/Pairing';
 import type { StartChoice } from '../components/StartApproval';
 import type { AnswerGuard, AnswerResult } from '../components/useAnswerGuard';
 import type { Bind } from './tree';
+import type { EntryResult, Forward, PreviewSuggestion } from '../net/preview';
 
 /** Where a panel is offered and what it is about:
  *  - `global`: about no one agent (Needs you, Usage); listed in Show… and the empty pane's chooser.
@@ -57,6 +58,7 @@ export const BUILTIN_PANELS = [
   { id: 'tasks', label: 'board-title', kind: 'global', binds: 'nothing', streams: false },
   { id: 'messages', label: 'ide-tab-messages', kind: 'global', binds: 'nothing', streams: false },
   { id: 'usage', label: 'ide-tab-cost', kind: 'global', binds: 'nothing', streams: false },
+  { id: 'preview', label: 'preview-panel', kind: 'global', binds: 'nothing', streams: false },
   { id: 'theme', label: 'theme-editor-title', kind: 'global', binds: 'nothing', streams: false },
   { id: 'terminal', label: 'focus-terminal', kind: 'tool', binds: 'agent', streams: true },
   { id: 'changes', label: 'ide-tab-changes', kind: 'tool', binds: 'agent', streams: false },
@@ -94,6 +96,25 @@ export interface PanelState {
   readonly forgetError?: string;
   readonly resumeError?: { readonly id: string; readonly code: string };
   readonly resuming?: string;
+  /** ADR-0088: the previews this window may show (absent where the hub offers none). */
+  readonly previews?: PreviewState;
+}
+
+/** The forwards this person opened, the machines' suggestions, and what the window needs to draw them. */
+export interface PreviewState {
+  readonly forwards: readonly Forward[];
+  readonly suggestions: readonly PreviewSuggestion[];
+  /** This browser's device: only the forwards it opened can be entered from here. */
+  readonly device?: string;
+  /** The host the window reached the hub by (the previews are ports of it). */
+  readonly hostname: string;
+}
+
+/** What the Preview pane may do: open a port on a machine (signed by the window), close a forward, enter one. */
+export interface PreviewActions {
+  readonly open: (node: string, port: number, expiresSeconds: number) => Promise<{ ok: true; forward: Forward } | { ok: false; code: string; reason: string }>;
+  readonly close: (forward: Forward) => Promise<string | undefined>;
+  readonly enter: (forward: Forward) => Promise<EntryResult>;
 }
 
 /** Reading what a node holds for an agent, each undefined when this window cannot (no hub, an older one). Reads only. */
@@ -142,6 +163,8 @@ export interface PanelActions {
   readonly chat: ChatActions;
   /** Giving a shared task to an agent (the board). */
   readonly give?: GiveApi;
+  /** ADR-0088: opening, closing and entering previews. */
+  readonly previews?: PreviewActions;
 }
 
 /** Everything one built-in pane's panel is given, frozen at the top level (TypeScript `readonly` keeps built-ins from changing what

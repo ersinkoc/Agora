@@ -154,4 +154,10 @@ the head parser (bounded, rejects malformed heads, never reads bodies).
 4. Web Browser pane: started (2026-11-27). The hub side of it: `preview.v1` in the hub's capabilities (a window's signed
    `PreviewOpen`, `PreviewClose` and `PreviewList` are routed; the hub's own connections reach a node that offers it), point 7's
    scope (`server.rs` `preview_visible`: `PreviewChanged` to the opener's person, `PreviewSuggested` to the owner), and the window
-   page's `frame-src` for the preview origins. The pane itself is next.
+   page's `frame-src` for the preview origins. The pane: done (2026-11-27). The `preview` panel (`components/PreviewPane.tsx`,
+   `net/preview.ts`): the forwards this browser opened, each entered with a fresh ticket in a frame on its own origin (sandbox
+   `allow-scripts allow-forms allow-same-origin allow-popups`, no referrer), its address (the path this pane set), reload, a new tab
+   (its own entry), full, tablet and phone widths, its end time and Close; a port opened on a machine with this device's
+   `preview-action-v1` signature (vectors shared); the machines' suggestions as cards with Open; another device's forward listed with
+   Close only; refusals in words (`no_origin` says to open the hub at its own address). The window asks each online machine for its
+   open forwards once (`PreviewList`) and follows `PreviewChanged` after that.

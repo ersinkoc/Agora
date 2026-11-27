@@ -82,7 +82,7 @@ describe('the registry', () => {
   });
 
   it('lists what Show… and the chooser offer in the window\'s order, and the tools for the palette', () => {
-    expect(BUILTIN_REGISTRY.offered('global').map((p) => p.id)).toEqual(['fleet', 'approvals', 'tasks', 'messages', 'usage', 'theme']);
+    expect(BUILTIN_REGISTRY.offered('global').map((p) => p.id)).toEqual(['fleet', 'approvals', 'tasks', 'messages', 'usage', 'preview', 'theme']);
     expect(BUILTIN_REGISTRY.offered('tool').map((p) => p.id)).toEqual(['terminal', 'changes', 'files', 'manager']);
     expect(TOOL_PANELS).toEqual(['terminal', 'changes', 'files', 'manager']);
     expect(isToolPanel('manager') && !isToolPanel('agent') && !isToolPanel('approvals')).toBe(true);
@@ -151,14 +151,14 @@ describe('the window draws panels from the registry', () => {
   it('lists the registry in the empty pane\'s chooser, tools first, and in Show…, the panels first', () => {
     draw(ws(row(pane('p1', 'empty'), pane('p2', 'machines-map'))));
     const chips = [...(host.querySelector('#pane-p1') as HTMLElement).querySelectorAll('.ide-chip')].map((b) => b.textContent);
-    expect(chips).toEqual(['What needs you next', 'The agent selected in the list', 'Terminal', 'Changes', 'Files', 'File manager', 'Fleet', 'Needs you', 'Shared tasks and files', 'Team chat', 'Usage', 'Theme']);
+    expect(chips).toEqual(['What needs you next', 'The agent selected in the list', 'Terminal', 'Changes', 'Files', 'File manager', 'Fleet', 'Needs you', 'Shared tasks and files', 'Team chat', 'Usage', 'Preview', 'Theme']);
     act(() => { (host.querySelector('[aria-label="Pane options: Empty pane"]') as HTMLButtonElement).click(); });
     const show = [...document.body.querySelectorAll<HTMLElement>('[role=menuitem]')].find((m) => m.textContent?.startsWith('Show')) as HTMLElement;
     act(() => { show.click(); });
     const items = [...document.body.querySelectorAll<HTMLElement>('[role=menuitem], [role=menuitemcheckbox], [role=menuitemradio]')].map((m) => m.textContent?.trim());
     const from = items.indexOf('What needs you next');
     expect(items.slice(from)).toEqual(['What needs you next', 'The agent selected in the list', 'claude · amber', 'codex · teal',
-      'Fleet', 'Needs you', 'Shared tasks and files', 'Team chat', 'Usage', 'Theme', 'Terminal', 'Changes', 'Files', 'File manager']);
+      'Fleet', 'Needs you', 'Shared tasks and files', 'Team chat', 'Usage', 'Preview', 'Theme', 'Terminal', 'Changes', 'Files', 'File manager']);
   });
 });
 

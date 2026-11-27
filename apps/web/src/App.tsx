@@ -4,7 +4,7 @@ import { AcknowledgeHandoffContext } from './components/BoardHandoffs';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
-import { demoAgents, demoApprovals, demoList, demoMachines, demoProjects, demoQuota } from './fixtures';
+import { demoAgents, demoApprovals, demoList, demoMachines, demoPreviewActions, demoPreviewState, demoProjects, demoQuota } from './fixtures';
 import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
 import { chooseLanguage, getLanguage, subscribeLanguage, t } from './i18n';
@@ -54,6 +54,7 @@ import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
 import { catalogAskFor, setCatalogSource } from './themes/catalog';
 import { sharedSourceFor } from './net/share';
+import { askEntry, forwardOf, signPreviewOpen, type Forward } from './net/preview';
 import { themeSync } from './themes/sync';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
@@ -438,6 +439,64 @@ export function App() {
     for (const p of live ? projectChoices(live) : []) if (!byId.has(p.projectId)) byId.set(p.projectId, (p.path ?? '').split(/[\\/]/).filter(Boolean).pop() ?? p.projectId);
     return [...byId].map(([projectId, label]) => ({ projectId, label })).sort((a, b) => a.label.localeCompare(b.label));
   }, [live]);
+  // ADR-0088: the Preview pane. The forwards each machine had open when this window connected (asked once per machine), joined with
+  // what the machines announce since (the hub sends a forward's changes to the person who opened it); open, close and enter.
+  const [listedForwards, setListedForwards] = useState<Forward[]>([]);
+  const askedForwards = useRef(new Set<string>());
+  const mayPreview = !!(hub && api && viewed && ownsMachines(role));
+  useEffect(() => {
+    if (!mayPreview || !api) return;
+    for (const node of onlineNodes.split('\n').filter(Boolean)) {
+      if (askedForwards.current.has(node)) continue;
+      askedForwards.current.add(node);
+      api.command(node, { previewList: {} }).then((ok) => {
+        const got = (ok.previewList?.forwards ?? []).map((f) => forwardOf(node, f)).filter((f): f is Forward => !!f);
+        setListedForwards((prev) => [...prev.filter((f) => f.node !== node), ...got]);
+      }, () => askedForwards.current.delete(node));
+    }
+  }, [mayPreview, api, onlineNodes]);
+  // A forward that passes its end without a word from its machine leaves the pane then: one timer to the earliest end.
+  const [previewTick, setPreviewTick] = useState(0);
+  const previews = useMemo(() => {
+    if (!mayPreview || !api || !hub || !live) return undefined;
+    const now = Date.now();
+    const announced = (live.forwards ?? []).filter((f) => f.endsMs <= 0 || f.endsMs > now);
+    const ended = live.forwardsEnded ?? new Set<string>();
+    const key = (f: Forward) => `${f.node}/${f.id}`;
+    const seen = new Set(announced.map(key));
+    const forwards = [...announced, ...listedForwards.filter((f) => !seen.has(key(f)) && !ended.has(key(f)) && f.endsMs > now)];
+    const failure = (e: unknown) => {
+      const err = e as { code?: unknown; params?: Record<string, unknown> };
+      return { ok: false as const, code: typeof err?.code === 'string' ? err.code : 'unavailable', reason: typeof err?.params?.reason === 'string' ? err.params.reason : '' };
+    };
+    return {
+      state: { forwards, suggestions: live.previewSuggestions ?? [], device: device?.id, hostname: window.location.hostname },
+      actions: {
+        open: async (node: string, port: number, expiresSeconds: number) => {
+          if (!device) return { ok: false as const, code: 'approval.signature_invalid', reason: '' };
+          try {
+            const authorization = await signPreviewOpen(device, node, port, expiresSeconds);
+            const ok = await api.command(node, { previewOpen: { port, expiresSeconds, authorization } });
+            const forward = forwardOf(node, ok.previewOpen?.forward);
+            if (!forward) return { ok: false as const, code: 'unavailable', reason: '' };
+            setListedForwards((prev) => [...prev.filter((f) => key(f) !== key(forward)), forward]);
+            return { ok: true as const, forward };
+          } catch (e) { return failure(e); }
+        },
+        close: async (f: Forward) => {
+          try { await api.command(f.node, { previewClose: { forwardId: f.id } }); setListedForwards((prev) => prev.filter((x) => key(x) !== key(f))); return undefined; }
+          catch (e) { return failure(e).code; }
+        },
+        enter: (f: Forward) => askEntry(hub.token, f.node, f.id),
+      },
+    };
+  }, [mayPreview, api, hub, live, listedForwards, device, previewTick]); // eslint-disable-line react-hooks/exhaustive-deps
+  const nextPreviewEnd = previews?.state.forwards.reduce((m, f) => (f.endsMs > 0 && f.endsMs < m ? f.endsMs : m), Number.POSITIVE_INFINITY) ?? Number.POSITIVE_INFINITY;
+  useEffect(() => {
+    if (!Number.isFinite(nextPreviewEnd)) return;
+    const timer = window.setTimeout(() => setPreviewTick((n) => n + 1), Math.max(0, nextPreviewEnd - Date.now()) + 50);
+    return () => window.clearTimeout(timer);
+  }, [nextPreviewEnd]);
   useEffect(() => { setCatalogSource(catalogAskFor(api, viewed, !!hub)); }, [api, viewed, hub]);
   // ADR-0113 step 4: the person's themes, packs and theme choice, read from this hub once the window has its first view and kept the same
   // on all their devices; read again whenever the window comes back into view (another device may have changed them).
@@ -790,7 +849,7 @@ export function App() {
           onResolve={answerRequest} helperGrants={hub && api ? helperGrants : undefined} revokeGrant={hub && api && changes ? revokeGrant : undefined} notice={notice ? t(notice) : undefined} link={hub ? link : 'live'} onRetry={api ? api.retry : undefined}
           onStart={hub && api && live && changes ? (node) => openStart(node) : (!hub && import.meta.env.DEV ? (node) => openStart(node) : undefined)}
           onNewTerminal={hub && api && live && changes ? (node) => openStart(node, true) : (!hub && import.meta.env.DEV ? (node) => openStart(node, true) : undefined)} onCommand={() => setPalette(true)} onForget={hub && api && changes ? forgetAgent : undefined} onResume={hub && api && changes ? resumeAgent : (!hub && import.meta.env.DEV ? async () => undefined : undefined)} onLock={hub ? lockNow : undefined}
-          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} />}
+          start={startWindow} pairing={pairing.ui} guest={pairing.owner === 'no'} watching={!changes} previews={previews ?? (hub ? undefined : { state: demoPreviewState, actions: demoPreviewActions })} />}
       {grantAsk && <GrantDialog machine={live?.nodes.get(grantAsk.node)?.hostname || grantAsk.node} agent={grantAgentName} kind={grantAsk.ask.kind} busy={grantAsk.busy} failed={grantAsk.failed} reason={grantAsk.reason} onAllow={() => void grants.allow()} onClose={grants.dismiss} />}
       {/* Away from Home (an agent, a page) a request to join still reaches the owner: the first card floats over the window. My machines
           shows every request in full itself, so nothing floats there. */}

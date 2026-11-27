@@ -9,6 +9,7 @@ import { detailLaunchOptions, type StartOption } from './approval';
 import { ALWAYS_LIST_MAX, alwaysOffer, type AlwaysOffer } from './always';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
 import { visible } from './hidden';
+import { applyForward, type Forward, type PreviewSuggestion } from './preview';
 export { HIDDEN_RANGES, visible } from './hidden';
 
 type Ev = agora.v1.Event.$Properties;
@@ -186,12 +187,19 @@ export interface View {
   // #1150: machine -> the ids of its last `RESOLVED_KEPT` decided approvals seen since the snapshot, oldest first (a Set keeps insertion
   // order). A request a machine records after its decision brings no card back, as in the hub's view (`View::resolved_approvals`).
   resolved?: Map<string, Set<string>>;
+  // ADR-0088: the open forwards this window was told of (the hub sends a forward's changes to the person who opened it), and the
+  // latest "my app is on port N" suggestions (the owner's window), newest last.
+  forwards?: Forward[];
+  // The forwards this window was told ended (`node/forward`), so a list asked before cannot bring one back.
+  forwardsEnded?: Set<string>;
+  previewSuggestions?: PreviewSuggestion[];
 }
 export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
 const MAX_QUOTA = 64; // per machine, as the hub
 const QUOTA_SKEW_MS = 120_000;
 
 const MAX_MESSAGES = 50;
+const MAX_SUGGESTIONS = 20;
 const RESOLVED_KEPT = 256; // decided approvals remembered per machine, as the hub (`RESOLVED_APPROVALS_KEPT`)
 
 export function emptyView(): View {
@@ -477,6 +485,22 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'agentSessionConfig': {
       const a = v.agents.get(q(e.agentSessionConfig.agentId));
       if (a) a.session = { ...(a.session ?? emptySession()), config: configOf(e.agentSessionConfig.options) };
+      break;
+    }
+    // ADR-0088: a machine speaks for itself only.
+    case 'previewChanged': {
+      v.forwards = applyForward(v.forwards ?? [], producer, e.previewChanged.forward);
+      const f = e.previewChanged.forward;
+      if (f?.forwardId && f.state !== 1) (v.forwardsEnded ??= new Set()).add(`${producer}/${f.forwardId}`);
+      break;
+    }
+    case 'previewSuggested': {
+      const b = e.previewSuggested;
+      const port = num(b.port);
+      if (port < 1 || port > 65535) break;
+      const list = (v.previewSuggestions ?? []).filter((x) => !(x.node === producer && x.port === port));
+      list.push({ node: producer, agentId: b.agentId ? q(b.agentId) : '', port, note: visible(String(b.note ?? '')).slice(0, 200), atMs: num(ev.atMs) || Date.now() });
+      v.previewSuggestions = list.slice(-MAX_SUGGESTIONS);
       break;
     }
     // ADR-0091: a machine speaks for itself only; the newest observation of a window wins; the table is bounded (the oldest goes).

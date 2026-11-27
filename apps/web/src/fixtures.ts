@@ -172,3 +172,12 @@ export function demoSharedSource(): import('./net/share').SharedSource {
     remove: async (item) => { items = items.filter((x) => x.name !== item.name); return { ok: true }; },
   };
 }
+
+// ADR-0088: the Preview pane on demo data: one suggestion from an agent, nothing open, and opening works without a machine (the frame is
+// not entered: there is no hub to give a ticket).
+export const demoPreviewState = { forwards: [], suggestions: [{ node: 'laptop', agentId: 'a1', port: 5173, note: 'vite dev server', atMs: Date.now() - 60_000 }], device: 'web-demo', hostname: 'localhost' };
+export const demoPreviewActions = {
+  open: async () => ({ ok: false as const, code: 'node.offline', reason: '' }),
+  close: async () => undefined,
+  enter: async () => ({ ok: false as const, code: 'preview.unavailable', reason: 'no_origin' }),
+};

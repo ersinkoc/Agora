@@ -44,6 +44,7 @@ Panels:
 | `tasks` | the shared tasks |
 | `messages` | messages between agents |
 | `usage` | tokens, context and time |
+| `preview` | an agent's local web app (a port you opened on one of your machines), in a frame of its own |
 | `theme` | the theme editor (web window) |
 | `empty` | a chooser |
 

@@ -100,6 +100,13 @@ it would hand the window that trust; that is why those ports are refused even fo
 - **On the node's link** the bytes ride a hub-originated `PreviewConnect` under the node's credit, and the hub writes preview frames
   only while no command waits for that node.
 
+## The window's part (step 4)
+The **Preview** panel (`apps/web/src/components/PreviewPane.tsx`): the forwards this browser's device opened (another device's are
+listed with Close only), entered through `POST /api/preview/enter` into a frame on the forward's own origin, with its address, reload,
+a new tab (a fresh entry), three widths and Close; opening a port signs `PreviewOpen` with this device (`preview-action-v1`);
+`PreviewSuggested` is a card with an Open button. The forwards open before the window connected come from one `PreviewList` per
+machine; `PreviewChanged` keeps them current.
+
 ## Not decided by the ADR (left open for the next steps)
 - How the per-forward token is minted and presented to the preview origin (an HTTP surface, not a protocol message here).
 - The exact subdomain or separate-port scheme and its configuration.

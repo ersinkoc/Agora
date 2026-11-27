@@ -28,6 +28,7 @@ import { TerminalSettings } from '../terminal/TerminalSettings';
 import { ThemeEditor } from '../themes/ThemeEditor';
 import { Menu, type MenuItem } from './Menu';
 import { Note } from './Note';
+import { PreviewPane } from '../components/PreviewPane';
 import { BUILTIN_PANELS, PANEL_INFO, TOOL_PANELS, type BuiltinPanel, type PanelActions, type PanelContext, type PanelDef, type PanelRender, type PanelState, type ToolPanel, panelRegistry } from './panels';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -154,6 +155,7 @@ const RENDERS: Record<Exclude<BuiltinPanel, 'empty'>, PanelRender> = {
   tasks: details('board'),
   messages: details('messages'),
   usage: details('usage'),
+  preview: ({ state, actions }) => <PreviewPane state={state.previews} actions={actions.previews} machines={state.machines} fleet={state.fleet} />,
   theme: () => <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div>,
   terminal: tool('terminal'),
   changes: tool('changes'),

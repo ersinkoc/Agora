@@ -261,6 +261,25 @@
   .fleet-groups { @apply grid gap-5; }
   .fleet-tools { @apply flex flex-wrap items-center justify-between gap-x-4 gap-y-1; }
   .fleet-tools__pick select { @apply py-1; font-size: var(--text-caption); }
+  /* ADR-0088: the Preview pane: a bar (which preview, its address, reload, new tab, size, until, close), the frame on its own origin. */
+  .preview-pane { @apply flex min-h-0 flex-1 flex-col; }
+  .preview-pane--empty { @apply grid content-start gap-3 overflow-y-auto p-4; }
+  .preview-bar { @apply flex flex-wrap items-center gap-2 border-b border-line px-3 py-2; }
+  .preview-bar__name { @apply font-medium; font-size: var(--text-caption); }
+  .preview-bar__until { font-size: var(--text-caption); }
+  .preview-bar select { @apply py-1; font-size: var(--text-caption); }
+  .preview-address { @apply min-w-0 flex-1; flex-basis: 10rem; }
+  .preview-address input { @apply w-full py-1 font-mono; font-size: var(--text-caption); }
+  .preview-error { @apply px-3 py-1.5; font-size: var(--text-caption); }
+  .preview-stage { @apply grid min-h-0 flex-1 place-items-stretch justify-items-center overflow-auto bg-surface-0; }
+  .preview-frame { @apply h-full w-full max-w-full border-0 bg-white; }
+  .preview-more { @apply grid gap-3 border-t border-line p-3; }
+  .preview-open { @apply grid items-center gap-x-3 gap-y-2; grid-template-columns: auto minmax(0, 14rem); }
+  .preview-open__title { @apply m-0 font-semibold; grid-column: 1 / -1; font-size: var(--text-strong); }
+  .preview-open > button { grid-column: 2; justify-self: start; }
+  .preview-suggestions, .preview-others { @apply m-0 grid list-none gap-2 p-0; }
+  .preview-suggestion, .preview-other { @apply flex flex-wrap items-center justify-between gap-2 rounded-s border border-line bg-surface-1 px-3 py-2; font-size: var(--text-caption); }
+  .preview-suggestion__text { @apply min-w-0; }
   .fleet-group { @apply grid min-w-0 gap-2.5; content-visibility: auto; contain-intrinsic-size: auto 10rem; }
   .fleet-group__head { @apply flex flex-wrap items-center gap-x-2 gap-y-0.5; }
   .fleet-group__name { @apply m-0 min-w-0 break-words font-semibold normal-case tracking-normal text-ink; font-size: var(--text-title); }
