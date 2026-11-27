@@ -57,7 +57,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
   cannot widen it); secrets stay on the node (ADR-0084). Built: the hub's store, the node's verification and launch-time injection for
   Claude Code, Settings → Shared with agents for MCP servers, secrets through the node's launcher (Amendment A) and each agent's
-  started-with list in its pane, and skills for Claude Code (a plugin folder per agent); left: skills in the window's form and
+  started-with list in its pane, and skills for Claude Code (a plugin folder per agent, shared from the window's form); left: skills
   for other kinds, and the restart and URL bridge behavior in
   [ADR-0133](../adr/0133-shared-mcp-servers-can-restart-within-an-agent-run.md) (Accepted).
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub

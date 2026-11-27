@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setLanguage } from '../i18n';
 import type { ShareItemDef, ShareScopeDef, SharedItem, SharedSource } from '../net/share';
-import { draftItem, SharedSettings } from './SharedSettings';
+import { draftItem, SharedSettings, skillFile, skillInstructions } from './SharedSettings';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -64,7 +64,7 @@ describe('Settings → Shared', () => {
     const f = fake([]);
     await render(f.source);
     expect(host.textContent).toContain('Nothing is shared yet');
-    await click(button('Add a server'));
+    await click(button('Add'));
     await type('Name', 'pg-schema');
     await type('Program', 'uvx');
     await type('Arguments', 'pg-schema-mcp\n--read-only\n');
@@ -85,7 +85,7 @@ describe('Settings → Shared', () => {
 
   it('warns before an address is shared, and about a secret it names', async () => {
     await render(fake([]).source);
-    await click(button('Add a server'));
+    await click(button('Add'));
     await click(button('An address'));
     expect(host.textContent).toContain('Agents may send your code there');
     expect(host.textContent).not.toContain('Each machine decides about the secret');
@@ -96,7 +96,7 @@ describe('Settings → Shared', () => {
   it('never sends a form the rules refuse, and says what to fix', async () => {
     const f = fake([]);
     await render(f.source);
-    await click(button('Add a server'));
+    await click(button('Add'));
     await type('Name', 'Bad Name');
     await click(button('Sign and share'));
     expect(host.querySelector('[role="alert"]')?.textContent).toContain('lowercase letters');
@@ -117,14 +117,14 @@ describe('Settings → Shared', () => {
 
   it('without a device key shows the list and offers no change', async () => {
     await render(fake([docs]).source, false);
-    expect(button('Add a server')).toBeUndefined();
+    expect(button('Add')).toBeUndefined();
     expect(button('Change')).toBeUndefined();
     expect(host.textContent).toContain('docs-search');
   });
 });
 
 describe('draftItem', () => {
-  const base = { name: 'x', runs: 'program' as const, command: 'npx', args: '', env: '', url: '', headers: '', projectId: '' };
+  const base = { name: 'x', runs: 'program' as const, command: 'npx', args: '', env: '', url: '', headers: '', projectId: '', description: '', instructions: '', otherFiles: [] };
   it('keeps a secret off the command line and an address to https', () => {
     expect(draftItem({ ...base, args: '--token={secret:t}' })).toBe('shared-check-args-secret');
     expect(draftItem({ ...base, command: 'rm\u202e -rf' })).toBe('shared-check-hidden');
@@ -142,4 +142,25 @@ describe('draftItem', () => {
       name: 'x', kind: 'mcp_server', mcp: { command: '', args: [], env: [], url: 'https://ok.example/mcp', headers: [] },
     });
   });
+
+  // ADR-0122 step 5: a skill is its description and instructions, written as a SKILL.md in the open skill format; the files beside it
+  // stay as they were, and what would not show, or is too long, is refused before anything is signed.
+  it('makes a skill from its description and instructions, and refuses what the rules refuse', () => {
+    const skill = { ...base, name: 'review', runs: 'skill' as const, description: 'when reviewing', instructions: 'cite the file\r\n\tthen the line' };
+    const made = draftItem(skill);
+    expect(made).toEqual({ name: 'review', kind: 'skill', skill: { description: 'when reviewing', files: [{ path: 'SKILL.md', content: skillFile('review', 'when reviewing', 'cite the file\n\tthen the line') }] } });
+    expect(skillFile('review', 'a "b": c', 'do')).toBe('---\nname: review\ndescription: "a \\"b\\": c"\n---\n\ndo');
+    expect(skillInstructions(skillFile('review', 'x', 'line one\n---\nline two'))).toBe('line one\n---\nline two');
+    expect(skillInstructions('no header')).toBe('no header');
+    const kept = draftItem({ ...skill, otherFiles: [{ path: 'refs/a.md', content: 'a' }, { path: 'skill.md', content: 'old' }] });
+    expect(typeof kept !== 'string' && kept.skill?.files.map((f) => f.path)).toEqual(['SKILL.md', 'refs/a.md']);
+    expect(draftItem({ ...skill, description: ' ' })).toBe('shared-check-description');
+    expect(draftItem({ ...skill, description: 'x'.repeat(513) })).toBe('shared-check-description');
+    expect(draftItem({ ...skill, description: 'a\nb' })).toBe('shared-check-description');
+    expect(draftItem({ ...skill, instructions: '  \n' })).toBe('shared-check-instructions');
+    expect(draftItem({ ...skill, instructions: 'do\u202e this' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...skill, instructions: 'do\u001b[2J' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...skill, instructions: 'x'.repeat(1024 * 1024) })).toBe('shared-check-size');
+  });
 });
+

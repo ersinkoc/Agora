@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { t } from '../i18n';
 import { hasHidden } from '../net/hidden';
-import { namesSecret, parseValues, publishErrorKey, refusalWords, validShareName, type ShareItemDef, type SharedItem, type SharedSource } from '../net/share';
+import { namesSecret, parseValues, publishErrorKey, refusalWords, validShareName, type ShareItemDef, type SharedItem, type SharedSource, type SkillFileDef } from '../net/share';
 import { Icon } from './Icon';
 import { Button, Callout, ConfirmDialog, Pill, SegmentedControl } from './kit';
 import { SettingsBlock, SettingsCard } from './SettingsCard';
@@ -9,13 +9,42 @@ import { SettingsBlock, SettingsCard } from './SettingsCard';
 /** A project a shared server can be limited to: its id (the same on every machine that has it) and how the window names it. */
 export interface SharedProject { projectId: string; label: string }
 
-type Runs = 'program' | 'address';
-interface Draft { name: string; runs: Runs; command: string; args: string; env: string; url: string; headers: string; projectId: string }
-const EMPTY: Draft = { name: '', runs: 'program', command: '', args: '', env: '', url: '', headers: '', projectId: '' };
+type Runs = 'program' | 'address' | 'skill';
+interface Draft {
+  name: string; runs: Runs; command: string; args: string; env: string; url: string; headers: string; projectId: string;
+  // A skill: when an agent should use it, its instructions (the body of its SKILL.md), and the files beside it kept as they were.
+  description: string; instructions: string; otherFiles: SkillFileDef[];
+}
+const EMPTY: Draft = { name: '', runs: 'program', command: '', args: '', env: '', url: '', headers: '', projectId: '', description: '', instructions: '', otherFiles: [] };
+const MAX_DESCRIPTION = 512;
+const MAX_SKILL_BYTES = 1024 * 1024;
+const bytes = (s: string) => new TextEncoder().encode(s).length;
+
+/** A skill's SKILL.md: the open skill format's header (its name and when to use it, the description quoted) and the instructions. */
+export function skillFile(name: string, description: string, instructions: string): string {
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n${instructions}`;
+}
+
+/** The instructions of a SKILL.md, without the header [skillFile] writes (any other text is kept whole). */
+export function skillInstructions(file: string): string {
+  const m = /^---\n(?:[^\n]*\n)*?---\n\n?/.exec(file);
+  return m ? file.slice(m[0].length) : file;
+}
 
 /** The item a draft describes, or the locale key of what is wrong with it. */
 export function draftItem(d: Draft): ShareItemDef | string {
   if (!validShareName(d.name)) return 'shared-check-name';
+  if (d.runs === 'skill') {
+    const description = d.description.trim();
+    const instructions = d.instructions.replace(/\r\n?/g, '\n');
+    if (!description || bytes(description) > MAX_DESCRIPTION || /[\u0000-\u001f\u007f-\u009f]/.test(description)) return 'shared-check-description';
+    if (!instructions.trim()) return 'shared-check-instructions';
+    // A file's text may hold line breaks and tabs, nothing else that does not show (the hub and every machine refuse it too).
+    if (hasHidden(description) || hasHidden(instructions) || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(instructions)) return 'shared-check-hidden';
+    const files = [{ path: 'SKILL.md', content: skillFile(d.name, description, instructions) }, ...d.otherFiles.filter((f) => f.path.toLowerCase() !== 'skill.md')];
+    if (files.reduce((n, f) => n + bytes(f.content), 0) > MAX_SKILL_BYTES) return 'shared-check-size';
+    return { name: d.name, kind: 'skill', skill: { description, files } };
+  }
   // What is signed is what the person sees: an invisible or direction-changing character (pasted from somewhere) is refused here, as
   // the hub and every machine refuse it (`agora_protocol::share::check_item_shown`).
   const shown = d.runs === 'program' ? [d.command, d.args, d.env] : [d.url, d.headers];
@@ -39,12 +68,13 @@ export function draftItem(d: Draft): ShareItemDef | string {
 // A one-line value (a program, an argument, a name or value, an address) never holds a tab or a line break: one in a header value would
 // add a header, and a tab reads differently from how it runs. The hub and every machine refuse them too.
 const oneLineBroken = (v: string) => /[\t\n\r]/.test(v);
-const usesSecret = (d: Draft) => (d.runs === 'program' ? namesSecret(d.env) : namesSecret(d.headers));
+const usesSecret = (d: Draft) => (d.runs === 'program' ? namesSecret(d.env) : d.runs === 'address' ? namesSecret(d.headers) : false);
 
-// Settings → Shared (ADR-0122): the MCP servers the owner gives every agent at its start, on every machine that trusts the device that
-// published them. Each publish and each removal is signed here, with this device's key; a machine checks the signature and its own
-// policy, and what a machine refused is shown on the item in words. A server whose environment or headers name a secret is not given
-// to agents yet (the machine's launcher that fills secrets is not built), and the form says so before it is published.
+// Settings → Shared (ADR-0122): the MCP servers and skills the owner gives every agent at its start, on every machine that trusts the
+// device that published them. Each publish and each removal is signed here, with this device's key; a machine checks the signature and
+// its own policy, and what a machine refused is shown on the item in words. A server whose environment names a secret gets it through
+// the machine's launcher, where that machine's policy lets it go (Amendment A); one at an address whose headers name a secret is not
+// given yet, and the form says so before it is published. A skill reaches the kinds that say how they load one (Claude Code).
 export function SharedSettings({ source, machineName, projects, canSign }: {
   source: SharedSource; machineName: (id: string) => string; projects: readonly SharedProject[];
   // Whether this browser has a device key to sign with; without one the list is shown and nothing can be published.
@@ -87,7 +117,15 @@ export function SharedSettings({ source, machineName, projects, canSign }: {
   const edit = (x: SharedItem) => {
     const m = x.mcp;
     setError(undefined);
+    if (x.kind === 'skill') {
+      const files = x.skill?.files ?? [];
+      const main = files.find((f) => f.path.toLowerCase() === 'skill.md');
+      setDraft({ ...EMPTY, name: x.name, runs: 'skill', projectId: x.scope.projectId, description: x.skill?.description ?? '',
+        instructions: main ? skillInstructions(main.content) : '', otherFiles: files.filter((f) => f !== main) });
+      return;
+    }
     setDraft({
+      ...EMPTY,
       name: x.name, runs: m?.url ? 'address' : 'program', command: m?.command ?? '', args: (m?.args ?? []).join('\n'),
       env: (m?.env ?? []).map((v) => `${v.name}=${v.value}`).join('\n'), url: m?.url ?? '',
       headers: (m?.headers ?? []).map((v) => `${v.name}: ${v.value}`).join('\n'), projectId: x.scope.projectId,
@@ -107,11 +145,12 @@ export function SharedSettings({ source, machineName, projects, canSign }: {
           <ul className="set-list" aria-label={t('settings-shared')}>
             {list.map((x) => (
               <li key={x.name} className="set-item">
-                <span className="set-os" aria-hidden><Icon name={x.mcp?.url ? 'globe' : 'terminal'} className="size-4" /></span>
+                <span className="set-os" aria-hidden><Icon name={x.kind === 'skill' ? 'think' : x.mcp?.url ? 'globe' : 'terminal'} className="size-4" /></span>
                 <span className="set-item__main">
                   <span className="set-item__name"><bdi>{x.name}</bdi></span>
                   <span className="set-item__meta">
-                    <span className="font-mono">{x.mcp ? (x.mcp.url || [x.mcp.command, ...x.mcp.args].join(' ')) : t('shared-kind-skill')}</span>
+                    {x.mcp ? <span className="font-mono">{x.mcp.url || [x.mcp.command, ...x.mcp.args].join(' ')}</span>
+                      : <span>{t('shared-kind-skill')}{x.skill?.description ? ` · ${x.skill.description}` : ''}</span>}
                     <span>{projectLabel(x.scope.projectId)}</span>
                   </span>
                 </span>
@@ -139,9 +178,19 @@ export function SharedSettings({ source, machineName, projects, canSign }: {
           <div className="set-form__row">
             <span className="set-form__label" id={field('runs')}>{t('shared-runs')}</span>
             <SegmentedControl labelledBy={field('runs')} value={draft.runs} onChange={(runs) => set({ runs })}
-              items={[{ value: 'program', label: t('shared-runs-program') }, { value: 'address', label: t('shared-runs-address') }]} />
+              items={[{ value: 'program', label: t('shared-runs-program') }, { value: 'address', label: t('shared-runs-address') }, { value: 'skill', label: t('shared-runs-skill') }]} />
           </div>
-          {draft.runs === 'program' ? <>
+          {draft.runs === 'skill' ? <>
+            <div className="set-form__row">
+              <label htmlFor={field('description')} className="set-form__label">{t('shared-description')}</label>
+              <input id={field('description')} value={draft.description} onChange={(e) => set({ description: e.target.value })} placeholder={t('shared-description-hint')} autoComplete="off" maxLength={MAX_DESCRIPTION} />
+            </div>
+            <div className="set-form__row">
+              <label htmlFor={field('instructions')} className="set-form__label">{t('shared-instructions')}</label>
+              <textarea id={field('instructions')} rows={8} value={draft.instructions} onChange={(e) => set({ instructions: e.target.value })} placeholder={t('shared-instructions-hint')} spellCheck={false} />
+            </div>
+            {draft.otherFiles.length > 0 && <p className="set-item__note">{t('shared-skill-files-kept', { count: draft.otherFiles.length })}</p>}
+          </> : draft.runs === 'program' ? <>
             <div className="set-form__row">
               <label htmlFor={field('command')} className="set-form__label">{t('shared-command')}</label>
               <input id={field('command')} className="font-mono" value={draft.command} onChange={(e) => set({ command: e.target.value })} placeholder="npx" autoComplete="off" spellCheck={false} />
@@ -171,8 +220,9 @@ export function SharedSettings({ source, machineName, projects, canSign }: {
               {projects.map((p) => <option key={p.projectId} value={p.projectId}>{p.label}</option>)}
             </select>
           </div>
-          {(draft.runs === 'address' || usesSecret(draft)) && (
+          {(draft.runs === 'address' || draft.runs === 'skill' || usesSecret(draft)) && (
             <SettingsBlock>
+              {draft.runs === 'skill' && <Callout icon="think" title={t('shared-skill-title')}>{t('shared-skill-note')}</Callout>}
               {draft.runs === 'address' && <Callout tone="danger" icon="warn" title={t('shared-url-warning-title')}>{t('shared-url-warning')}</Callout>}
               {usesSecret(draft) && <Callout icon="key" title={t('shared-secret-title')}>{t('shared-secret')}</Callout>}
             </SettingsBlock>

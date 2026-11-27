@@ -2061,15 +2061,15 @@ password-state-unset = Ayarlı değil
 settings-machines-desc = Agora'nıza bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
 settings-machines-online = { $online } / { $total } çevrimiçi
 settings-shared = Ajanlarla paylaşılanlar
-shared-desc = Ajanlarınızın başlarken aldığı MCP sunucuları; bu cihaza güvenen her makinede. Bu cihaz imzalar.
-shared-add = Sunucu ekle
+shared-desc = Ajanlarınızın başlarken aldığı MCP sunucuları ve beceriler; bu cihaza güvenen her makinede. Bu cihaz imzalar.
+shared-add = Ekle
 shared-count = { $count ->
     [one] { $count } sunucu
    *[other] { $count } sunucu
 }
 shared-loading = Paylaşılanlar yükleniyor…
 shared-load-failed = Hub yanıt vermedi. Bağlantı geri gelince yeniden deneyin.
-shared-empty = Henüz bir şey paylaşılmadı. Buraya eklediğiniz sunucu ajanlara bir sonraki başlangıçlarında verilir.
+shared-empty = Henüz bir şey paylaşılmadı. Buraya eklediğiniz sunucu ya da beceri ajanlara bir sonraki başlangıçlarında verilir.
 shared-empty-no-device = Henüz bir şey paylaşılmadı. Paylaşmak için cihaz anahtarı olan bir tarayıcı gerekir; Ayarlar'ı kendi tarayıcınızda açın.
 shared-kind-skill = Beceri
 shared-scope-all = Her proje
@@ -2096,11 +2096,12 @@ shared-remove-title = { $name } paylaşımı durdurulsun mu?
 shared-remove-body = Bundan sonra başlayan ajanlar onu almaz. Çalışan ajanlar durana kadar onu korur.
 shared-remove-keep = Kalsın
 shared-remove-confirm = Paylaşımı durdur
-shared-form = Bir MCP sunucusu paylaş
+shared-form = Ajanlarla paylaş
 shared-name = Ad
-shared-runs = Çalışma biçimi
+shared-runs = Ne olduğu
 shared-runs-program = Bir program
 shared-runs-address = Bir adres
+shared-runs-skill = Bir beceri
 shared-command = Program
 shared-args = Argümanlar
 shared-args-hint = Her satıra bir tane
@@ -2122,6 +2123,19 @@ shared-check-args-secret = Gizli değer argüman olamaz: makinedeki herkes bir p
 shared-check-url = Adres https:// ile başlar ve boşluk içermez.
 shared-check-headers = Her başlık satırını Ad: değer olarak yazın, her ad bir kez.
 shared-check-hidden = Ekranda görünmeyen ya da metni ters çeviren bir karakter içeriyor. Yapıştırmak yerine yeniden yazın.
+shared-description = Ne zaman kullanılır
+shared-description-hint = Örneğin: bu ekibin kodunda bir değişikliği incelerken
+shared-instructions = Talimatlar
+shared-instructions-hint = Bir ajan bu beceriyi kullanırken ne yapmalı
+shared-skill-files-kept = { $count ->
+    [one] Bu becerinin 1 dosyası daha olduğu gibi kalır.
+   *[other] Bu becerinin { $count } dosyası daha olduğu gibi kalır.
+}
+shared-skill-title = Claude Code ajanları becerileri yükler
+shared-skill-note = Başka türden bir ajan henüz paylaşılan becerileri almıyor. Bir beceri, onu yükleyen her ajanı yönlendirir: yalnızca her birine söyleyeceğiniz şeyi paylaşın.
+shared-check-description = Bir ajanın onu ne zaman kullanacağını tek satırda, en fazla 512 baytla yazın.
+shared-check-instructions = Bir ajanın bu beceriyi kullanırken ne yapacağını yazın.
+shared-check-size = Bir beceri toplamda en fazla 1 MiB metin tutar.
 shared-error-device = Hub bu cihazın imzasını kabul etmedi. Bu tarayıcının cihazlarınızdan biri olduğunu kontrol edin (yukarıda, Bu cihaz).
 shared-error-older = Bu ada daha yeni bir değişiklik bu arada paylaşıldı. Sayfayı yenileyip yeniden deneyin.
 shared-error-limit = En fazla 64 öge paylaşılabilir. Önce birini kaldırın.

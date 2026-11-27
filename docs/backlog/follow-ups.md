@@ -57,6 +57,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Windows (**win**)
 
+- **Shared skill file names Windows reserves** (ADR-0122 step 5): `valid_skill_path` allows a part like `nul` or `con.md`; on a Windows
+  node writing it fails and the agent's start fails with it. Decide whether the shared rules refuse such parts (hub, node and window
+  together) or the node leaves the skill out and says so.
 - **Node.js agents cannot spawn when confined** (was #895; ADR-0105). Cause in libuv's `src/win/pipe.c` (the server end of the stdio pipe
   is created with NULL security attributes). Filed upstream as libuv/libuv#5464 with a fix proposed in libuv/libuv#5467. Done when a
   Node.js release carrying the fix is verified confined on Windows (ADR-0105 decision 4); until then the docs say Node-based agents do not

@@ -161,11 +161,15 @@ export function demoSharedSource(): import('./net/share').SharedSource {
     { name: 'pg-schema', kind: 'mcp_server', hash: 'c3', issuedMs: demoSettingsNow - 7_200_000, signer: 'web-10a3e055eea9e45f',
       scope: { projectId: 'login-fix', kinds: [] }, mcp: { command: 'uvx', args: ['pg-schema-mcp'], env: [], url: '', headers: [] },
       refused: [{ node: 'win', code: 'share.refused', reason: 'command_not_allowed' }] },
+    { name: 'review-rules', kind: 'skill', hash: 'd4', issuedMs: demoSettingsNow - 1_800_000, signer: 'web-10a3e055eea9e45f',
+      scope: { projectId: '', kinds: [] }, skill: { description: 'When reviewing a change in this team\'s code', files: [
+        { path: 'SKILL.md', content: '---\nname: review-rules\ndescription: "When reviewing a change in this team\'s code"\n---\n\nCite the file and line for every finding.\nSay what breaks, then how to fix it.' },
+        { path: 'refs/style.md', content: 'Short sentences.' }] }, refused: [] },
   ];
   return {
     list: async () => items,
     publish: async (item, scope) => {
-      items = [...items.filter((x) => x.name !== item.name), { name: item.name, kind: item.kind, hash: 'demo', issuedMs: Date.now(), signer: 'demo', scope, mcp: item.mcp, refused: [] }]
+      items = [...items.filter((x) => x.name !== item.name), { name: item.name, kind: item.kind, hash: 'demo', issuedMs: Date.now(), signer: 'demo', scope, mcp: item.mcp, skill: item.skill, refused: [] }]
         .sort((a, b) => a.name.localeCompare(b.name));
       return { ok: true };
     },

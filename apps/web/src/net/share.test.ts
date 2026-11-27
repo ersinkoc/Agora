@@ -62,6 +62,15 @@ describe('the shared items source', () => {
     expect(sharedItemsOf(undefined)).toEqual([]);
   });
 
+  it('reads a skill with its description and files, bytes or base64 alike', () => {
+    const [skill] = sharedItemsOf({ items: [{ name: 'review', kind: 2, signed: { item: { skill: { description: 'when reviewing', files: [
+      { path: 'SKILL.md', content: new TextEncoder().encode('cite the file') }, { path: 'refs/a.md', content: btoa('short') }, { path: 'bad', content: new Uint8Array([0xff]) },
+    ] } } } }] });
+    expect(skill).toMatchObject({ kind: 'skill', mcp: undefined, skill: { description: 'when reviewing', files: [
+      { path: 'SKILL.md', content: 'cite the file' }, { path: 'refs/a.md', content: 'short' }, { path: 'bad', content: '' },
+    ] } });
+  });
+
   it('signs a publish after the word it replaces, and a removal under the item\'s scope', async () => {
     const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
     type Sent = { shareItemPublish: { signed: Record<string, unknown> }; shareItemRemove: { signed: Record<string, unknown> } };

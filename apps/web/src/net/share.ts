@@ -80,6 +80,7 @@ export interface SharedRefusal { node: string; code: string; reason: string }
 /** One item as the hub lists it for the owner, with its content (an MCP server's program or address). */
 export interface SharedItem {
   name: string; kind: ShareKind; hash: string; scope: ShareScopeDef; issuedMs: number; signer: string; mcp?: McpServer; refused: SharedRefusal[];
+  skill?: { description: string; files: SkillFileDef[] };
 }
 /** Where Settings → Shared reads and writes: the hub, through this window's connection, signing with this device. A failure is the
  *  stable code the hub answered (`share.refused`, `approval.signature_invalid`, ...), with its `reason` when it has one. */
@@ -95,6 +96,13 @@ const num = (v: unknown) => (typeof v === 'number' ? v : Number(v ?? 0) || 0);
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 const obj = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
 const values = (v: unknown): ShareValue[] => (Array.isArray(v) ? v.map((x) => ({ name: str(obj(x).name), value: str(obj(x).value) })) : []);
+// A skill file's bytes as the connection decoded them (bytes, or base64 in JSON), as text; bytes that are not UTF-8 read as nothing.
+const textOf = (v: unknown): string => {
+  try {
+    const bytes = v instanceof Uint8Array ? v : typeof v === 'string' ? Uint8Array.from(atob(v), (c) => c.charCodeAt(0)) : Array.isArray(v) ? Uint8Array.from(v as number[]) : new Uint8Array();
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch { return ''; }
+};
 const kindOf = (v: unknown): ShareKind | undefined => (v === 1 || v === 'SHARE_ITEM_KIND_MCP_SERVER' ? 'mcp_server' : v === 2 || v === 'SHARE_ITEM_KIND_SKILL' ? 'skill' : undefined);
 
 /** The items of a `ShareItemListResult` (content asked for), by name; one the window cannot read is left out. */
@@ -108,11 +116,15 @@ export function sharedItemsOf(result: unknown): SharedItem[] {
     if (!kind || typeof i.name !== 'string') continue;
     const scope = obj(i.scope);
     const m = obj(obj(obj(i.signed).item).mcp);
+    const sk = obj(obj(obj(i.signed).item).skill);
     out.push({
       name: i.name, kind, hash: str(i.itemHash), issuedMs: num(i.issuedMs), signer: str(i.signerDeviceId),
       scope: { projectId: str(scope.projectId), kinds: Array.isArray(scope.kinds) ? scope.kinds.filter((k): k is string => typeof k === 'string') : [] },
       mcp: kind === 'mcp_server' && (m.command || m.url)
         ? { command: str(m.command), args: Array.isArray(m.args) ? m.args.map(str) : [], env: values(m.env), url: str(m.url), headers: values(m.headers) }
+        : undefined,
+      skill: kind === 'skill' && Array.isArray(sk.files)
+        ? { description: str(sk.description), files: sk.files.map((f) => ({ path: str(obj(f).path), content: textOf(obj(f).content) })) }
         : undefined,
       refused: Array.isArray(i.refused) ? i.refused.map((x) => { const r = obj(x); return { node: str(r.nodeId), code: str(r.code), reason: str(r.reason) }; }) : [],
     });

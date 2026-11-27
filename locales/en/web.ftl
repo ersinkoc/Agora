@@ -2167,15 +2167,15 @@ password-state-unset = Not set
 settings-machines-desc = Every machine connected to your Agora, and whether it trusts this browser.
 settings-machines-online = { $online } of { $total } online
 settings-shared = Shared with agents
-shared-desc = MCP servers your agents get when they start, on every machine that trusts this device. Signed by this device.
-shared-add = Add a server
+shared-desc = MCP servers and skills your agents get when they start, on every machine that trusts this device. Signed by this device.
+shared-add = Add
 shared-count = { $count ->
     [one] { $count } server
    *[other] { $count } servers
 }
 shared-loading = Loading what is shared…
 shared-load-failed = The hub did not answer. Try again once the connection is back.
-shared-empty = Nothing is shared yet. A server you add here is given to agents at their next start.
+shared-empty = Nothing is shared yet. A server or skill you add here is given to agents at their next start.
 shared-empty-no-device = Nothing is shared yet. Sharing needs a browser with a device key; open Settings in your own browser.
 shared-kind-skill = Skill
 shared-scope-all = Every project
@@ -2202,11 +2202,12 @@ shared-remove-title = Stop sharing { $name }?
 shared-remove-body = Agents that start from now on do not get it. Agents already running keep it until they stop.
 shared-remove-keep = Keep it
 shared-remove-confirm = Stop sharing
-shared-form = Share an MCP server
+shared-form = Share with agents
 shared-name = Name
-shared-runs = Runs as
+shared-runs = What it is
 shared-runs-program = A program
 shared-runs-address = An address
+shared-runs-skill = A skill
 shared-command = Program
 shared-args = Arguments
 shared-args-hint = One per line
@@ -2228,6 +2229,19 @@ shared-check-args-secret = A secret cannot be an argument: anyone on the machine
 shared-check-url = An address starts with https:// and has no spaces.
 shared-check-headers = Write each header line as Name: value, each name once.
 shared-check-hidden = It holds a character that does not show on screen or turns the text around. Type it again rather than pasting it.
+shared-description = When to use it
+shared-description-hint = For example: when reviewing a change in this team's code
+shared-instructions = Instructions
+shared-instructions-hint = What an agent should do when it uses this skill
+shared-skill-files-kept = { $count ->
+    [one] 1 more file of this skill is kept as it is.
+   *[other] { $count } more files of this skill are kept as they are.
+}
+shared-skill-title = Claude Code agents load skills
+shared-skill-note = An agent of another kind does not take shared skills yet. A skill steers every agent that loads it: share only what you would tell each of them.
+shared-check-description = Say in one line, up to 512 bytes, when an agent should use it.
+shared-check-instructions = Write what an agent should do when it uses this skill.
+shared-check-size = A skill holds up to 1 MiB of text in all.
 shared-error-device = The hub did not accept this device's signature. Check that this browser is one of your devices (This device, above).
 shared-error-older = A newer change to this name was shared meanwhile. Reload the page and try again.
 shared-error-limit = Up to 64 items can be shared. Remove one first.
