@@ -60,8 +60,8 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   Recovery (the maintainer, 2026-11-27): a whole-machine power loss (hub, node, supervisors, holder and agents killed at once) brings
   everything back by itself with `resume = "auto"`, a terminal and a structured agent each in its own session: proven by
   `crates/agora/tests/front_door.rs` `a_power_loss_takes_hub_node_and_agents_at_once_and_all_come_back_by_themselves` (it fails with
-  `resume = "ask"`). Left: one systemd scope per held agent so memory pressure never ends the node with them (follow-ups), the Windows
-  holder (M2.6)
+  `resume = "ask"`). Each terminal agent now runs in a systemd scope of its own on Linux (`agora_platform::in_own_scope`), so memory pressure ends
+  that agent, never the node, the holder and the others. Left: the Windows holder (M2.6, asked of the Windows session)
 - [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (ADR-0123 Accepted 2026-11-27, schema with it); plan limits
   for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
   sizes and free disk in the window (M3.7's schema part)

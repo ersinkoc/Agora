@@ -189,6 +189,62 @@ pub fn local_listen(path: &std::path::Path) -> io::Result<LocalListener> {
     }
 }
 
+/// `argv` run in a memory scope of its own where the system offers one (Linux with a systemd user manager: `systemd-run --user --scope
+/// --collect --quiet --unit=<name>`, which runs the program in place, so its process id, terminal and descriptors are its own). Memory
+/// pressure then ends that one agent, never the node and the other agents with it (blackview, 2026-11-26: systemd-oomd ended the node's
+/// whole unit, node, holder and every agent, at 21.7 GB). `name` is a unit name, made unique by the caller. Unchanged where there is no
+/// such scope (macOS, Windows, a Linux without a user manager); whether there is one is checked off the start path (see
+/// [`prepare_own_scopes`]), and until the check answers agents start unchanged.
+pub fn in_own_scope(argv: Vec<String>, name: &str) -> Vec<String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::in_own_scope(argv, name)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        argv
+    }
+}
+
+/// Starts checking, off the caller's thread, whether [`in_own_scope`] can give agents scopes of their own here, so the first agent a
+/// node starts already gets one. Nothing where there are no such scopes.
+pub fn prepare_own_scopes() {
+    #[cfg(target_os = "linux")]
+    linux::prepare_own_scopes();
+}
+
+/// Whether an agent started now gets a scope of its own ([`in_own_scope`]); `false` while that is being checked.
+pub fn own_scopes() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::own_scopes()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// An agent started in its own scope ended at once, which may mean the scopes stopped working (the user manager went away): checks
+/// again, off the caller's thread, and starts agents as before until the check says yes. `true` when this call started a check.
+pub fn recheck_own_scopes() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux::recheck_own_scopes()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Whether a process named `name` is still [`in_own_scope`]'s helper, which becomes the agent's own program a moment later (it runs it in
+/// place): a process identity read in that moment is not the agent's yet, and is read again (`systemd-run` on Linux; never elsewhere).
+pub fn is_scope_helper(name: &str) -> bool {
+    cfg!(target_os = "linux") && name == "systemd-run"
+}
+
 /// A fresh identity for one agent that is about to be confined (ADR-0050 Amendment B on Windows: a random SID, used both for its
 /// process and its mesh endpoint), or `None` where agents are not confined that way or confinement is off. Make it before the
 /// agent's endpoint, and pass it to [`local_listen_agent`] and [`PtyConfig::identity`].

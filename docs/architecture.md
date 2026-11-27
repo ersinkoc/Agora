@@ -237,6 +237,13 @@ offered to Resume (resumed at once with `--resume auto`). Not built: a logind de
 the node write before anything else is signalled (comparable agent workspaces do both); under the systemd service the node is stopped before its agents
 are (`KillMode=process`).
 
+On Linux with a user systemd manager, each terminal agent the node does not confine runs in a scope of its own
+(`systemd-run --user --scope`, executed in place, so its process id and start time are its own): when memory runs out, the system ends
+that agent, not the node with all its agents. Such an agent is therefore no longer in the node service's control group. Stopping the
+service (`systemctl --user stop`) does not reach it, and accounting by the service's group does not count it. The node checks once,
+off the start path and with a 2 s limit, whether scopes work; until the check answers, agents start as before. When a scoped start
+fails within 2 s, the node checks again, and the restart runs outside a scope unless the check says yes (`agora_platform::in_own_scope`).
+
 ## 10. Cross-cutting concerns
 
 | Topic | Document |

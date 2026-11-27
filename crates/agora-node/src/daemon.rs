@@ -4005,7 +4005,15 @@ fn record_new_processes(
 ) {
     for (agent, pid) in pids {
         if recorded.get(agent) != Some(pid) {
-            if let Ok(identity) = identity(*pid) {
+            // Still the scope's helper (it becomes the agent's program in place a moment later): read again on the next tick, never
+            // recorded under the helper's name, which would make the agent look gone after a node restart.
+            if let Ok(identity) = identity(*pid).map_err(|_| ()).and_then(|i| {
+                if agora_platform::is_scope_helper(&i.name) {
+                    Err(())
+                } else {
+                    Ok(i)
+                }
+            }) {
                 let since = starts.get(agent).copied().unwrap_or(0);
                 if ledger.set_process(agent.as_str(), Some(identity), since, now_ms) {
                     recorded.insert(agent.clone(), *pid);
@@ -4788,6 +4796,45 @@ mod process_record_tests {
             boot: String::new(),
             name: "fake".into(),
         })
+    }
+
+    /// An agent in a scope of its own is, for a moment, still the scope's helper (`systemd-run`, which then runs the agent's program in
+    /// place). Its identity is not recorded under the helper's name (the agent would look gone after a node restart): the next tick
+    /// records the program's.
+    #[test]
+    fn the_scope_helper_is_never_recorded_as_the_agents_process() {
+        if !agora_platform::is_scope_helper("systemd-run") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-procrec-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ledger = crate::ledger::Ledger::open(&dir, 1).unwrap();
+        ledger.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-1".into(),
+                kind: "fake".into(),
+                ..Default::default()
+            }),
+            1,
+        );
+        let agent = AgentId::new("agent-1");
+        let pids = vec![(agent.clone(), 4242)];
+        let mut recorded = HashMap::new();
+        let helper = |pid| {
+            identity(pid).map(|mut i| {
+                i.name = "systemd-run".into();
+                i
+            })
+        };
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), helper, 2);
+        assert!(recorded.is_empty() && ledger.get("agent-1").unwrap().process().is_none());
+        record_new_processes(&ledger, &mut recorded, &pids, &HashMap::new(), identity, 3);
+        assert_eq!(
+            ledger.get("agent-1").unwrap().process().unwrap().name,
+            "fake"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The supervisor starts a process before the node records `AgentStarted` (which makes the ledger entry). A tick in between must

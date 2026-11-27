@@ -1428,6 +1428,8 @@ pub struct Supervisor {
 
 impl Supervisor {
     pub fn new(cfg: SupervisorConfig) -> Self {
+        // Whether agents can have scopes of their own is learned off the start path, before the first start.
+        agora_platform::prepare_own_scopes();
         Self {
             shared_hook: None,
             cfg,
@@ -4112,6 +4114,21 @@ impl Supervisor {
         cfg.sandbox = program.and_then(|p| self.sandbox_for(kind, worktree, &p));
         cfg.identity = extras.identity.clone();
         cfg.env_remove = inherited_session_markers(std::env::vars_os().map(|(k, _)| k));
+        // Memory pressure ends this agent alone, never the node and the others (its own scope where the system offers one). Not for a
+        // confined agent: its confinement would keep the scope's helper from the user manager it needs.
+        if cfg.sandbox.is_none() {
+            let nanos = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            cfg.argv = agora_platform::in_own_scope(
+                std::mem::take(&mut cfg.argv),
+                &format!("agora-{}-{nanos}", id.as_str()),
+            );
+        }
+        let scoped = cfg
+            .argv
+            .first()
+            .is_some_and(|p| agora_platform::is_scope_helper(p));
         if let Some(profile) = &mut cfg.sandbox {
             profile.read.extend(extras.read.iter().cloned());
             own_socket(profile, extras.socket.as_deref());
@@ -4157,7 +4174,7 @@ impl Supervisor {
         // cannot be (no holder built, it cannot start, the link fails): exactly as before.
         if cfg.sandbox.is_none() {
             if let Some(started) = self.launch_held(id, &cfg, folder) {
-                return started;
+                return started.map(|t| t.scoped(scoped));
             }
         }
         let started = match folder {
@@ -4183,7 +4200,7 @@ impl Supervisor {
             }
         })?;
         TerminalHandle::start(pty, self.cfg.terminal)
-            .map(|t| t.with_launch_file(launch_file))
+            .map(|t| t.with_launch_file(launch_file).scoped(scoped))
             .map_err(|e| SupervisorError::Spawn(e.to_string()))
     }
 
@@ -4358,6 +4375,18 @@ impl Supervisor {
 
         let exit = term.exit_status();
         if let Some(status) = exit {
+            // A start through systemd-run that ends at once and in failure may be systemd-run failing before it ran the agent (the
+            // user manager went away since the node checked): the scopes are checked again, and the restart below runs as before
+            // until the check says yes.
+            let at_once = term.scoped_at().is_some_and(|t| {
+                Instant::now().saturating_duration_since(t) < SCOPED_FAILS_AT_ONCE
+            });
+            if at_once && !status.success() && agora_platform::recheck_own_scopes() {
+                crate::log_line!(
+                    "agent {} ended at once in its own scope; checking the user manager again",
+                    id.as_str()
+                );
+            }
             events.push(SupervisorEvent::Exited {
                 agent: id.clone(),
                 status,
@@ -6085,6 +6114,9 @@ fn log_old_holder_once(holder_pid: u32) {
 /// ADR-0093: starts `cfg` through the holder, on pipes. `None` means "not through the holder": the caller runs it itself (a confined
 /// adapter, no holder or an older one, a program or id the holder refuses, an id longer than the link carries, a variable that is not
 /// text). The environment is complete (the holder passes nothing of its own).
+/// A start in a scope of its own that fails sooner than this may have been systemd-run failing (see `tick_agent`).
+const SCOPED_FAILS_AT_ONCE: Duration = Duration::from_secs(2);
+
 fn launch_held_adapter(
     agent: &AgentId,
     cfg: &AdapterConfig,

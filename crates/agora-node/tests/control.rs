@@ -496,8 +496,12 @@ fn history_comes_before_the_snapshot_only_when_asked_and_never_with_a_resync() {
             }
         }
     };
+    // The shell may print its prompt after the line typed into it is echoed (a start through systemd-run takes a little longer), so
+    // the first output line can carry the prompt before it.
     assert!(
-        node_history.iter().any(|l| l == "hist-1"),
+        node_history
+            .iter()
+            .any(|l| l == "hist-1" || l.ends_with("$ hist-1")),
         "{node_history:?}"
     );
     assert_eq!(history_lines(&window), node_history);

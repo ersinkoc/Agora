@@ -2243,3 +2243,317 @@ mod held_output_tests {
         }
     }
 }
+
+/// Whether `systemd-run --user --scope` works for this process: not known yet, being checked, yes, or no.
+static SCOPES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(SCOPES_UNKNOWN);
+const SCOPES_UNKNOWN: u8 = 0;
+const SCOPES_CHECKING: u8 = 1;
+const SCOPES_YES: u8 = 2;
+const SCOPES_NO: u8 = 3;
+/// A user manager that has not answered by then is taken as missing (systemd-run itself waits up to 25 s for D-Bus).
+const SCOPES_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether agents start in scopes of their own now. Never waits: the first call starts the check on a thread of its own, and until it
+/// answers agents start as before (a slow or wedged user manager never holds up a start, which runs under the supervisor's lock).
+fn user_scopes() -> bool {
+    scopes_now(&SCOPES, || probe_scopes(SCOPES_PROBE_TIMEOUT))
+}
+
+fn scopes_now(state: &'static std::sync::atomic::AtomicU8, probe: fn() -> bool) -> bool {
+    use std::sync::atomic::Ordering;
+    match state.load(Ordering::Acquire) {
+        SCOPES_YES => true,
+        SCOPES_UNKNOWN => {
+            start_probe(state, SCOPES_UNKNOWN, probe);
+            false
+        }
+        _ => false,
+    }
+}
+
+/// [`crate::own_scopes`] on Linux.
+pub(crate) fn own_scopes() -> bool {
+    user_scopes()
+}
+
+/// [`crate::prepare_own_scopes`] on Linux.
+pub(crate) fn prepare_own_scopes() {
+    let _ = user_scopes();
+}
+
+/// [`crate::recheck_own_scopes`] on Linux: a scoped start that ended at once may mean the user manager went away (a session ended,
+/// D-Bus restarted); until the check answers again agents start as before, and a no keeps them so.
+pub(crate) fn recheck_own_scopes() -> bool {
+    start_probe(&SCOPES, SCOPES_YES, || probe_scopes(SCOPES_PROBE_TIMEOUT))
+}
+
+/// Checks (again) with `probe`, on a thread, when `state` is still `from`; `true` when this call started the check.
+fn start_probe(state: &'static std::sync::atomic::AtomicU8, from: u8, probe: fn() -> bool) -> bool {
+    use std::sync::atomic::Ordering;
+    if state
+        .compare_exchange(from, SCOPES_CHECKING, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let started = std::thread::Builder::new()
+        .name("scope-probe".into())
+        .spawn(move || {
+            let ok = probe();
+            state.store(if ok { SCOPES_YES } else { SCOPES_NO }, Ordering::Release);
+        });
+    if started.is_err() {
+        state.store(SCOPES_NO, Ordering::Release);
+    }
+    true
+}
+
+/// Runs a program that does nothing in a scope of its own; a user manager that does not answer within `timeout` is a no (the probe is
+/// ended and reaped).
+fn probe_scopes(timeout: std::time::Duration) -> bool {
+    let child = std::process::Command::new("systemd-run")
+        .args([
+            "--user",
+            "--scope",
+            "--quiet",
+            "--collect",
+            "--expand-environment=no",
+            "--",
+            "true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    let end = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < end => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// [`crate::in_own_scope`] on Linux.
+/// A program that cannot be found is left as it is: started through systemd-run it would start and then fail, where on its own the
+/// start fails at once and says so.
+pub(crate) fn in_own_scope(argv: Vec<String>, name: &str) -> Vec<String> {
+    let found = argv.first().is_some_and(|p| runnable(p));
+    scoped(argv, name, found && user_scopes())
+}
+
+/// Whether `program` names an executable file: a path as it is, a bare name in a `PATH` directory (the lookup `execvp` does).
+fn runnable(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let exec = |p: &std::path::Path| {
+        p.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if program.contains('/') {
+        return exec(std::path::Path::new(program));
+    }
+    !program.is_empty()
+        && std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|d| exec(&d.join(program))))
+}
+
+/// `argv` behind `systemd-run --user --scope` when `available`; the unit name is kept to systemd's characters (anything else becomes
+/// `-`), `--expand-environment=no` keeps systemd-run from replacing `$NAME` in the program's arguments (measured on systemd 259: by
+/// default it does, and a prompt or a path with `$` would change; a systemd without the option fails the check above and runs agents
+/// as before), and `--` ends systemd-run's own options so the program's arguments are never read as its.
+fn scoped(argv: Vec<String>, name: &str, available: bool) -> Vec<String> {
+    if !available || argv.is_empty() || name.is_empty() {
+        return argv;
+    }
+    let unit: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(200)
+        .collect();
+    let mut out = vec![
+        "systemd-run".to_string(),
+        "--user".into(),
+        "--scope".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        "--expand-environment=no".into(),
+        format!("--unit={unit}.scope"),
+        "--".into(),
+    ];
+    out.extend(argv);
+    out
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn an_agent_runs_in_a_scope_of_its_own_only_where_one_is_offered() {
+        let argv = vec!["claude".to_string(), "--resume".into(), "x y".into()];
+        assert_eq!(
+            scoped(argv.clone(), "agora-agent-1", false),
+            argv,
+            "no user manager: unchanged"
+        );
+        let s = scoped(argv.clone(), "agora/agent 1", true);
+        assert_eq!(
+            &s[..8],
+            [
+                "systemd-run",
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--expand-environment=no",
+                "--unit=agora-agent-1.scope",
+                "--"
+            ]
+        );
+        assert_eq!(
+            &s[8..],
+            &argv[..],
+            "the program's arguments untouched, after --"
+        );
+        assert!(scoped(Vec::new(), "x", true).is_empty());
+    }
+
+    /// The probe's answer, waited for (it runs on a thread of its own).
+    fn wait_for_probe() -> bool {
+        use std::sync::atomic::Ordering;
+        prepare_own_scopes();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while SCOPES.load(Ordering::Acquire) == SCOPES_CHECKING && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        user_scopes()
+    }
+
+    /// The check never holds up a start: a program that does not answer in time is a no, and is ended.
+    #[test]
+    fn a_probe_that_does_not_answer_in_time_is_a_no() {
+        let at = std::time::Instant::now();
+        let _ = probe_scopes(std::time::Duration::ZERO);
+        assert!(
+            at.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            at.elapsed()
+        );
+    }
+
+    fn settle(state: &std::sync::atomic::AtomicU8) -> u8 {
+        use std::sync::atomic::Ordering;
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while state.load(Ordering::Acquire) == SCOPES_CHECKING && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        state.load(Ordering::Acquire)
+    }
+
+    /// Starts are never scoped while the check runs; a user manager that goes away later (a start that failed at once, checked again)
+    /// turns the scopes off, and one that answers again turns them back on.
+    #[test]
+    fn scopes_follow_the_check_and_a_recheck_can_turn_them_off() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        static WORKS: AtomicU8 = AtomicU8::new(SCOPES_UNKNOWN);
+        assert!(
+            !scopes_now(&WORKS, || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                true
+            }),
+            "not while checking"
+        );
+        assert!(
+            !scopes_now(&WORKS, || unreachable!()),
+            "one check at a time"
+        );
+        assert_eq!(settle(&WORKS), SCOPES_YES);
+        assert!(scopes_now(&WORKS, || unreachable!()));
+        assert!(
+            start_probe(&WORKS, SCOPES_YES, || false),
+            "a recheck starts"
+        );
+        assert!(!start_probe(&WORKS, SCOPES_YES, || false), "and only one");
+        assert_eq!(settle(&WORKS), SCOPES_NO);
+        assert!(
+            !scopes_now(&WORKS, || unreachable!()),
+            "off after a failed recheck"
+        );
+        assert!(
+            !start_probe(&WORKS, SCOPES_YES, || true),
+            "a no is not rechecked"
+        );
+        WORKS.store(SCOPES_NO, Ordering::Release);
+    }
+
+    /// A program that is not there is never wrapped: its start must fail at once, not start systemd-run and fail inside it.
+    #[test]
+    fn a_missing_program_is_left_to_fail_on_its_own() {
+        let argv = vec!["/no/such/program-agora".to_string()];
+        assert_eq!(in_own_scope(argv.clone(), "agora-x"), argv);
+        let argv = vec!["no-such-program-agora-x".to_string()];
+        assert_eq!(in_own_scope(argv.clone(), "agora-x"), argv);
+        assert!(runnable("sh") && runnable("/bin/sh"));
+        assert!(!runnable("") && !runnable("/etc/hostname-agora-none"));
+    }
+
+    /// Where this machine has a user manager, a process in its own scope is in that scope's cgroup and keeps its process id.
+    #[test]
+    fn a_scoped_process_is_in_its_own_cgroup() {
+        if !wait_for_probe() {
+            return;
+        }
+        let name = format!(
+            "agora-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        );
+        // `$HOME` in an argument reaches the program as written (systemd-run would replace it by default), and the program runs in
+        // place, under the process id it was started with.
+        let argv = in_own_scope(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "echo \"$0\"; echo $$; cat /proc/self/cgroup".into(),
+                "$HOME".into(),
+            ],
+            &name,
+        );
+        let child = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let out = child.wait_with_output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}");
+        let mut lines = text.lines();
+        assert_eq!(lines.next(), Some("$HOME"), "{text}");
+        assert_eq!(
+            lines.next(),
+            Some(pid.to_string().as_str()),
+            "the same process: {text}"
+        );
+        assert!(text.contains(&format!("{name}.scope")), "{text}");
+    }
+}

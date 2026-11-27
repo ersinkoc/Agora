@@ -426,6 +426,8 @@ pub struct TerminalHandle {
     /// #933: the generated Git configuration of this launch (ADR-0098), removed once the process is ended (fields drop after
     /// [`Drop::drop`] killed it). Only a confined launch has one, and a confined agent is never the holder's.
     launch_file: Option<crate::gitconfig::LaunchFile>,
+    /// When the process was started through `systemd-run` in a scope of its own (`agora_platform::in_own_scope`); `None` otherwise.
+    scoped_at: Option<Instant>,
 }
 
 impl TerminalHandle {
@@ -470,6 +472,7 @@ impl TerminalHandle {
             thread: Some(thread),
             held: false,
             launch_file: None,
+            scoped_at: None,
         })
     }
 
@@ -478,6 +481,18 @@ impl TerminalHandle {
     pub(crate) fn with_launch_file(mut self, file: Option<crate::gitconfig::LaunchFile>) -> Self {
         self.launch_file = file;
         self
+    }
+
+    /// Marks this process as started in a scope of its own, now (see [`Self::scoped_at`]).
+    #[must_use]
+    pub(crate) fn scoped(mut self, scoped: bool) -> Self {
+        self.scoped_at = scoped.then(Instant::now);
+        self
+    }
+
+    /// When this process was started through `systemd-run` in a scope of its own; `None` when it was not.
+    pub(crate) fn scoped_at(&self) -> Option<Instant> {
+        self.scoped_at
     }
 
     /// Marks this terminal's process as the holder's (see [`Self::is_held`]).
@@ -1171,6 +1186,7 @@ mod tests {
             thread: None,
             held: false,
             launch_file: None,
+            scoped_at: None,
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {

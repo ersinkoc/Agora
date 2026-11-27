@@ -59,10 +59,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - **`ask` to an agent on another machine** answers `mesh.recipient_unknown` (mesh-tools.md: `ask` stays node-local), although
   `agents_list` shows that id; a code that says the target is on another machine would explain it (seen from mac, 2026-11-26).
 
-- **One memory limit for the node and every agent on Linux** (blackview, 2026-11-26 23:09): `agora service` runs the node, the holder
-  and every agent (and what they start, builds included) in the one `agora-node.service` cgroup. When it reached 21.7 GB, systemd-oomd
-  killed the whole unit (8 processes): the node and the agents the holder was meant to keep. Give each held agent its own transient
-  scope (`systemd-run --user --scope`, platform code), so pressure ends one agent and never the node or the others; measure first.
+- **An empty agent scope can stay listed** (2026-11-27, after the per-agent scopes): an agent killed right after its start can leave its
+  `agora-<agent>-<n>.scope` active with no process (0 tasks, 0 bytes) until it is stopped. Harmless (it holds nothing), but such units
+  pile up on a node that starts many short agents: stop an empty one when its agent ends (`systemctl --user stop`, platform code).
 - **WrongStack agents have no mesh** (external, WrongStack 1.7.22, 2026-11-27): `wstack --mcp-config <file>` starts Agora's
   `agora mesh stdio` and completes `initialize` and `tools/list`, but WrongStack never adds the server's tools to its catalog
   (`tool_search` finds none; `tool_use` says "not found" for every name). Reproduced with a one-tool stdio server; a project
