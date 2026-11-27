@@ -1,0 +1,1 @@
+- A sound or notification still waiting for its gap is dropped when the window stops knowing the fleet (signed out, another hub), instead of playing afterwards.

@@ -119,6 +119,20 @@ describe('sounds', () => {
     expect(played).toEqual(['finished', 'needs-you']);
   });
 
+  it('drop a sound waiting for the gap when the fleet stops being known', () => {
+    soundPrefs.set({ on: true });
+    draw([agent('a', 'working')]);
+    draw([agent('a', 'idle')]);
+    expect(played).toEqual(['finished']);
+    act(() => { vi.advanceTimersByTime(200); });
+    draw([agent('b', 'working')]);
+    draw([agent('b', 'idle')]);
+    expect(played).toEqual(['finished']);
+    draw([agent('b', 'idle')], { ready: false });
+    act(() => { vi.advanceTimersByTime(SOUND_GAP_MS); });
+    expect(played).toEqual(['finished']);
+  });
+
   it('leave out a muted agent', () => {
     soundPrefs.set({ on: true });
     soundPrefs.setMuted('a', true);

@@ -114,7 +114,16 @@ export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = read
 
   useEffect(() => {
     // Not knowing the fleet (signed out, another hub): what was marked belongs to the last look, and the next look starts afresh.
-    if (!ready) { if (seen.current) finishedMarks.set([]); seen.current = undefined; return; }
+    if (!ready) {
+      if (seen.current) finishedMarks.set([]);
+      seen.current = undefined;
+      // What waited belongs to the last look: never play or send it after the fleet is no longer known.
+      if (timer.current !== undefined) { clearTimeout(timer.current); timer.current = undefined; }
+      gateRef.current = openGate();
+      if (appTimer.current !== undefined) { clearTimeout(appTimer.current); appTimer.current = undefined; }
+      appGate.current = openGate();
+      return;
+    }
     const c = changes(seen.current, agents, attention);
     seen.current = c.next;
     const p = where();
