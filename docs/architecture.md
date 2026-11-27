@@ -107,7 +107,8 @@ Owner/Team ─┬─ Node ── Checkout ── Worktree
   a shared project (and its board) only when they have the same `origin`: a clone from a local path and one from GitHub are two
   projects (`agora project init` gives them one explicit id). The remote is normalized to `host/path` (host lowercased); on
   `github.com`, `gitlab.com`, `bitbucket.org` and `codeberg.org`, which ignore the case of owner and repository names, the
-  path is lowercased too, so clones of `Owner/Repo` and `owner/repo` are one project; every other host keeps the path's case.
+  path is lowercased too and a trailing `.git` is dropped whatever its case, so clones of `Owner/Repo`, `owner/repo` and
+  `Owner/Repo.GIT` are one project; every other host keeps the path's case and drops only a lowercase `.git`.
   The hub folds an older node's ids for those hosts as it reads its events and board calls, and sends a command about the
   project to that node in the node's own spelling; a node treats a confirmed binding that differs only by this fold as the
   same project (ADR-0115). A standalone folder has a

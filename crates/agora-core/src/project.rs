@@ -85,7 +85,8 @@ impl fmt::Display for ProjectId {
 
 /// Normalize a git remote to `host/owner/repo`: scheme, user info, port, a trailing `.git`, and trailing
 /// slashes are dropped; the host is lowercased. The path keeps its case, since a self-hosted server may tell
-/// `Owner/Repo` from `owner/repo`, except on the hosts in [`CASE_INSENSITIVE_HOSTS`], which do not (ADR-0115).
+/// `Owner/Repo` from `owner/repo`, except on the hosts in [`CASE_INSENSITIVE_HOSTS`], which do not: there the
+/// path is lowercased and a trailing `.git` is dropped whatever its case.
 /// Handles `https://`, `http://`, `ssh://`, `git://`, and scp-like `user@host:path` forms.
 pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
     let url = url.trim();
@@ -156,10 +157,11 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
         host.to_ascii_lowercase()
     };
     let path = path.trim_matches('/');
-    let path = path
-        .strip_suffix(".git")
-        .unwrap_or(path)
-        .trim_end_matches('/');
+    let stripped = strip_git_suffix(&host, path);
+    if stripped.is_empty() || stripped.ends_with('/') {
+        return Err(ProjectError::InvalidRemote);
+    }
+    let path = stripped.trim_end_matches('/');
     if host.is_empty()
         || host.chars().any(|c| c.is_whitespace() || c.is_control())
         || path.is_empty()
@@ -177,6 +179,20 @@ pub fn normalize_remote(url: &str) -> Result<String, ProjectError> {
 /// test.
 pub const CASE_INSENSITIVE_HOSTS: &[&str] =
     &["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"];
+
+/// Drop one trailing `.git`: case-insensitively on [`CASE_INSENSITIVE_HOSTS`] hosts, exactly as before elsewhere. This runs
+/// once, before [`fold_path`], so a repository literally named `repo.git` keeps that name after its `.git` suffix is removed.
+fn strip_git_suffix<'a>(host: &str, path: &'a str) -> &'a str {
+    if !CASE_INSENSITIVE_HOSTS.contains(&host) {
+        return path.strip_suffix(".git").unwrap_or(path);
+    }
+    let Some(start) = path.len().checked_sub(4) else {
+        return path;
+    };
+    path.get(start..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".git"))
+        .map_or(path, |_| &path[..start])
+}
 
 /// ADR-0115: a remote's path as its project id spells it: lowercased on a [`CASE_INSENSITIVE_HOSTS`] host (`host` already
 /// lowercase), unchanged on any other.
@@ -198,9 +214,16 @@ pub fn fold_project_id(id: &str) -> std::borrow::Cow<'_, str> {
     let Some((host, path)) = remote.split_once('/') else {
         return std::borrow::Cow::Borrowed(id);
     };
-    match fold_path(host, path) {
-        std::borrow::Cow::Owned(path) => std::borrow::Cow::Owned(format!("{host}/{path}#{root}")),
-        std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Borrowed(id),
+    let folded = fold_path(host, path);
+    let normalized = if CASE_INSENSITIVE_HOSTS.contains(&host) {
+        strip_git_suffix(host, &folded)
+    } else {
+        &folded
+    };
+    if normalized == path && matches!(&folded, std::borrow::Cow::Borrowed(_)) {
+        std::borrow::Cow::Borrowed(id)
+    } else {
+        std::borrow::Cow::Owned(format!("{host}/{normalized}#{root}"))
     }
 }
 
@@ -225,6 +248,8 @@ mod tests {
             "https://github.com/Owner/Repo",
             "https://github.com/Owner/Repo/",
             "https://user:token@GitHub.com/Owner/Repo.git",
+            "https://github.com/Owner/Repo.GIT",
+            "git@github.com:Owner/Repo.GIT",
             "ssh://git@github.com/Owner/Repo.git",
             "ssh://git@github.com:22/Owner/Repo.git",
             "git://github.com/Owner/Repo.git",
@@ -232,6 +257,18 @@ mod tests {
         ] {
             assert_eq!(normalize_remote(u).as_deref(), Ok(want), "{u}");
         }
+    }
+
+    #[test]
+    fn only_the_outer_git_suffix_is_dropped() {
+        assert_eq!(
+            normalize_remote("https://github.com/Owner/Repo.git.git").as_deref(),
+            Ok("github.com/owner/repo.git")
+        );
+        assert_eq!(
+            normalize_remote("https://git.example.com/Owner/Repo.git.git").as_deref(),
+            Ok("git.example.com/Owner/Repo.git")
+        );
     }
 
     #[test]
@@ -264,6 +301,14 @@ mod tests {
                 "https://codeberg.org/Forge/Repo",
                 "ssh://git@codeberg.org/forge/repo.git",
             ),
+            (
+                "https://github.com/Owner/Repo.GIT",
+                "https://github.com/owner/repo",
+            ),
+            (
+                "git@gitlab.com:Group/Sub/Repo.GIT",
+                "git@gitlab.com:group/sub/repo.git",
+            ),
         ] {
             assert_eq!(normalize_remote(a), normalize_remote(b), "{a} vs {b}");
             let (pa, pb) = (
@@ -294,6 +339,14 @@ mod tests {
                 "git@github.example.org:O/R.git",
                 "git@github.example.org:o/r.git",
             ),
+            (
+                "https://gist.github.com/O/R.GIT",
+                "https://gist.github.com/o/r.git",
+            ),
+            (
+                "https://git.example.com/O/R.GIT",
+                "https://git.example.com/o/r",
+            ),
         ] {
             assert_ne!(normalize_remote(a), normalize_remote(b), "{a} vs {b}");
         }
@@ -311,6 +364,9 @@ mod tests {
         let old = format!("github.com/ersinkoc/Agora#{ROOT}");
         assert_eq!(fold_project_id(&old), new);
         assert!(same_project(&old, &new));
+        let old_upper_suffix = format!("github.com/ersinkoc/Agora.GIT#{ROOT}");
+        assert_eq!(fold_project_id(&old_upper_suffix), new);
+        assert!(same_project(&old_upper_suffix, &new));
         assert!(matches!(
             fold_project_id(&new),
             std::borrow::Cow::Borrowed(_)
@@ -360,6 +416,7 @@ mod tests {
             "repo",
             "https://github.com",
             "https://github.com/",
+            "https://github.com/Owner/.GIT",
             "/local/path:x",
         ] {
             assert_eq!(normalize_remote(u), Err(ProjectError::InvalidRemote), "{u}");
