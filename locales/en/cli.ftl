@@ -127,6 +127,7 @@ cli-plugin-packed = Packed { $folder } into { $out } ({ $bytes } bytes).
 cli-plugin-watching = Packing { $folder } again on every change. Ctrl+C stops.
 cli-bad-arguments = The arguments were not understood.
 cli-mcp-launch-refused = The shared MCP server { $item } was not started: { $reason }.
+cli-mcp-launch-spent = The shared MCP server { $item } was started once for this agent already (its launch is single use, so a secret is handed out only once). Restart the agent to start it again.
 # `agora manual` (G10): how to drive and customize Agora, written for coding agents. The topics themselves are in docs/manual/
 # (English; see crates/agora/src/manualcmd.rs for why they are not here).
 cli-manual-heading = The manual has these topics. "agora manual TOPIC" prints one; "agora manual --json" lists them as JSON.

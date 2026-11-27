@@ -137,6 +137,15 @@ pub fn judge(
                 return Err(refusal("share.refused", "command_not_allowed"));
             }
         }
+        // A loader's or an interpreter's own variable would make an allowed program (npx, uvx) run anything: never from an item.
+        let env_loads_code = w
+            .item
+            .as_ref()
+            .and_then(|i| i.mcp.as_ref())
+            .is_some_and(|m| m.env.iter().any(|v| loads_code(&v.name)));
+        if env_loads_code {
+            return Err(refusal("share.refused", "env_not_allowed"));
+        }
         let url = w
             .item
             .as_ref()
@@ -186,11 +195,21 @@ pub struct SharedItems {
     /// ADR-0122 step 3b: what each running agent was given at its launch (`AgentStarted.shared_items`).
     given: Mutex<BTreeMap<String, Vec<v1::SharedItemRef>>>,
     /// ADR-0122 Amendment A: the launches still to be asked for, by launch id: (agent, item). Each id is spent by its first ask.
-    launches: Mutex<BTreeMap<String, (String, String)>>,
+    launches: Mutex<BTreeMap<String, Launch>>,
     /// Reads one of this node's secrets (ADR-0084's store); without it no server that names a secret is given.
     secret: Mutex<Option<SecretReader>>,
     /// The program the agent's tool starts for a server that names a secret: this node's own binary (`mcp-launch`).
     launcher: PathBuf,
+}
+
+/// What one launch id was given for: the agent, the item and its version, and the project and kind the agent runs in.
+#[derive(Debug, Clone)]
+struct Launch {
+    agent: String,
+    item: String,
+    item_hash: String,
+    project: String,
+    kind: String,
 }
 
 /// Reads a secret by name from the node's store.
@@ -221,6 +240,57 @@ impl crate::mesh_server::SharedLaunch for SharedItems {
     ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
         SharedItems::launch(self, agent.as_str(), item, launch_id)
     }
+}
+
+/// Environment names a shared server may not set (review of b9dfb5fe): what a dynamic loader or an interpreter reads before the
+/// program's own code, and where programs are looked up. Compared without case (Windows' environment ignores it).
+fn loads_code(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    const EXACT: &[&str] = &[
+        "GCONV_PATH",
+        "PERL5DB",
+        "PYTHONEXECUTABLE",
+        "BROWSER",
+        "PATH",
+        "PATHEXT",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONHOME",
+        "PYTHONUSERBASE",
+        "RUBYOPT",
+        "RUBYLIB",
+        "PERL5OPT",
+        "PERL5LIB",
+        "PERLLIB",
+        "BASH_ENV",
+        "ENV",
+        "ZDOTDIR",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "CLASSPATH",
+        "DENO_DIR",
+        "BUN_INSTALL",
+        "COMSPEC",
+        "PSMODULEPATH",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH",
+        "NPM_CONFIG_PREFIX",
+        "NPM_CONFIG_USERCONFIG",
+        "UV_PYTHON",
+        "LUA_PATH",
+        "LUA_CPATH",
+    ];
+    EXACT.contains(&n.as_str())
+        || n.starts_with("DYLD_")
+        || n.starts_with("LD_")
+        || n.starts_with("NPM_CONFIG_")
 }
 
 /// A launch id: 32 random bytes as hex; `None` when the system gives no randomness (the server is then not given).
@@ -419,10 +489,21 @@ impl SharedItems {
                     continue;
                 }
                 let Some(id) = launch_id() else { continue };
-                self.launches
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(id.clone(), (agent.to_string(), w.name.clone()));
+                {
+                    // Only the id in the agent's current file is live: an earlier launch's id for the same item goes.
+                    let mut launches = self.launches.lock().unwrap_or_else(|e| e.into_inner());
+                    launches.retain(|_, l| !(l.agent == agent && l.item == w.name));
+                    launches.insert(
+                        id.clone(),
+                        Launch {
+                            agent: agent.to_string(),
+                            item: w.name.clone(),
+                            item_hash: w.item_hash.clone(),
+                            project: project.to_string(),
+                            kind: kind.to_string(),
+                        },
+                    );
+                }
                 given.push(v1::SharedItemRef {
                     name: w.name.clone(),
                     item_hash: w.item_hash.clone(),
@@ -497,7 +578,7 @@ impl SharedItems {
         item: &str,
         launch_id: &str,
     ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
-        let Some((owner, named)) = self
+        let Some(given) = self
             .launches
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -505,7 +586,7 @@ impl SharedItems {
         else {
             return Err("unknown_launch");
         };
-        if owner != agent || named != item {
+        if given.agent != agent || given.item != item {
             return Err("unknown_launch");
         }
         self.rejudge();
@@ -514,10 +595,20 @@ impl SharedItems {
             if !st.policy.on {
                 return Err("unknown_item");
             }
-            let m = st
-                .used
-                .get(item)
-                .and_then(|w| w.item.as_ref())
+            // The version the agent was given, and a scope that still covers it (the owner may have changed or narrowed it since).
+            let w = st.used.get(item).ok_or("unknown_item")?;
+            if w.item_hash != given.item_hash
+                || !covers(
+                    &w.scope.clone().unwrap_or_default(),
+                    &given.project,
+                    &given.kind,
+                )
+            {
+                return Err("unknown_item");
+            }
+            let m = w
+                .item
+                .as_ref()
                 .and_then(|i| i.mcp.clone())
                 .ok_or("unknown_item")?;
             (m, st.policy.secrets.clone())
@@ -549,7 +640,7 @@ impl SharedItems {
         self.launches
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, (a, _)| a != agent);
+            .retain(|_, l| l.agent != agent);
         let _ = std::fs::remove_file(self.agent_file(agent));
         self.given
             .lock()
@@ -1205,12 +1296,118 @@ mod tests {
             Err("unknown_launch"),
             "single use"
         );
-        // An agent that ended has no launches left.
+        // Only the newest launch's id for an item is live.
+        let first = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        let second = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        assert_eq!(
+            s.launch("agent-1", "db", &first),
+            Err("unknown_launch"),
+            "replaced by the next launch"
+        );
+        assert!(s.launch("agent-1", "db", &second).is_ok());
+        // A new version of the item since the agent's launch: its id gets nothing.
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        let mut db2 = item("db", "npx", "");
+        db2.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_URL".into(),
+            value: "{secret:DB}".into(),
+        }];
+        s.take(word("db", Some(db2), 2, ShareScope::default()));
+        assert_eq!(
+            s.launch("agent-1", "db", &id),
+            Err("unknown_item"),
+            "another version"
+        );
+        // A scope narrowed since the agent's launch so it no longer covers it: nothing.
+        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+        let mut db3 = item("db", "npx", "");
+        db3.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_URL".into(),
+            value: "{secret:DB}".into(),
+        }];
+        s.take(word(
+            "db",
+            Some(db3),
+            3,
+            ShareScope {
+                project_id: "other".into(),
+                kinds: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            s.launch("agent-1", "db", &id),
+            Err("unknown_item"),
+            "no longer in its scope"
+        );
+        // An agent that ended has no launches left (a fresh folder: the one above remembers the newer words).
+        let d2 = temp("launcher-end");
+        let s = open(
+            &d2,
+            SharePolicy {
+                secrets: ["DB".to_string()].into_iter().collect(),
+                ..SharePolicy::default()
+            },
+        );
+        let mut db = item("db", "npx", "");
+        db.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_URL".into(),
+            value: "{secret:DB}".into(),
+        }];
+        s.take(word("db", Some(db), 1, ShareScope::default()));
+        s.set_secrets(Box::new(|n| {
+            (n == "DB").then(|| "postgres://x".to_string())
+        }));
         let got = s.servers_for("agent-1", "p", "k", sock);
         let id = got[0].args[4].clone();
         s.agent_ended("agent-1");
         assert_eq!(s.launch("agent-1", "db", &id), Err("unknown_launch"));
         let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// An item may not set what a loader or an interpreter reads first: an allowed program would then run anything.
+    #[test]
+    fn an_item_that_sets_a_loader_or_interpreter_variable_is_refused() {
+        let on = SharePolicy::default();
+        let trusted = |_: &str, _: &[u8], _: &[u8]| true;
+        for name in [
+            "npm_config_script_shell",
+            "GCONV_PATH",
+            "LD_PRELOAD",
+            "ld_library_path",
+            "DYLD_INSERT_LIBRARIES",
+            "NODE_OPTIONS",
+            "PYTHONPATH",
+            "PATH",
+            "Path",
+            "BASH_ENV",
+        ] {
+            let mut it = item("db", "npx", "");
+            it.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+                name: name.into(),
+                value: "x".into(),
+            }];
+            let w = word("db", Some(it), 1, ShareScope::default());
+            assert_eq!(
+                judge(&w, None, &on, trusted).unwrap_err().reason,
+                "env_not_allowed",
+                "{name}"
+            );
+        }
+        let mut it = item("db", "npx", "");
+        it.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_MODE".into(),
+            value: "ro".into(),
+        }];
+        assert_eq!(
+            judge(
+                &word("db", Some(it), 1, ShareScope::default()),
+                None,
+                &on,
+                trusted
+            ),
+            Ok(())
+        );
     }
 
     /// The hub can only narrow: a name it stops listing is dropped here.

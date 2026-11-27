@@ -2179,6 +2179,7 @@ shared-refused-count = { $count ->
 }
 shared-refused-on = { $machine }: { $reason }
 shared-refused-secret-needs-launcher = a server at an address that needs a secret is not given to agents yet
+shared-refused-env-not-allowed = it sets a variable that changes which code a program runs (such as PATH or LD_PRELOAD), which no shared server may set
 shared-refused-secret-not-allowed = this machine does not let that secret go to shared servers (its policy's share.secrets)
 shared-refused-secret = does not hold the secret { $secret }
 shared-refused-policy-off = this machine does not take shared servers

@@ -2073,6 +2073,7 @@ shared-refused-count = { $count ->
 }
 shared-refused-on = { $machine }: { $reason }
 shared-refused-secret-needs-launcher = gizli değer isteyen adresli bir sunucu ajanlara henüz verilmiyor
+shared-refused-env-not-allowed = bir programın hangi kodu çalıştıracağını değiştiren bir değişken (PATH ya da LD_PRELOAD gibi) ayarlıyor; hiçbir paylaşılan sunucu bunu ayarlayamaz
 shared-refused-secret-not-allowed = bu makine o gizli değerin paylaşılan sunuculara gitmesine izin vermiyor (politikadaki share.secrets)
 shared-refused-secret = { $secret } gizli değeri bu makinede yok
 shared-refused-policy-off = bu makine paylaşılan sunucuları almıyor

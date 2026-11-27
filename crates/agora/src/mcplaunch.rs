@@ -101,6 +101,14 @@ pub(crate) fn mcp_launch(say: &Say, o: &Opts) -> ExitCode {
     };
     let (command, args, env) = match answer {
         Answer::Run { command, args, env } => (command, args, env),
+        // A launch id is single use: a server the agent's tool starts again (after a crash, a reconnect) needs the agent restarted.
+        Answer::Refused(reason) if reason == "unknown_launch" => {
+            say.err(
+                key!("cli-mcp-launch-spent"),
+                &[("item", item.as_str().into())],
+            );
+            return ExitCode::from(1);
+        }
         Answer::Refused(reason) => {
             say.err(
                 key!("cli-mcp-launch-refused"),
