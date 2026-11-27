@@ -7,7 +7,9 @@ use std::time::Duration;
 
 #[cfg(not(windows))]
 use crate::held::Collected;
+#[cfg(not(windows))]
 use crate::held::HeldSignal;
+#[cfg(not(windows))]
 use crate::ExitStatus;
 #[cfg(not(windows))]
 use crate::PtyConfig;
@@ -227,10 +229,16 @@ mod tests {
     }
 }
 
-/// A program on pipes the holder owns (Unix only for now).
+/// M2.6: on Windows the holder's program on pipes is `winhold`'s.
+#[cfg(windows)]
+pub use crate::winhold::HeldProcess;
+
+/// A program on pipes the holder owns (not built on this system).
+#[cfg(not(windows))]
 #[derive(Debug)]
 pub struct HeldProcess(());
 
+#[cfg(not(windows))]
 impl HeldProcess {
     pub fn start(
         _argv: &[String],

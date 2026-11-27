@@ -163,6 +163,174 @@ impl Drop for OtherProcess {
     }
 }
 
+// ----- M2.6: a program on pipes (ADR-0093 step 3) -----
+
+/// A program the holder runs on a pair of pipes instead of a pseudo-console (a structured agent: an adapter or an ACP bridge): its input,
+/// its output, its process (so its exit status) and its own kill-on-close job, so everything it starts ends with it, and with the holder
+/// (ADR-0079 decision 8). Started with `CREATE_NO_WINDOW`: a console program on pipes never opens a window. Its stderr is the holder's
+/// own (the holder's log).
+#[derive(Debug)]
+pub struct HeldProcess {
+    child: std::process::Child,
+    job: JobHandle,
+    io: Option<(std::process::ChildStdin, std::process::ChildStdout)>,
+    exit: Option<crate::ExitStatus>,
+}
+
+/// An owned job object handle.
+#[derive(Debug)]
+struct JobHandle(HANDLE);
+
+// SAFETY: a job handle is an opaque id any thread may use.
+unsafe impl Send for JobHandle {}
+unsafe impl Sync for JobHandle {}
+
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        // SAFETY: owned and closed once; closing the last handle of a kill-on-close job ends what is left in it.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// A kill-on-close job with nothing else set, with `process` in it.
+fn kill_on_close_job(process: HANDLE) -> io::Result<JobHandle> {
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // SAFETY: plain call.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let job = JobHandle(job);
+    // SAFETY: an all-zero limit structure means "no limits"; only kill-on-close is set.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `info` is the structure the class names, with its size; then two live handles.
+    let ok = unsafe {
+        SetInformationJobObject(
+            job.0,
+            JobObjectExtendedLimitInformation,
+            (&info as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) != 0
+            && AssignProcessToJobObject(job.0, process) != 0
+    };
+    if !ok {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+impl HeldProcess {
+    /// Starts `argv` with exactly `env` (the holder's own environment is a stale snapshot of whoever started it and is never passed
+    /// on), in `cwd` when given. A bare name installed as a `.cmd` shim (`npx`) is found on `env`'s `PATH` as the terminal start does;
+    /// a batch file is run as the standard library runs one (its arguments quoted for `cmd.exe`, CVE-2024-24576).
+    pub fn start(
+        argv: &[String],
+        cwd: Option<&std::path::Path>,
+        env: &[(String, String)],
+    ) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let Some((program, args)) = argv.split_first() else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
+        };
+        let path = env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, p)| std::ffi::OsStr::new(p.as_str()));
+        let mut cmd = std::process::Command::new(crate::windows::program_path(program, path));
+        cmd.args(args);
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        cmd.env_clear();
+        cmd.envs(env.iter().map(|(k, v)| (k, v)));
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .creation_flags(CREATE_NO_WINDOW);
+        let mut child = cmd.spawn()?;
+        let job = match kill_on_close_job(child.as_raw_handle().cast()) {
+            Ok(j) => j,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        let Some(io) = child.stdin.take().zip(child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("pipes missing"));
+        };
+        Ok(Self {
+            child,
+            job,
+            io: Some(io),
+            exit: None,
+        })
+    }
+
+    /// The pipes, once: the agent's input and output.
+    pub fn take_io(&mut self) -> Option<(std::process::ChildStdin, std::process::ChildStdout)> {
+        self.io.take()
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// What a signal is for an agent on pipes on Windows: it has no console to raise Ctrl-C or a close event in, so `Terminate`, `Hangup`
+    /// and `Kill` end its whole job, and `Interrupt` does nothing (a structured agent is interrupted through its own protocol, as the
+    /// node does with ACP's cancel). Nothing once its end was collected.
+    pub fn signal(&self, signal: crate::held::HeldSignal) -> io::Result<()> {
+        use crate::held::HeldSignal;
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if self.exit.is_some() {
+            return Ok(());
+        }
+        match signal {
+            HeldSignal::Interrupt => Ok(()),
+            HeldSignal::Terminate | HeldSignal::Hangup | HeldSignal::Kill => {
+                // SAFETY: a live job handle.
+                if unsafe { TerminateJobObject(self.job.0, 1) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The agent's exit status once it ended, kept from then on. When it has ended, whatever it left in its job is ended with it: an
+    /// adapter that ended or crashed must not leave processes the holder cannot name, which would also hold its output open for good.
+    pub fn try_wait(&mut self) -> io::Result<Option<crate::ExitStatus>> {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if self.exit.is_none() {
+            if let Some(s) = self.child.try_wait()? {
+                // SAFETY: a live job handle; its leader has ended, so only what it left behind is ended here.
+                unsafe { TerminateJobObject(self.job.0, 1) };
+                self.exit = Some(crate::ExitStatus {
+                    code: s.code(),
+                    signal: None,
+                });
+            }
+        }
+        Ok(self.exit)
+    }
+
+    /// Ends the agent's whole job and waits for its process, so nothing is left of it.
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.signal(crate::held::HeldSignal::Kill);
+        let code = self.child.wait().ok().and_then(|s| s.code());
+        self.exit = Some(crate::ExitStatus { code, signal: None });
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -416,5 +584,155 @@ mod tests {
         let server = listener.accept().unwrap();
         let _client = client.join().unwrap();
         assert_eq!(server.client_pid().unwrap(), std::process::id());
+    }
+}
+
+/// M2.6 (ADR-0093 step 3): the holder's program on pipes on Windows.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod held_process_tests {
+    use super::HeldProcess;
+    use crate::held::HeldSignal;
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    /// The environment an agent gets here: nothing of this process's but the system folder (on `PATH` and as `SystemRoot`).
+    fn env(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        let mut e = vec![
+            ("SystemRoot".to_string(), root.clone()),
+            ("PATH".to_string(), format!(r"{root}\System32")),
+        ];
+        e.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+        e
+    }
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn ended(p: &mut HeldProcess) -> Option<crate::ExitStatus> {
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end {
+            if let Some(s) = p.try_wait().unwrap() {
+                return Some(s);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    fn lines_go_in_and_out_and_the_end_is_kept() {
+        let mut p = HeldProcess::start(&argv(&["findstr", "/R", "^"]), None, &env(&[])).unwrap();
+        let (mut input, mut output) = p.take_io().unwrap();
+        assert!(p.take_io().is_none(), "the pipes go once");
+        input.write_all(b"hello pipes\r\n").unwrap();
+        drop(input);
+        let mut out = String::new();
+        output.read_to_string(&mut out).unwrap();
+        assert!(out.contains("hello pipes"), "{out:?}");
+        assert_eq!(ended(&mut p).unwrap().code, Some(0));
+        // Kept, and a signal is nothing now.
+        assert_eq!(p.try_wait().unwrap().unwrap().code, Some(0));
+        p.signal(HeldSignal::Kill).unwrap();
+    }
+
+    #[test]
+    fn it_gets_exactly_the_environment_given() {
+        std::env::set_var("AGORA_HELD_PROCESS_LEAK", "from-the-holder");
+        let mut p = HeldProcess::start(
+            &argv(&[
+                "cmd.exe",
+                "/d",
+                "/c",
+                "echo [%FOO%][%AGORA_HELD_PROCESS_LEAK%]",
+            ]),
+            None,
+            &env(&[("FOO", "bar")]),
+        )
+        .unwrap();
+        let (input, mut output) = p.take_io().unwrap();
+        drop(input);
+        let mut out = String::new();
+        output.read_to_string(&mut out).unwrap();
+        assert!(out.contains("[bar][%AGORA_HELD_PROCESS_LEAK%]"), "{out:?}");
+        assert!(ended(&mut p).is_some());
+    }
+
+    #[test]
+    fn a_cmd_shim_on_the_given_path_is_found_and_run() {
+        let dir = std::env::temp_dir().join(format!("agora-held-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("agora-shim.cmd"), "@echo shim-%1\r\n").unwrap();
+        let mut e = env(&[]);
+        for (k, v) in &mut e {
+            if k == "PATH" {
+                *v = format!("{};{v}", dir.display());
+            }
+        }
+        let mut p = HeldProcess::start(&argv(&["agora-shim", "arg"]), Some(&dir), &e).unwrap();
+        let (input, mut output) = p.take_io().unwrap();
+        drop(input);
+        let mut out = String::new();
+        output.read_to_string(&mut out).unwrap();
+        assert!(out.contains("shim-arg"), "{out:?}");
+        assert!(ended(&mut p).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kill_ends_the_whole_tree_and_interrupt_does_nothing() {
+        let mut p = HeldProcess::start(
+            &argv(&["cmd.exe", "/d", "/c", "ping -n 60 127.0.0.1 >nul"]),
+            None,
+            &env(&[]),
+        )
+        .unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut kids = Vec::new();
+        while kids.is_empty() && Instant::now() < end {
+            kids = crate::process_children(p.pid()).unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!kids.is_empty(), "ping did not start");
+        p.signal(HeldSignal::Interrupt).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(p.try_wait().unwrap().is_none(), "interrupt ended it");
+        p.signal(HeldSignal::Kill).unwrap();
+        assert!(ended(&mut p).is_some());
+        for k in kids {
+            assert!(
+                crate::process_start_time(k).is_none(),
+                "{k} outlived the kill"
+            );
+        }
+    }
+
+    #[test]
+    fn an_agent_that_ends_leaves_nothing_running_in_its_job() {
+        // `start /b` leaves ping running after cmd itself ends.
+        let mut p = HeldProcess::start(
+            &argv(&["cmd.exe", "/d", "/c", "start /b ping -n 60 127.0.0.1 >nul"]),
+            None,
+            &env(&[]),
+        )
+        .unwrap();
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut kids = Vec::new();
+        while kids.is_empty() && Instant::now() < end {
+            kids = crate::process_children(p.pid()).unwrap_or_default();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!kids.is_empty(), "ping was never seen");
+        assert!(ended(&mut p).is_some());
+        std::thread::sleep(Duration::from_millis(300));
+        for k in kids {
+            assert!(
+                crate::process_start_time(k).is_none(),
+                "{k} outlived its agent"
+            );
+        }
     }
 }
