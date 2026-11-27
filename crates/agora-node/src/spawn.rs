@@ -223,6 +223,8 @@ pub struct Spawner {
     pause_filing: Mutex<Option<FilingPause>>,
     /// ADR-0119: what the hub link answered, applied by [`Self::tick`] (its callbacks run on the link's thread).
     from_link: Arc<Mutex<Vec<remote::FromLink>>>,
+    /// ADR-0119: `agent_output` calls for helpers on other machines, waiting for the answer ([`Self::remote_output_begin`]).
+    outputs: Arc<Mutex<remote::Outputs>>,
 }
 
 /// See [`Spawner::pause_next_filing`].
@@ -361,6 +363,7 @@ impl Spawner {
             state: Mutex::new(State::default()),
             pause_filing: Mutex::new(None),
             from_link: Arc::new(Mutex::new(Vec::new())),
+            outputs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1279,6 +1282,23 @@ impl Helpers for Spawner {
                 })
             })
             .collect()
+    }
+
+    fn output_begin(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+        lines: usize,
+    ) -> Option<Result<u64, Error>> {
+        self.remote_output_begin(caller, helper, lines)
+    }
+
+    fn output_ready(&self, ticket: u64) -> Option<Result<Value, Error>> {
+        self.remote_output_ready(ticket)
+    }
+
+    fn output_abandon(&self, ticket: u64) {
+        self.remote_output_abandon(ticket);
     }
 
     fn output(&self, caller: &AgentId, helper: &str, lines: usize) -> Result<Value, Error> {

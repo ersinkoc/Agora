@@ -88,13 +88,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   200 ms (mostly serial `git.exe` spawns; the side-by-side identity queries are merged, not measured on Windows yet); keystroke → echo p95
   18.21 / 17.45 ms against 16 ms (likely the ~15.6 ms timer tick in ConPTY, not measured alone).
 
-## Mesh
-
-- **`agent_output` for a helper on another machine waits in place** (review of a383d034): it holds the agent's mesh connection for up to
-  10 s, so that connection's other waiting calls (asks, `inbox_wait`, `agent_wait`) and a `notifications/cancelled` for it are not seen
-  meanwhile. Make it a waiting call like `agent_wait` (the link's answer through the spawner's queue, answered by the session's poll,
-  dropped on cancel, within the per-connection cap).
-
 ## Previews (ADR-0088)
 
 - **The hub relay (step 3) must carry `Host` and `Origin` unchanged**, as the node does (review of 96786517 and efadc92d), and a TLS-terminating reverse proxy on the

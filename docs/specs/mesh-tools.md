@@ -272,7 +272,9 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   given there says otherwise. A caller whose process was replaced (a restart, a resume) asks as its new run: the machines its earlier
   run asked are told that run is gone. `agent_wait` and `agent_output` follow a helper on another machine by its `<machine>/<agent>` id
   (only one this agent started): the wait reads its state as last heard from there, asked again every 2 seconds in the background
-  (`exited` once that machine no longer knows it for this agent), and the output is asked of that machine (up to 10 s, holding the agent's mesh connection meanwhile).
+  (`exited` once that machine no longer knows it for this agent), and the output is asked of that machine as a waiting call, like `agent_wait`: the connection's other calls and a cancel are seen
+  meanwhile, it counts against the connection's 8 waiting calls (`mesh.too_many_asks`), and it ends with `node.timeout` after 10 s
+  (256 such calls wait at once on a node, `mesh.helper_limit` with `rule = "outputs"` past that).
 - **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
   helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
   agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass

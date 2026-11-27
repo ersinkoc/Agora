@@ -331,7 +331,8 @@ New threat-model rows (numbers are the next free ones when built):
    `agent.start.remote.result` and `agent.start.remote.released`. The record is in memory: after a hub restart every asker is its own
    root (chain grants stop applying). Tests: `crates/agora-hub/tests/server.rs`, `helpers.rs` and `users.rs`.
 4. The asking node: built. Following (`agent_wait`/`agent_output` for `<machine>/<agent>`, only a helper this agent started) asks
-   `HelperFollow` of that machine: the state in the background every 2 s, the output on request.
+   `HelperFollow` of that machine: the state in the background every 2 s, the output on request as a waiting call (the mesh
+   connection is never held; `Helpers::output_begin`/`output_ready`).
    `agent_start` with `node` set to another machine is checked here (the asker runs and may ask, a full folder, the prompt rules, 3
    helpers local and remote together, the start rate) and sent through the hub link (`MeshOut::request`); the call answers with the
    helper once the hub carries the target's `HelperStartResult` back (`uplink_client::run_routed`), `node.timeout` past the card's time

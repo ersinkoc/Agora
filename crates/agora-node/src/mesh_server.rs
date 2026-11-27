@@ -181,6 +181,22 @@ pub trait Helpers: Send + Sync {
         helper: &str,
         lines: usize,
     ) -> Result<Value, agora_protocol::Error>;
+    /// ADR-0119: `agent_output` for a helper whose lines must be fetched (one on another machine), as a waiting call: `Some(Ok(ticket))`
+    /// is polled with [`Self::output_ready`]; `None`: answer at once with [`Self::output`].
+    fn output_begin(
+        &self,
+        _caller: &AgentId,
+        _helper: &str,
+        _lines: usize,
+    ) -> Option<Result<u64, agora_protocol::Error>> {
+        None
+    }
+    /// The answer for an [`Self::output_begin`] ticket once it came or its time ran out; `None` while it is on its way.
+    fn output_ready(&self, _ticket: u64) -> Option<Result<Value, agora_protocol::Error>> {
+        None
+    }
+    /// The call waiting on the ticket went away: its answer, if it comes, is dropped.
+    fn output_abandon(&self, _ticket: u64) {}
 }
 
 type HelpersSlot = Mutex<Option<Arc<dyn Helpers>>>;
@@ -2202,12 +2218,19 @@ enum SpawnWait {
         wanted: String,
         deadline_ms: u64,
     },
+    /// ADR-0119: `agent_output` of a helper on another machine, until that machine answers ([`Helpers::output_begin`]).
+    Output {
+        request_id: Value,
+        ticket: u64,
+    },
 }
 
 /// Tickets of starts this connection is waiting for; dropped with it, so a request nobody will read is withdrawn.
 struct ConnectionStarts {
     helpers: Option<Arc<dyn Helpers>>,
     tickets: HashSet<u64>,
+    /// Tickets of `agent_output` calls waiting for another machine; abandoned with the connection.
+    outputs: HashSet<u64>,
 }
 
 impl Drop for ConnectionStarts {
@@ -2215,6 +2238,9 @@ impl Drop for ConnectionStarts {
         if let Some(h) = &self.helpers {
             for t in &self.tickets {
                 h.abandon(*t);
+            }
+            for t in &self.outputs {
+                h.output_abandon(*t);
             }
         }
     }
@@ -2357,7 +2383,7 @@ fn spawn_call(
             };
             let open = waits
                 .iter()
-                .filter(|w| matches!(w, SpawnWait::State { .. }))
+                .filter(|w| matches!(w, SpawnWait::State { .. } | SpawnWait::Output { .. }))
                 .count();
             if open >= MAX_WAITS {
                 return err(
@@ -2401,9 +2427,33 @@ fn spawn_call(
                     None => return bad(),
                 },
             };
-            match helpers.output(me, helper, lines) {
-                Ok(v) => Some(Some(tool_reply(&id, agora_mesh::mcp::ok_tool_result(&v)))),
-                Err(e) => err(e),
+            // ADR-0119: a helper on another machine is asked through the hub; the call waits for the answer like `agent_wait`, so
+            // this connection's other calls and a cancel are seen meanwhile.
+            let open = waits
+                .iter()
+                .filter(|w| matches!(w, SpawnWait::State { .. } | SpawnWait::Output { .. }))
+                .count();
+            match helpers.output_begin(me, helper, lines) {
+                Some(Ok(ticket)) => {
+                    if open >= MAX_WAITS {
+                        helpers.output_abandon(ticket);
+                        return err(agora_protocol::Error::new(
+                            agora_protocol::ErrorCode::MeshTooManyAsks,
+                        )
+                        .with("limit", MAX_WAITS as i64));
+                    }
+                    starts.outputs.insert(ticket);
+                    waits.push(SpawnWait::Output {
+                        request_id: id,
+                        ticket,
+                    });
+                    Some(None)
+                }
+                Some(Err(e)) => err(e),
+                None => match helpers.output(me, helper, lines) {
+                    Ok(v) => Some(Some(tool_reply(&id, agora_mesh::mcp::ok_tool_result(&v)))),
+                    Err(e) => err(e),
+                },
             }
         }
         _ => None,
@@ -2446,7 +2496,18 @@ fn cancel_request(
         SpawnWait::State {
             request_id: rid, ..
         } => rid != request_id,
-        SpawnWait::Start { .. } => true,
+        SpawnWait::Output {
+            request_id: rid,
+            ticket,
+        } if rid == request_id => {
+            if starts.outputs.remove(ticket) {
+                if let Some(h) = &starts.helpers {
+                    h.output_abandon(*ticket);
+                }
+            }
+            false
+        }
+        SpawnWait::Start { .. } | SpawnWait::Output { .. } => true,
     });
 }
 
@@ -2465,7 +2526,7 @@ fn poll_spawn(
         .iter()
         .filter_map(|w| match w {
             SpawnWait::State { helper, .. } => Some(helper.clone()),
-            SpawnWait::Start { .. } => None,
+            SpawnWait::Start { .. } | SpawnWait::Output { .. } => None,
         })
         .collect();
     let mut states = if names.is_empty() {
@@ -2521,6 +2582,17 @@ fn poll_spawn(
                     }),
                 }
             }
+            SpawnWait::Output { request_id, ticket } => match helpers.output_ready(ticket) {
+                None => still.push(SpawnWait::Output { request_id, ticket }),
+                Some(answer) => {
+                    starts.outputs.remove(&ticket);
+                    let result = match answer {
+                        Ok(v) => agora_mesh::mcp::ok_tool_result(&v),
+                        Err(e) => agora_mesh::mcp::protocol_error_result(&e),
+                    };
+                    reply(&tool_reply(&request_id, result))?;
+                }
+            },
         }
     }
     *waits = still;
@@ -2788,6 +2860,7 @@ fn serve(
         starts: ConnectionStarts {
             helpers: links.helpers.clone(),
             tickets: HashSet::new(),
+            outputs: HashSet::new(),
         },
         batches: Vec::new(),
     };
@@ -4890,6 +4963,102 @@ mod tests {
         );
         server.person_input(&AgentId::new("a1"));
         assert_eq!(ca.next(Duration::from_secs(5)).unwrap()["id"], 10);
+        done(server, dir);
+    }
+
+    /// Helpers whose `agent_output` for "beta/agent-9" waits for another machine (ADR-0119), answered when the test says.
+    #[derive(Default)]
+    struct SlowOutput {
+        answer: Mutex<Option<Value>>,
+        abandoned: Mutex<Vec<u64>>,
+        next: AtomicU64,
+    }
+
+    impl Helpers for SlowOutput {
+        fn start(&self, _: &AgentId, _: &StartArgs) -> Result<u64, agora_protocol::Error> {
+            Err(agora_protocol::Error::new(
+                agora_protocol::ErrorCode::Internal,
+            ))
+        }
+        fn started(&self, _: u64) -> Option<StartOutcome> {
+            None
+        }
+        fn abandon(&self, _: u64) {}
+        fn states(&self, _: &AgentId, h: &[String]) -> Vec<Result<String, agora_protocol::Error>> {
+            h.iter().map(|_| Ok("working".to_string())).collect()
+        }
+        fn output(&self, _: &AgentId, h: &str, _: usize) -> Result<Value, agora_protocol::Error> {
+            Ok(json!({"agent_id": h, "source": "screen", "lines": ["here"]}))
+        }
+        fn output_begin(
+            &self,
+            _: &AgentId,
+            h: &str,
+            _: usize,
+        ) -> Option<Result<u64, agora_protocol::Error>> {
+            (h == "beta/agent-9").then(|| Ok(self.next.fetch_add(1, Ordering::Relaxed)))
+        }
+        fn output_ready(&self, _: u64) -> Option<Result<Value, agora_protocol::Error>> {
+            self.answer.lock().unwrap().take().map(Ok)
+        }
+        fn output_abandon(&self, ticket: u64) {
+            self.abandoned.lock().unwrap().push(ticket);
+        }
+    }
+
+    /// The follow-up of a383d034's review: `agent_output` for a helper on another machine waits like `agent_wait`, so the connection's
+    /// other calls are answered meanwhile, a cancel drops it (its late answer is let go), and so does the connection's end. A local
+    /// helper's output is answered at once, as before.
+    #[test]
+    fn agent_output_of_a_helper_elsewhere_waits_without_holding_the_connection() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("slowoutput");
+        let helpers = Arc::new(SlowOutput::default());
+        server.set_helpers(helpers.clone());
+        let mut c = Wire::open(&a);
+        c.initialize("2025-06-18");
+        let out = |id: u64, helper: &str| {
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"agent_output","arguments":{"agent_id": helper}}}).to_string()
+        };
+        c.send(&out(1, "agent-3"));
+        assert_eq!(
+            c.next(Duration::from_secs(2)).unwrap()["id"],
+            1,
+            "a local helper is answered at once"
+        );
+        c.send(&out(2, "beta/agent-9"));
+        c.send(r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#);
+        assert_eq!(
+            c.next(Duration::from_secs(2)).unwrap()["id"],
+            3,
+            "the ping waited behind the output"
+        );
+        *helpers.answer.lock().unwrap() =
+            Some(json!({"agent_id": "beta/agent-9", "source": "screen", "lines": ["far"]}));
+        let got = c.next(Duration::from_secs(2)).unwrap();
+        assert_eq!(got["id"], 2);
+        assert_eq!(
+            agora_mesh::mcp::tool_result_value(&got["result"]).unwrap()["lines"][0],
+            "far"
+        );
+        // Cancelled: dropped, and its ticket let go.
+        c.send(&out(4, "beta/agent-9"));
+        c.send(r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":4}}"#);
+        c.send(r#"{"jsonrpc":"2.0","id":5,"method":"ping"}"#);
+        assert_eq!(c.next(Duration::from_secs(2)).unwrap()["id"], 5);
+        assert_eq!(helpers.abandoned.lock().unwrap().len(), 1);
+        // The connection ends with one waiting: let go too.
+        c.send(&out(6, "beta/agent-9"));
+        c.send(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        assert_eq!(c.next(Duration::from_secs(2)).unwrap()["id"], 7);
+        drop(c);
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        while helpers.abandoned.lock().unwrap().len() < 2 && std::time::Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(helpers.abandoned.lock().unwrap().len(), 2);
         done(server, dir);
     }
 

@@ -123,6 +123,19 @@ pub(super) struct Asked {
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
 /// Short, since it holds the agent's mesh connection while it waits (review of the follow: a waiting call is a follow-up).
 const OUTPUT_WAIT: Duration = Duration::from_secs(10);
+/// `agent_output` calls for helpers on other machines waiting at once on this node (each connection has its own cap of waiting
+/// calls too); more is refused with `mesh.helper_limit`.
+const OUTPUTS_MAX: usize = 256;
+
+/// An `agent_output` for a helper on another machine, waiting for that machine's answer ([`Spawner::remote_output_begin`]).
+pub(super) struct PendingOutput {
+    until: Instant,
+    node: String,
+    answer: Option<Result<Value, Error>>,
+}
+
+/// The waiting `agent_output` calls by ticket: a leaf lock, taken alone, also by the link's thread when an answer comes.
+pub(super) type Outputs = HashMap<u64, PendingOutput>;
 /// The most helpers on other machines one caller is remembered to have started (for following them); the oldest go first.
 const REMOTE_CHILDREN_MAX: usize = 256;
 
@@ -955,14 +968,15 @@ impl Spawner {
         Some(Ok(state))
     }
 
-    /// ADR-0119 decision 7: the last lines of a helper `caller` started on another machine, asked of that machine now (at most
-    /// [`OUTPUT_WAIT`]). `None`: `helper` is not on another machine.
-    pub(super) fn remote_output(
+    /// ADR-0119 decision 7: asks the machine a helper `caller` started there for its last lines; `done` gets the tool result's JSON or
+    /// why there is none, on the link's thread. `None`: `helper` is not on another machine; `Some(Err)`: nothing was asked.
+    fn remote_output_ask(
         &self,
         caller: &AgentId,
         helper: &str,
         lines: usize,
-    ) -> Option<Result<Value, Error>> {
+        done: Box<dyn FnOnce(Result<Value, Error>) + Send>,
+    ) -> Option<Result<String, Error>> {
         let (node, agent) = self.remote_id(helper)?;
         let Some(run) = self.follows(caller, helper) else {
             return Some(Err(not_found(cut(helper, MAX_FIELD))));
@@ -970,7 +984,7 @@ impl Spawner {
         let Some(link) = self.st().remote.link.clone() else {
             return Some(Err(Error::new(ErrorCode::NodeOffline).with("node_id", node)));
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let name = helper.to_string();
         link.request(
             v1::command_request::Command::HelperFollow(v1::HelperFollow {
                 agent_id: agent.to_string(),
@@ -983,21 +997,128 @@ impl Spawner {
             }),
             node,
             Box::new(move |r| {
-                let _ = tx.send(r);
+                done(match r {
+                    Ok(ok) => match ok.result {
+                        Some(v1::command_ok::Result::HelperFollowResult(f)) => Ok(json!({
+                            "agent_id": name,
+                            "source": f.source,
+                            "lines": tail_within(f.lines, MAX_OUTPUT_BYTES),
+                        })),
+                        _ => Err(Error::new(ErrorCode::Internal)),
+                    },
+                    Err(code) => Err(Error::new(ErrorCode::parse(&code))),
+                })
             }),
         );
-        Some(match rx.recv_timeout(OUTPUT_WAIT) {
-            Ok(Ok(ok)) => match ok.result {
-                Some(v1::command_ok::Result::HelperFollowResult(f)) => Ok(json!({
-                    "agent_id": helper,
-                    "source": f.source,
-                    "lines": tail_within(f.lines, MAX_OUTPUT_BYTES),
-                })),
-                _ => Err(Error::new(ErrorCode::Internal)),
-            },
-            Ok(Err(code)) => Err(Error::new(ErrorCode::parse(&code))),
-            Err(_) => Err(Error::new(ErrorCode::NodeTimeout).with("node_id", node)),
-        })
+        Some(Ok(node.to_string()))
+    }
+
+    /// [`Self::remote_output_ask`], waited for here (at most [`OUTPUT_WAIT`]); for a caller that cannot wait elsewhere. The mesh
+    /// tool waits with [`Self::remote_output_begin`] instead, so the agent's connection is never held.
+    pub(super) fn remote_output(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+        lines: usize,
+    ) -> Option<Result<Value, Error>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let node = match self.remote_output_ask(
+            caller,
+            helper,
+            lines,
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        )? {
+            Ok(node) => node,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(rx.recv_timeout(OUTPUT_WAIT).unwrap_or_else(|_| {
+            Err(Error::new(ErrorCode::NodeTimeout).with("node_id", node.as_str()))
+        }))
+    }
+
+    /// The `agent_output` of a helper on another machine as a waiting call (the follow-up of a383d034's review): the request goes
+    /// out now and its answer is kept under the returned ticket for [`Self::remote_output_ready`]. `None`: `helper` is not on another
+    /// machine.
+    pub(super) fn remote_output_begin(
+        &self,
+        caller: &AgentId,
+        helper: &str,
+        lines: usize,
+    ) -> Option<Result<u64, Error>> {
+        self.remote_id(helper)?;
+        let ticket = self.names.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut outs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+            if outs.len() >= OUTPUTS_MAX {
+                return Some(Err(helper_limit("outputs", OUTPUTS_MAX)));
+            }
+            outs.insert(
+                ticket,
+                PendingOutput {
+                    until: Instant::now() + OUTPUT_WAIT,
+                    node: String::new(),
+                    answer: None,
+                },
+            );
+        }
+        let outputs = Arc::clone(&self.outputs);
+        let asked = self.remote_output_ask(
+            caller,
+            helper,
+            lines,
+            Box::new(move |r| {
+                // Kept only while the call still waits: an abandoned or timed-out one is gone and the late answer is dropped.
+                if let Some(p) = outputs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&ticket)
+                {
+                    p.answer = Some(r);
+                }
+            }),
+        );
+        let mut outs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+        match asked {
+            Some(Ok(node)) => {
+                if let Some(p) = outs.get_mut(&ticket) {
+                    p.node = node;
+                }
+                Some(Ok(ticket))
+            }
+            Some(Err(e)) => {
+                outs.remove(&ticket);
+                Some(Err(e))
+            }
+            None => {
+                outs.remove(&ticket);
+                None
+            }
+        }
+    }
+
+    /// The answer kept for `ticket`, once it came or its time ran out (`node.timeout`); `None` while it is still on its way.
+    pub(super) fn remote_output_ready(&self, ticket: u64) -> Option<Result<Value, Error>> {
+        let mut outs = self.outputs.lock().unwrap_or_else(|e| e.into_inner());
+        let p = outs.get_mut(&ticket)?;
+        let answer = match p.answer.take() {
+            Some(a) => a,
+            None if Instant::now() >= p.until => {
+                Err(Error::new(ErrorCode::NodeTimeout).with("node_id", p.node.as_str()))
+            }
+            None => return None,
+        };
+        outs.remove(&ticket);
+        Some(answer)
+    }
+
+    /// The call waiting on `ticket` went away (cancelled, or its connection ended): its answer, if it comes, is dropped.
+    pub(super) fn remote_output_abandon(&self, ticket: u64) {
+        self.outputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&ticket);
     }
 
     /// Applies what the hub link answered, ends starts whose answer never came, and offers unsent results again. From [`Self::tick`].

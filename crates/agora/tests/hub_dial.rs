@@ -4662,6 +4662,14 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         serde_json::json!({"name": "agent_output", "arguments": {"agent_id": helper, "lines": 5}}),
     );
     assert_ne!(out["isError"], true, "{out}");
+    // Answered as a waiting call, with beta's lines.
+    assert!(
+        out["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("\"source\""),
+        "{out}"
+    );
     let waited = mcp(
         &mut conn,
         4,
