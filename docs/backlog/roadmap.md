@@ -42,7 +42,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
   open task it is allowed (an automation rule: **decision**, ADR first)
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (follow-up); a reply keeps its link across machines (M3.6,
-  **schema**); completion and handoff notices in the inbox and the window
+  **schema**); completion notices in the inbox and handoff delivery on the board (ADR-0121 Proposed, **schema**)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**, ADR first): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
   cannot widen it); secrets stay on the node (ADR-0084)

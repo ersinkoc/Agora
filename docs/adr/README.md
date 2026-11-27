@@ -136,3 +136,4 @@ Date: YYYY-MM-DD
 | 0118 | A terminal agent can report its own state through its mesh socket | Proposed |
 | 0119 | A helper started on another machine | Accepted |
 | 0120 | A gallery for the community catalogs: dates, popularity and plugin screenshots | Accepted |
+| 0121 | Show task handoff delivery on the project board | Proposed |

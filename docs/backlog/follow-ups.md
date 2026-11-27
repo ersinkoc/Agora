@@ -8,14 +8,12 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **A task handoff across a hub restart** (was #1125; ADR-0039, ADR-0109 stage 2). Stage 1 (the append-only run identity, delivery and
-  receipt; Amendment A's bounds) is merged. Left: the hub and node persistence paths; a durable node inbox entry bound to the receiver's
-  run and kept through holder take-up, with one receipt for retries; the entry keeps its message number (the MCP `inbox` cursor is
-  numeric and survives a node restart). Acceptance: a restart between commit and send still delivers, and a lost acknowledgement does not
-  make a second inbox entry.
-- **A stored handoff record that cannot be read at node start** (#1194 nit): left in place and still counted, so the hub's retry is stored
-  as a new entry and the agent can see that handoff twice; needs an I/O error that lasts through the retry. The record write, fsync and
-  prune also run under the broker mutex.
+- **Task handoff delivery on the board** (ADR-0109, ADR-0121 Proposed, **schema**): the hub retries the durable queue and logs an
+  unresolved delivery after its deadline. Add visible delivery states and reconciliation before treating the board as the
+  operator's view of delivery. Unresolved entries count toward the queue limit. When the receiver's node process restarts instead
+  of reconnecting, the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the
+  claim of a still-running receiver across holder reattachment without giving it to a replacement run.
+- **Durable node handoff writes**: the node writes, syncs and prunes records while it holds the broker mutex. Measure worst-case contention before moving I/O out of the lock.
 - **Board handoffs and members** (**decision**): a handoff made with the hub board's `handoff` tool is stamped `producer_id: "hub"`, so
   `Scope::admit` hides it from a member even when both ends are theirs (`lease_visible` special-cases the hub id; messages and handoffs do
   not).
@@ -103,6 +101,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   node writes its state before anything is signalled. Linux needs D-Bus.
 
 ## Flaky tests (fix with a proof)
+
+- `preview::one_connection_over_the_cap_is_answered_then_ended_with_budget` (tests/preview.rs:684): the program observed 33
+  connections against a cap of 32 once on Linux on 2026-11-27. The isolated retry and a second node integration run passed.
 
 - `skip_approval::a_queued_prompt_never_goes_out_in_the_tick_that_stops_the_agent` (tests/skip_approval.rs:1243, "round 1: the queued
   prompt reached the agent"): 2 in 3 full `agora-node` runs on blackview on 2026-11-27, at 490efc84 plus an unrelated change. A prompt
