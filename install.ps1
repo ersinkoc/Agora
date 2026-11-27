@@ -113,7 +113,7 @@ function Install-AgoraRelease {
                 -ArgumentList @('-Y', 'verify', '-f', "`"$signers`"", '-I', 'agora-release', '-n', 'file', '-s', "`"$file.sig`"") `
                 -RedirectStandardInput $file -RedirectStandardOutput (Join-Path $tmp 'out.txt') -RedirectStandardError (Join-Path $tmp 'err.txt')
             if ($p.ExitCode -ne 0) {
-                Fail "the release signature does not verify (nothing was installed); OpenSSH 8.1 or newer is needed for -Y verify"
+                Fail "the release signature does not verify against the release key (nothing was installed)"
             }
             Write-Host "Checksum and release signature verified"
         }
@@ -222,7 +222,8 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
             }
         }
         else {
-            Write-Host "Next: run '$Bin' to set this machine up (it asks whether to start $Bin when you log in)."
+            if ($NoService) { Write-Host "Next: run '$Bin' to set this machine up." }
+            else { Write-Host "Next: run '$Bin' to set this machine up (it asks whether to start $Bin when you log in)." }
         }
         if ($pathNote) { Write-Host $pathNote }
     }

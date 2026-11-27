@@ -83,7 +83,7 @@ install_main() {
         printf '%s\n' "$RELEASE_KEY" > "$tmp/allowed_signers"
         if ! ssh-keygen -Y verify -f "$tmp/allowed_signers" -I agora-release -n file -s "$tmp/$name.sig" \
             < "$tmp/$name" > /dev/null 2>&1; then
-            die "the release signature does not verify (nothing was installed)"
+            die "the release signature does not verify against the release key (nothing was installed)"
         fi
         say "Checksum and release signature verified"
     elif [ "$unsigned" = 1 ]; then
@@ -160,7 +160,11 @@ install_main() {
             say "  $BIN down, then $BIN                              (started by hand)"
         fi
     else
-        say "Next: run '$BIN' to set this machine up (it asks whether to start $BIN when you log in)."
+        if [ "$service" = no ]; then
+            say "Next: run '$BIN' to set this machine up."
+        else
+            say "Next: run '$BIN' to set this machine up (it asks whether to start $BIN when you log in)."
+        fi
     fi
     [ -z "$path_note" ] || say "$path_note"
 }
