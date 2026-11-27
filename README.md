@@ -9,7 +9,7 @@ workspace changes. Nodes keep agents running and buffer events when the hub is u
 Pre-alpha. See the [changelog](CHANGELOG.md) for released changes and the [capability matrix](docs/capabilities.md)
 for what's implemented and where it has been tested.
 
-[![Web console showing agents across machines and approvals waiting for you](docs/screenshots/fleet-console/after-attention-dark.png)](docs/screenshots/README.md)
+[![Home: what needs you first, then the agents working, finished and failed across your machines](docs/screenshots/visual-pass-2026-11/home-desktop-dark.png)](docs/screenshots/README.md)
 
 ## Get started
 
@@ -78,6 +78,11 @@ For an SSH-only machine, the hub can maintain a reverse tunnel and install and e
 - **Choose a client.** The embedded web app works on desktop and phone-sized screens and ships in English
   and Turkish. The TUI covers terminals, chat, and approvals. The Tauri desktop app wraps the web app and
   pins the hub CA. [Desktop setup](apps/desktop/README.md)
+- **Make it yours.** Layouts, twenty built-in and starter themes in both clients (and colour files imported
+  from iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code), themes synced through the hub between your
+  windows, keybindings as data with a full command palette, and sandboxed plugin panels with an author kit
+  (`agora plugin new | check | pack`). [Themes](docs/ux/themes.md) · [Layouts](docs/ux/layout.md) ·
+  [Keybindings](docs/ux/keybindings.md) · [Plugins](docs/ux/plugins.md)
 - **Run it in the background.** `agora service install` starts the hub and node roles configured on a machine
   at login. The hub supports passkeys, audit export, and backup and restore. [Getting started](docs/getting-started.md)
 
@@ -100,7 +105,9 @@ tool calls, diffs, and approvals. See the [integration guide](docs/architecture.
   single executable from a signed package list, with confirmation at the local terminal. Terminal agent kinds
   can use the installed executable. Installation and updates from the web app are planned.
   [Agent package decision](docs/adr/0087-install-and-update-coding-agents-from-the-window.md)
-- **Session tools.** Persistent, paged chat history and a preview of an agent's local web server are planned.
+- **Session tools.** A structured agent's transcript is kept on the node (30 days), and an agent taken up from
+  the holder or resumed shows its earlier turns. Paging through that history in the window, and a preview of
+  an agent's local web server, are planned.
   [Chat history decision](docs/adr/0089-the-chat-history-survives-the-node-and-is-read-in-pages.md) ·
   [Web preview decision](docs/adr/0088-preview-an-agents-local-web-server-in-the-window.md)
 - **Remote operations.** Signed binary updates and automatic certificate renewal are implemented. Live node

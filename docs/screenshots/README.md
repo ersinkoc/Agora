@@ -160,3 +160,5 @@ waiting message is above its own answer, and the input no longer says it waits:
 ## The visual pass (M1.4)
 Every main screen in both themes at a phone and a desktop width (`visual-pass-2026-11/`, `scripts/screenshots-visual-pass.mjs`), listed
 with the findings in [the review](../reviews/2026-11-26-visual-pass.md).
+
+The repository README shows `home-desktop-dark.png` from this pass; a later pass that replaces it updates the README's link in the same commit.
