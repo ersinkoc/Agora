@@ -7,7 +7,9 @@ import { AGENT_COLOUR_NAMES } from '../themes/tokens';
 import { replaceHidden } from './hidden';
 
 // The wire's integration level (agora.v1.IntegrationLevel): 1 generic, 2 manifest, 3 ACP, 4 adapter process.
-export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[] }
+// ADR-0123: `provider` is the company behind the kind's models as its manifest names it (`anthropic`, `openai`, …), empty when the kind
+// uses many (the model's `provider/model` id names it then) or the machine is older.
+export interface KindInfo { kind: string; name: string; installed: boolean; level: number; program: string; settings: LaunchSettingChoice[]; options: LaunchOptionChoice[]; provider?: string }
 
 /** How an agent runs, as the window says it. A chat agent has a structured conversation (ACP or an adapter); the rest run in a terminal. */
 export type RunsAs = 'terminal' | 'chat' | 'adapter';
@@ -60,6 +62,8 @@ const KEY = 'agora.agent-kinds.v1';
 const MAX_KINDS = 160;
 
 const isStr = (v: unknown): v is string => typeof v === 'string';
+/** A provider id as manifests write it: `[a-z0-9-]`, 1 to 32. */
+export const validProvider = (v: string): boolean => /^[a-z0-9-]{1,32}$/.test(v);
 const cleanKind = (v: unknown): KindInfo | undefined => {
   if (typeof v !== 'object' || v === null) return undefined;
   const r = v as Record<string, unknown>;
@@ -68,6 +72,7 @@ const cleanKind = (v: unknown): KindInfo | undefined => {
   const obj = (e: unknown): e is Record<string, unknown> => typeof e === 'object' && e !== null;
   return {
     kind: r.kind.slice(0, 64), name: r.name.slice(0, 128), installed: r.installed === true, level: typeof r.level === 'number' ? r.level : 0, program: isStr(r.program) ? r.program.slice(0, 64) : '',
+    provider: isStr(r.provider) && validProvider(r.provider) ? r.provider : '',
     settings: list(r.settings, obj).map((s) => ({ id: String(s.id ?? ''), label: String(s.label ?? ''), values: Array.isArray(s.values) ? s.values.filter(isStr).slice(0, 32) : [], defaultValue: String(s.defaultValue ?? '') })),
     options: list(r.options, obj).map((o) => ({ id: String(o.id ?? ''), label: String(o.label ?? ''), skipsPermissions: o.skipsPermissions === true })),
   };

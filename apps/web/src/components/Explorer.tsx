@@ -14,6 +14,7 @@ import { AgentAvatar, Button, StatusMark } from './kit';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ExplorerRows } from './ExplorerRows';
 import { ProjectChip, ProjectHint } from './ProjectMark';
+import { modelWords } from './ModelChip';
 import { groupFleet, sharedAcross, sortByUrgency, type GroupBy, type ProjectSpread } from '../net/fleet';
 
 const LARGE_FLEET = 120;
@@ -114,7 +115,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // red, the state's shape last); the row in front is an accent tint, never a bar on its edge.
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <div className="group flex items-center">
-    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-nowrap overflow-hidden whitespace-nowrap" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}`}>
+    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-nowrap overflow-hidden whitespace-nowrap" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}${modelWords(a) ? ` · ${modelWords(a)?.full}` : ''}`}>
       <AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" needsYou={a.state === 'needs-you'} />
       <span className="flex min-w-[40%] flex-1 items-baseline gap-1.5 overflow-hidden" data-agent-name-cell>
         <span className="max-w-full flex-none truncate" data-agent-name>{visible(a.name)}</span>
@@ -124,6 +125,7 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       {/* The facts that may give way: on a row too narrow for them they are cut here, never the bolt or the state that follow. */}
       <span className="flex min-w-0 shrink items-center gap-2 overflow-hidden" data-agent-facts>
         <LimitChip agent={a} compact fit />
+        {modelWords(a) && <span className="min-w-0 truncate text-xs text-muted" data-model-words><span aria-hidden>{modelWords(a)?.short}</span><span className="sr-only">{modelWords(a)?.full}</span></span>}
         {(by === 'kind' || by === 'state') && a.projectId && sharedAcross(spread.get(a.projectId)) && <span className="inline-flex flex-none"><ProjectChip spread={spread.get(a.projectId) as ProjectSpread} compact /></span>}
         {a.shared && <span role="img" className="inline-flex flex-none text-muted" title={t('workspace-shared')} aria-label={t('workspace-shared')} data-shared-mark><Icon name="shared" className="size-3.5" /></span>}
         {(a.filesChanged ?? 0) > 0 && <span className="flex-none font-mono text-xs font-normal text-muted" data-files-changed><span aria-hidden>±{a.filesChanged}</span><span className="sr-only">{t('changes-files', { count: a.filesChanged ?? 0 })}</span></span>}

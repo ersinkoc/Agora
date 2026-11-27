@@ -13,7 +13,7 @@ import { SettingsBlock, SettingsCard } from './SettingsCard';
 import type { KindChoice } from './StartAgent';
 
 const storage = (): Storage | undefined => { try { return window.localStorage; } catch { return undefined; } };
-const toInfo = (k: KindChoice, level: number): KindInfo => ({ kind: k.kind, name: k.name, installed: k.installed, level, program: k.program ?? '', settings: k.settings ?? [], options: k.options ?? [] });
+const toInfo = (k: KindChoice, level: number): KindInfo => ({ kind: k.kind, name: k.name, installed: k.installed, level, program: k.program ?? '', settings: k.settings ?? [], options: k.options ?? [], provider: k.provider ?? '' });
 // More machines than this are chosen from a list: a segmented control would not fit them.
 const SEGMENTS_MAX = 4;
 

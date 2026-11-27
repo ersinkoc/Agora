@@ -38,6 +38,7 @@ import type { BoardModel, MessageModel } from '../net/view';
 import { type FleetFilter, askLine, emptyKind, fleetCounts, matchesFilter } from '../net/fleet';
 import { FleetEmpty, FleetSummary } from '../components/FleetConsole';
 import { PairCards, PairRecentList, PairWindowControl, type PairingUi } from '../components/Pairing';
+import { modelWords } from '../components/ModelChip';
 import './phone.css';
 
 const TerminalView = lazy(() => import('../terminal/TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -253,7 +254,7 @@ function AgentRow({ agent: a, onOpen }: { agent: AgentTileModel; onOpen: (id: st
         <AgentAvatar accent={a.accent || 'var(--agent-slate)'} kind={kindOf({ kind: a.kind, name: a.name })} needsYou={a.state === 'needs-you' && !a.closed} />
         <span className="min-w-0 flex-1">
           <span className="phone-row__name block truncate font-medium text-ink">{visible(a.name)}</span>
-          <span className="block truncate text-caption text-muted">{a.runsInside && !a.closed ? `${t('agent-runs-inside', { name: visible(a.runsInside.name) })} · ` : ''}{visible(a.project || a.workspace)}{a.branch ? ` · ${visible(a.branch)}` : ''}</span>
+          <span className="block truncate text-caption text-muted">{a.runsInside && !a.closed ? `${t('agent-runs-inside', { name: visible(a.runsInside.name) })} · ` : ''}{visible(a.project || a.workspace)}{a.branch ? ` · ${visible(a.branch)}` : ''}{modelWords(a) ? ` · ${modelWords(a)?.short}` : ''}</span>
         </span>
         <NoAskBadge agent={a} />
         <AsksLessChip agent={a} />

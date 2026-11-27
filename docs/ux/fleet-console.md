@@ -61,7 +61,9 @@ rendered page for it.
    remembered in this browser only; the agent list uses the same choice). A tile is a flat card: the agent's avatar (its colour) beside
    its name and its state as a pill at the top; what it is doing in an inset mono well (two lines at most); in the foot grey tags for
    where it is (the project under a machine, the machine under a project, the branch) and changed files, the acting-without-asking bolt
-   and the limit chip when they apply, and how long it has been in this state. **Needs you** is the amber tint with an amber hairline
+   and the limit chip when they apply, the model and its reasoning effort ("opus · high", the provider's name in its tooltip;
+   ADR-0123), and how long it has been in this state. Once the agents run on more than one provider or model, a menu beside the
+   grouping narrows the tiles to one provider or one model ("Every model" shows them all). **Needs you** is the amber tint with an amber hairline
    (the pulse is only the mark's, in the pill); **failed** is the red Failed pill (ADR-0102); hover is a stronger hairline and a one-pixel
    lift, never a shadow or a glow. An agent that finished while the person was not looking at it has a green **New** pill with the check
    beside its state until they open it ([main-window.md](main-window.md#sounds-and-a-finished-mark-that-lasts-until-seen)). Clicking a tile opens the agent like the agent list does. Most urgent first inside a group;

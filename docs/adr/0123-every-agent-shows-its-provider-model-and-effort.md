@@ -77,7 +77,11 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("every agent's pro
    kept in the ledger and restored at a take-up (`set_kept_launch`); the hub's projection keeps them, and `snapshot_of` fills
    `model` (adapter current model, launch setting, usage model), `effort` (THOUGHT_LEVEL current, launch setting) and `config`
    (at most 16). The manifest key is top-level `provider`, not `[agent] provider` (manifests have no `[agent]` table).
-3. Window: in part. `net/view.ts` `modelAndEffort` works out the same model and effort from what the window was told (a start's
-   launch settings, its usage, its adapter's options and config, or the snapshot), and the agent's pane header shows them as a chip
-   (`components/ModelChip.tsx`, "opus · high", the whole of both as its name). Not yet: the provider mark (the window does not read
-   `AgentKind.provider` yet), the chip on the tile, the tree and the phone row, and filters by provider and model.
+3. Window: done, but for the board's agent picker. `net/view.ts` `modelAndEffort` works out the same model and effort from what the window
+   was told (a start's launch settings, its usage, its adapter's options and config, or the snapshot), and `providerOf` the provider:
+   the kind's `AgentKind.provider`, which the window asks each online machine for once per connection and keeps in this browser
+   (`net/agentKinds.ts`), else the first part of a `provider/model` id. The chip (`components/ModelChip.tsx`, "opus · high") is on the
+   pane header, the fleet tile and, as words, the agent list's row and the phone row; its name says the provider ("Provider:
+   Anthropic", `provider-<id>` in the locale files, the id otherwise), model and effort. The provider mark is that name in words: the
+   kind's own logo already stands beside every agent, and no provider logos are bundled. The fleet view narrows to one provider or one
+   model (`modelPicks`, `matchesModelPick`). Not yet: the same filter in the board's agent picker.

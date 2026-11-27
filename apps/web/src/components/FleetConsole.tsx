@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import { shownKey, useKeymap } from '../keys/view';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { type AttentionItem, type FleetFilter, FLEET_FILTERS, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
+import { type AttentionItem, type FleetFilter, FLEET_FILTERS, matchesModelPick, modelPicks, projectSpread, sharedAcross, type ProjectSpread, type FleetCounts, collapseAttention, decidableInline, emptyKind, fleetView, groupFleet } from '../net/fleet';
 import { saveGroupBy, useGroupBy } from '../net/fleetPrefs';
 import { GroupByControl, groupTitle } from './GroupByControl';
 import { ProjectChip, ProjectHint } from './ProjectMark';
@@ -12,6 +12,8 @@ import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile, kindOf } from './AgentTile';
+import { providerName } from './ModelChip';
+import { plain } from './boardColumns';
 import { Skeleton } from './EmptyState';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, CopyChip, Pill, StatTile, stateTone } from './kit';
@@ -25,6 +27,25 @@ import { PairRequest } from './PairRequest';
 import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
+
+// ADR-0123: narrow the fleet to one provider or one model ("Every model" shows them all). The model is the agent's own word, kept short.
+function ModelPick({ value, picks, onChange }: { value?: string; picks: ReturnType<typeof modelPicks>; onChange: (v: string | undefined) => void }) {
+  const id = useId();
+  return (
+    <span className="fleet-tools__pick">
+      <label htmlFor={id} className="sr-only">{t('fleet-model-filter')}</label>
+      <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value || undefined)}>
+        <option value="">{t('fleet-model-all')}</option>
+        {picks.providers.length > 0 && <optgroup label={t('fleet-model-providers')}>
+          {picks.providers.map((p) => <option key={p.value} value={p.value}>{t('fleet-model-count', { name: providerName(p.id), count: p.count })}</option>)}
+        </optgroup>}
+        {picks.models.length > 0 && <optgroup label={t('fleet-model-models')}>
+          {picks.models.map((m) => <option key={m.value} value={m.value}>{t('fleet-model-count', { name: visible(plain(m.id, 48)), count: m.count })}</option>)}
+        </optgroup>}
+      </select>
+    </span>
+  );
+}
 export type LinkState = 'connecting' | 'live' | 'offline';
 
 // What one filter chip says, in the state words the rest of the window uses.
@@ -355,7 +376,11 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   const [filter, setFilter] = useState<FleetFilter | undefined>();
   const by = useGroupBy();
   const spread = useMemo(() => projectSpread(fleet), [fleet]);
-  const groups = useMemo(() => groupFleet(view.sorted, machines, by, filter), [view.sorted, machines, by, filter]);
+  // ADR-0123: one provider or one model at a time; offered once the agents run on more than one.
+  const [pick, setPick] = useState<string | undefined>();
+  const picks = useMemo(() => modelPicks(view.sorted), [view.sorted]);
+  const picked = useMemo(() => (pick ? view.sorted.filter((a) => matchesModelPick(a, pick)) : view.sorted), [view.sorted, pick]);
+  const groups = useMemo(() => groupFleet(picked, machines, by, filter), [picked, machines, by, filter]);
   const empty = emptyKind(link, fleet.length + approvals.length, machines.length);
   const asks = useMemo(() => {
     const m = new Map<string, string>();
@@ -377,6 +402,7 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
       <section className="fleet-groups" aria-label={t('fleet-panel')}>
         <div className="fleet-tools">
           <GroupByControl by={by} onChange={saveGroupBy} />
+          {(pick || picks.providers.length > 1 || picks.models.length > 1) && <ModelPick value={pick} picks={picks} onChange={setPick} />}
           {filter && <p className="fleet-tools__filter m-0" role="status">{t('fleet-filter-active', { name: t(FILTER_WORD[filter]) })} <button type="button" className="link" onClick={() => setFilter(undefined)}>{t('fleet-filter-clear')}</button></p>}
         </div>
         {groups.length === 0 && <p className="muted m-0">{t('fleet-filter-none')}</p>}

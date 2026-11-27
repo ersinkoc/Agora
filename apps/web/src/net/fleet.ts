@@ -299,3 +299,21 @@ export function span(ms: number): string {
   return `${Math.floor(h / 24)} d`;
 }
 
+
+// ADR-0123: the fleet narrowed to one provider or one model. A pick is `p:<provider id>` or `m:<model>` (the model as the agent names it);
+// the choices are the providers and models the agents shown run on, each with how many, most first.
+export interface ModelPickChoice { value: string; id: string; count: number }
+export function modelPicks(agents: readonly Pick<AgentTileModel, 'provider' | 'model'>[]): { providers: ModelPickChoice[]; models: ModelPickChoice[] } {
+  const count = (key: (a: Pick<AgentTileModel, 'provider' | 'model'>) => string, prefix: string) => {
+    const m = new Map<string, number>();
+    for (const a of agents) { const k = key(a); if (k) m.set(k, (m.get(k) ?? 0) + 1); }
+    return [...m].map(([id, n]) => ({ value: `${prefix}${id}`, id, count: n })).sort((x, y) => y.count - x.count || (x.id < y.id ? -1 : 1));
+  };
+  return { providers: count((a) => a.provider ?? '', 'p:'), models: count((a) => a.model ?? '', 'm:') };
+}
+export function matchesModelPick(a: Pick<AgentTileModel, 'provider' | 'model'>, pick: string | undefined): boolean {
+  if (!pick) return true;
+  if (pick.startsWith('p:')) return (a.provider ?? '') === pick.slice(2);
+  if (pick.startsWith('m:')) return (a.model ?? '') === pick.slice(2);
+  return true;
+}

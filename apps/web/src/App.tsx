@@ -40,7 +40,7 @@ import { AuditPage, DevicePage, Focus, Gallery, MachinesPage, SettingsDemo, Sign
 import { browserName, canBeApprovedOn, deviceLabel, fingerprint, fromHex, registrationVerifies, signAsk, signEndorsement, signRegistration, signRevocation, trustedBy, waitingForApproval, type DeviceInfo } from './net/devices';
 import { DeviceRequest } from './components/DeviceRequest';
 import { num } from './net/view';
-import { plainText, readKnown } from './net/agentKinds';
+import { plainText, readKnown, validProvider, writeKnown, type KnownKinds } from './net/agentKinds';
 import { loadAudit } from './net/audit';
 import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
@@ -164,6 +164,8 @@ export function App() {
       kind: k.kind ?? '', name: k.displayName || (k.kind ?? ''), installed: !!k.installed, level: Number(k.level ?? 0),
       // ADR-0069: the program the machine looks for in its PATH (empty from an older machine).
       program: k.program ?? '',
+      // ADR-0123: the company behind the kind's models, as its manifest names it (empty from an older machine).
+      provider: validProvider(k.provider ?? '') ? (k.provider as string) : '',
       // ADR-0059: the kind's launch options (the machine keeps their arguments).
       // ADR-0066: the kind's launch settings (model, effort) and what each takes.
       settings: (k.settings ?? []).map((st) => ({ id: st.id ?? '', label: st.label ?? '', values: st.values ?? [], defaultValue: st.defaultValue ?? '' })),
@@ -410,6 +412,24 @@ export function App() {
   // ADR-0113 decision 6: the theme editor asks this hub for its community theme catalog once the window has the hub's first view (a
   // question sent before the link is open is refused), and the demo window has a sample one.
   const viewed = live !== undefined;
+  // ADR-0094 and ADR-0123: each machine's kinds (their names and providers), as it last reported them, kept in this browser; asked once
+  // per machine while this window is connected, so an agent's provider is known without opening Settings first.
+  const [knownKinds, setKnownKinds] = useState<Map<string, KnownKinds>>(() => { try { return readKnown(window.localStorage); } catch { return new Map(); } });
+  const askedKinds = useRef(new Set<string>());
+  const onlineNodes = live ? machines(live).filter((m) => m.online).map((m) => m.id).join('\n') : '';
+  useEffect(() => {
+    if (!api || !viewed) return;
+    for (const node of onlineNodes.split('\n').filter(Boolean)) {
+      if (askedKinds.current.has(node)) continue;
+      askedKinds.current.add(node);
+      loadKinds(node).then((list) => setKnownKinds((prev) => {
+        const next = new Map(prev);
+        next.set(node, { atMs: Date.now(), kinds: list.map((k) => ({ kind: k.kind, name: k.name, installed: k.installed, level: k.level ?? 0, program: k.program ?? '', settings: k.settings ?? [], options: k.options ?? [], provider: k.provider ?? '' })) });
+        try { writeKnown(window.localStorage, next); } catch { /* not kept: right for this visit */ }
+        return next;
+      }), () => askedKinds.current.delete(node)); // asked again when the machine comes back
+    }
+  }, [api, viewed, onlineNodes, loadKinds]);
   // ADR-0122: Settings → Shared, for the owner once the hub's first view came; this device signs each publish and removal.
   const sharedSource = useMemo(() => (api && viewed && ownsMachines(role) && device
     ? sharedSourceFor((body) => api.command('', body as CommandBody) as Promise<Record<string, unknown>>, device) : undefined), [api, viewed, role, device]);
@@ -466,13 +486,12 @@ export function App() {
     if (!hub) return demoAgents;
     if (!live) return [];
     // ADR-0094: a kind's display name as its machine last reported it (Settings → Agents keeps that list), for "Claude Code in Shell".
-    let known: ReturnType<typeof readKnown> = new Map();
-    try { known = readKnown(window.localStorage); } catch { /* storage unavailable: the kind's own words are shown */ }
+    const kindOf = (node: string, kind: string) => knownKinds.get(node)?.kinds.find((k) => k.kind === kind);
     return tiles(live, (node, kind) => {
-      const name = known.get(node)?.kinds.find((k) => k.kind === kind)?.name;
+      const name = kindOf(node, kind)?.name;
       return name ? plainText(name, 40) : undefined;
-    });
-  }, [hub, live]);
+    }, (node, kind) => kindOf(node, kind)?.provider);
+  }, [hub, live, knownKinds]);
   // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
   // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
   const boardList = useMemo(() => (live ? boards(live) : []), [live]);

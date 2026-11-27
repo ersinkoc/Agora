@@ -665,7 +665,16 @@ export const insideKind = (kind: string): boolean => /^[a-z0-9._-]{1,64}$/.test(
 export const kindWords = (kind: string): string => kind.split(/[-_.]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 
 /** `kindName`: the display name a machine reported for one of its kinds (Settings → Agents keeps the last list), when this window has it. */
-export function tiles(v: View, kindName?: (node: string, kind: string) => string | undefined): AgentTileModel[] {
+/** ADR-0123: an agent's provider: its kind's, as its machine's manifest names it, else the first part of a `provider/model` model id
+ *  (a kind that uses many providers, such as opencode); empty when neither says. */
+export function providerOf(kindProvider: string | undefined, model: string): string {
+  if (kindProvider && /^[a-z0-9-]{1,32}$/.test(kindProvider)) return kindProvider;
+  const at = model.indexOf('/');
+  const first = at > 0 ? model.slice(0, at).toLowerCase() : '';
+  return /^[a-z0-9-]{1,32}$/.test(first) ? first : '';
+}
+
+export function tiles(v: View, kindName?: (node: string, kind: string) => string | undefined, kindProvider?: (node: string, kind: string) => string | undefined): AgentTileModel[] {
   const waiting = new Set([...v.approvals.values()].map((a) => a.agentId));
   const sharingCounts = new Map<string, number>();
   for (const [id, agent] of v.agents) { const workspace = v.agentWorkspaces.get(id); if (agent.running && workspace) sharingCounts.set(workspace, (sharingCounts.get(workspace) ?? 0) + 1); }
@@ -684,6 +693,7 @@ export function tiles(v: View, kindName?: (node: string, kind: string) => string
     // ADR-0094: while a person runs an agent by hand in this Shell, the Shell is shown as that agent (its name and avatar), in its colour.
     const inside = a.running ? a.runsInside : undefined;
     const shownKind = inside ?? a.kind;
+    const me = modelAndEffort(a);
     return {
       id,
       name: `${visible(shownKind)} · ${ACCENT_NAMES[i]}`,
@@ -712,7 +722,8 @@ export function tiles(v: View, kindName?: (node: string, kind: string) => string
       parentId: a.parentId,
       interrupted: a.interrupted ? { resumable: a.interrupted.resumable, stillRunning: !!a.interrupted.stillRunning } : undefined,
       skipsPermissions: !!a.skipsPermissions,
-      ...modelAndEffort(a),
+      ...me,
+      provider: providerOf(shownKind ? kindProvider?.(a.nodeId, shownKind) : undefined, me.model),
       ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.map((h) => h.action) } : {}),
       ...(a.running && a.runsInside ? { runsInside: { kind: a.runsInside, name: kindName?.(a.nodeId, a.runsInside) || kindWords(a.runsInside) } } : {}),
     } as AgentTileModel;

@@ -23,7 +23,7 @@ export function refusalWords(error: string, program: string | undefined): [strin
   return error === 'start-program-missing' && program ? ['start-not-installed-program', { program: visible(program) }] : [error];
 }
 
-export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[] }
+export interface KindChoice { kind: string; name: string; installed: boolean; level?: number; options?: LaunchOptionChoice[]; program?: string; settings?: LaunchSettingChoice[]; provider?: string }
 
 // The command a machine's owner runs once so the machine trusts this device (ADR-0020), with a Copy button: no hunting for it on another page.
 function TrustCommand({ command }: { command: string }) {

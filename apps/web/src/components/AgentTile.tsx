@@ -10,6 +10,7 @@ import { NoAskBadge } from './NoAskBadge';
 import { AsksLessChip } from './AllowAlways';
 import { RunsInsideChip } from './RunsInside';
 import { LimitChip } from './Quota';
+import { ModelChip } from './ModelChip';
 import { FinishedMark, useFinishedUnseen } from './FinishedMark';
 import { visible } from '../net/hidden';
 
@@ -100,6 +101,7 @@ function Tile({ agent, onOpen, context }: { agent: AgentTileModel; onOpen?: (id:
         <NoAskBadge agent={agent} nested />
         <AsksLessChip agent={agent} nested />
         <LimitChip agent={agent} />
+        <ModelChip agent={agent} nested />
         {context.same && <ProjectChip spread={context.same} />}
         {where.filter((x) => x.text).map((x) => <Tag key={x.icon} mono={x.mono}><Icon name={x.icon} className="size-3" /><span className="tile__where">{visible(x.text ?? '')}</span></Tag>)}
         {changed > 0 ? <Tag>{t('changes-files', { count: changed })}</Tag> : null}
