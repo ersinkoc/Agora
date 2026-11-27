@@ -79,5 +79,7 @@ port and to open the node's control port: all must fail).
    connection), and the node offers `preview.v1`. Measured (release, blackview, 2026-11-27): a command's round trip through the link
    p50 98 us / p95 147 us alone, p50 294 us / p95 459 us while one preview connection carries 749 MB/s, well inside ADR-0022's
    5 ms of Agora overhead for a remote node's keystroke round trip. Forward ids are 128 random bits (review of 6221f9c9). Done.
-3. Hub relay, origin per forward, audit: not started.
+3. Hub relay, origin per forward, audit: not started. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
+   connect to it through the hub; the per-forward origin follows the accepted open question (a separate hub port where possible,
+   otherwise refuse and say why).
 4. Web Browser pane: not started.

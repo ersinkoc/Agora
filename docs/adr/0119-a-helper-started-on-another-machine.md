@@ -94,7 +94,9 @@ it this task" is the next request agents make, and today it needs the person.
    - The kind, `settings` and `launch_options` are checked against the target's manifests, as for a local helper
      (`agent.setting_unknown`, `agent.option_invalid`, `agent.option_forbidden`, ...). The prompt rules are checked in full.
    - Limits per asking machine (the hub-written `origin`, not the agent's word): 2 cards waiting at once, 6 running helpers. And
-     3 running helpers per asking agent run, plus the node's own agent limit (`node.resource_limit`).
+     3 running helpers per asking agent run, plus the node's own agent limit (`node.resource_limit`). For the starts a grant covers,
+     the grant's own numbers (decision 12: N running, 30 an hour) take the place of the per-run 3 and the per-machine 6; the node's own
+     agent limit always holds.
    - **A standing grant may cover it** (decision 12). A start that matches a live grant on this node starts at once, with no card,
      and is recorded as started under that grant. Anything else raises the card, which offers a grant (`grant_allowed: true`)
      unless the start names a launch option that skips permissions (that is always asked, as locally).
@@ -114,13 +116,17 @@ it this task" is the next request agents make, and today it needs the person.
    The decision is signed over a new string:
 
    ```
-   agora-approval-start-v4\0node_id\0origin_node\0origin_agent\0approval_id\0verdict\0helper_grant\0helpers_may_start\0settings\0launch_options\0sha256(grant)\0sha256(detail)
+   agora-approval-start-v4 NUL F(node_id) F(origin_node) F(origin_agent) F(approval_id) F(verdict) F(settings) F(launch_options)
+     F(grant_max_running) F(grant_any_kind) F(grant_below_folder) F(grant_chain) F(grant_until_ms) F(sha256(detail))
    ```
 
-   It is v3 with the two machines' words and the grant added. `helper_grant` is how many helpers the grant lets run at once (0:
-   no grant), `helpers_may_start` is `0` or `1`, and `grant` is the grant's scope as canonical JSON (decision 12; empty when
-   `helper_grant` is 0), so what the person allowed is exactly what is signed. The target refuses a grant on a start that offered
-   none, and a v1–v3 or ADR-0028 signature on this action, with `approval.signature_invalid`. New vectors:
+   where F(x) is the decimal byte length of x, `:`, then x (the form of the newer domains, since two machines' strings are in it);
+   `verdict` and the three flags are `0`/`1`, numbers are decimal, `settings` and `launch_options` are written as in v3. The grant is
+   signed field by field (never as JSON, so the node, the web window and the terminal client produce the same bytes); with no grant,
+   `grant_max_running` is `0` and the other grant fields `0`. The kind, folder and asker a grant covers are never taken from the
+   decision: they are the node's own rendered request. `ApprovalResolve.helper_grant` and `helpers_may_start` (published for a local
+   start, with other meanings) must be 0 and false on this action. The target refuses a grant on a start that offered none, any
+   other value there, and a v1–v3 or ADR-0028 signature on this action, with `approval.signature_invalid`. New vectors:
    `schema/fixtures/signing/approval-start-v4.json` (node, web window, terminal client).
 
 5. **The first answer comes inside the forward's deadline.** The target answers the forwarded `HelperStart` as soon as the card
@@ -206,7 +212,9 @@ it this task" is the next request agents make, and today it needs the person.
      skips permissions;
    - **where:** this folder, or any folder below it (the person picks);
    - **how many:** at most N of its helpers running at once on this node (default 6, at most 20), and at most 30 starts an hour;
-   - **until:** the root agent's run ends (default), or a time the person picks (at most 24 hours), whichever comes first.
+   - **until:** the root agent's run ends, or 24 hours after the decision, whichever comes first; the person may pick a shorter
+     time. The 24 hours always hold: a restarted asking node sends no `HelperRelease` (decision 9), and in a chain the root's node
+     may never have talked to this target.
 
    A later `HelperStart` that matches every part starts at once: the target answers it with `HelperStartAccepted` and sends
    `HelperStartResult` as soon as the helper runs, raises no card, and records `AgentStarted` with the grant's id and an audit row
@@ -260,10 +268,20 @@ New threat-model rows (numbers are the next free ones when built):
 
 ## Build order
 
-1. **Schema (this ADR is its ADR).** The four new `CommandRequest` arms (`HelperStart`, `HelperStartResult`, `HelperFollow`,
-   `HelperRelease`), the two new `CommandOk` results, the new fields of decision 10, the capability, the approval action, the v4
-   string and its vectors, and golden fixtures. Update `protocol.md`, `mesh-tools.md` (replacing the "not supported yet"
-   sentence), `error-codes.md` (`mesh.remote_helpers_off`) and the threat model.
+1. **Schema (this ADR is its ADR).** Everything is additive; no published field changes meaning:
+   - `CommandRequest` arms `HelperStart` (decision 1's fields, with `depth` and `root_node`, `root_agent`, `root_run_id`),
+     `HelperStartResult`, `HelperFollow` and `HelperRelease` (decisions 6–8), numbered after the last arm;
+   - `CommandOk` results `HelperStartAccepted { approval_id, ttl_ms }` and `HelperFollowResult { state, lines[] }`;
+   - on `ApprovalResolve`, a new nested `RemoteGrant remote_grant` (`max_running`, `any_kind`, `below_folder`, `chain`,
+     `until_ms`), the only place a remote grant is given;
+   - on `AgentStarted`, a `grant_id` (the grant a start ran under; empty when it was asked), and decision 10's `parent_node_id`
+     and `parent_node_agent_id` on `AgentStarted`, `AgentInterrupted` and the client `AgentSnapshot`;
+   - on `GrantInfo`, a remote grant's `origin_node`, `origin_agent`, `root_node`, `root_agent`, `any_kind`, `below_folder`,
+     `chain`, `max_running`, `running`, `starts_this_hour` and `until_ms` (its `kind`, `folder` and `grant_id` as today);
+   - the capability `mesh.spawn.remote` (defined, advertised by no one until steps 2–4; both sides refuse the four requests with
+     `protocol.capability_missing` until then), the approval action `agent.start.remote`, the error code
+     `mesh.remote_helpers_off`, the v4 string and its vectors, and golden fixtures (added, never regenerated).
+   Update `protocol.md`, `mesh-tools.md` (replacing the "not supported yet" sentence), `error-codes.md` and the threat model.
 2. **The target node:** take `HelperStart`, check, raise the card, verify v4, launch, send the result, answer `HelperFollow`
    and `HelperRelease`; keep, match, count, end and list standing grants (decision 12). Tests use two nodes and `agora-fake-agent`.
 3. **The hub:** route the four requests, write `origin`/`from_node`, apply the limits and the solo-hub rule, and audit.

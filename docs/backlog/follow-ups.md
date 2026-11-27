@@ -90,7 +90,7 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   cover it.
 - The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
   them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
-- **Hub step 3:** who may connect to a forward through the hub (its creator only, or any person who may see the machine); the node
+- **Hub step 3:** only the person who opened a forward may connect to it through the hub (the maintainer's decision, 2026-11-27); the node
   accepts a routed `PreviewConnect` for an open forward from its hub (review of d267e547). A local client that reads its control
   connection slowly still holds that connection's other streams while a preview send waits; the hub link avoids it with a local
   connection per preview connection.
