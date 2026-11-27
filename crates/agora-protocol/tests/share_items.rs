@@ -49,3 +49,24 @@ fn old_bytes_decode_with_no_shared_items_and_the_new_field_round_trips() {
         a
     );
 }
+
+/// `ShareItemSigned.name` (7), added for a removal (which carries no item): the published fixture decodes with it empty, and it
+/// round-trips.
+#[test]
+fn a_signed_word_names_its_name() {
+    assert!(
+        v1::ShareItemSigned::decode(fixture("ShareItemSigned").as_slice())
+            .unwrap()
+            .name
+            .is_empty()
+    );
+    let w = v1::ShareItemSigned {
+        name: "db-tools".into(),
+        issued_ms: 7,
+        ..Default::default()
+    };
+    assert_eq!(
+        v1::ShareItemSigned::decode(w.encode_to_vec().as_slice()).unwrap(),
+        w
+    );
+}

@@ -20,6 +20,9 @@ use crate::store::SqliteStore;
 /// How far ahead of the hub's clock a word's `issued_ms` may be: a device whose clock runs fast still publishes, but a word cannot be
 /// dated so far ahead that no later word could ever replace it.
 pub const MAX_AHEAD_MS: u64 = 5 * 60 * 1000;
+/// The most removals kept for names with no live item (agora-ac's review of a3623679): a removal of a name never published is
+/// kept too, so the owner can retire a name ahead and a captured older publish of it can never come back; the oldest goes first.
+pub const MAX_TOMBSTONES: usize = 256;
 /// The most refusals kept per item (one per machine).
 const MAX_REFUSALS: usize = 256;
 
@@ -133,9 +136,6 @@ impl<'a> Shares<'a> {
                 return Err(refused("limit"));
             }
         }
-        if action == Action::Remove && newest.is_none() {
-            return Err(Error::new(ErrorCode::ShareUnknown).with("name", w.name.as_str()));
-        }
         tx.execute(
             "INSERT INTO shared_items (name, kind, item_hash, issued_ms, signer, signed) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(name) DO UPDATE SET kind = ?2, item_hash = ?3, issued_ms = ?4, signer = ?5, signed = ?6",
@@ -149,6 +149,15 @@ impl<'a> Shares<'a> {
             ],
         )
         .map_err(internal)?;
+        if action == Action::Remove {
+            // Only the newest removals are kept; a name whose removal goes may be published again with any later word.
+            tx.execute(
+                "DELETE FROM shared_items WHERE kind = 0 AND name NOT IN
+                   (SELECT name FROM shared_items WHERE kind = 0 ORDER BY issued_ms DESC, name LIMIT ?1)",
+                [i64::try_from(MAX_TOMBSTONES).map_err(internal)?],
+            )
+            .map_err(internal)?;
+        }
         // What machines said of the word it replaces no longer holds.
         tx.execute(
             "DELETE FROM shared_item_refusals WHERE name = ?1",
@@ -507,11 +516,20 @@ mod tests {
             field(s.apply("owner", &word(&owner, "db", Some(item("db", "")), NOW), NOW)),
             Some(format!("{:?}", agora_protocol::ParamValue::from("command")))
         );
+        // A name never published can be retired ahead: the removal is kept, and an older publish of it is refused from then on.
+        let retired = s
+            .apply("owner", &word(&owner, "nothing", None, NOW), NOW)
+            .unwrap();
+        assert!(retired.item_hash.is_empty());
         assert_eq!(
-            s.apply("owner", &word(&owner, "nothing", None, NOW), NOW)
-                .unwrap_err()
-                .code,
-            ErrorCode::ShareUnknown
+            s.apply(
+                "owner",
+                &word(&owner, "nothing", Some(item("nothing", "npx")), NOW - 1),
+                NOW
+            )
+            .unwrap_err()
+            .code,
+            ErrorCode::ShareRefused
         );
         for i in 0..MAX_ITEMS {
             let n = format!("i{i}");
@@ -536,6 +554,55 @@ mod tests {
             NOW,
         )
         .unwrap();
+    }
+
+    /// ADR-0049: the owner of a solo hub signs in as `owner`, the owner of a team hub as their own id; each publishes with their own
+    /// devices (registered under that same id), and neither with the other's.
+    #[test]
+    fn a_solo_owner_and_a_team_owner_each_publish_with_their_own_devices() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let solo = device(&store, "web-solo", "owner");
+        let team = device(&store, "web-team", "u-eda");
+        let s = Shares::new(&store);
+        s.apply("owner", &word(&solo, "a", Some(item("a", "npx")), NOW), NOW)
+            .unwrap();
+        s.apply("u-eda", &word(&team, "b", Some(item("b", "npx")), NOW), NOW)
+            .unwrap();
+        assert_eq!(
+            s.apply("u-eda", &word(&solo, "c", Some(item("c", "npx")), NOW), NOW)
+                .unwrap_err()
+                .code,
+            ErrorCode::ApprovalSignatureInvalid
+        );
+    }
+
+    /// The newest removals are kept, at most [`MAX_TOMBSTONES`]; the oldest goes first.
+    #[test]
+    fn removals_are_kept_up_to_a_bound_the_oldest_going_first() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let owner = device(&store, "web-1", "owner");
+        let s = Shares::new(&store);
+        for i in 0..=MAX_TOMBSTONES {
+            let n = format!("gone{i}");
+            s.apply(
+                "owner",
+                &word(&owner, &n, None, NOW + i as u64),
+                NOW + MAX_TOMBSTONES as u64,
+            )
+            .unwrap();
+        }
+        let kept: i64 = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM shared_items WHERE kind = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, MAX_TOMBSTONES as i64);
+        assert!(s.get("gone0", "").is_err(), "the oldest removal went");
+        assert!(s.get(&format!("gone{MAX_TOMBSTONES}"), "").is_ok());
     }
 
     #[test]

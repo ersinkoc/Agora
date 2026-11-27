@@ -100,7 +100,13 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    newer than the word it replaces and at most 5 minutes ahead, at most 64 live items) and writes `ShareItemChanged`. A node asks
    `ShareItemGet` on its own connection once both agreed on `share.items` (the hub offers it now; no node yet); a client never can.
    A node's `ShareItemRefused` about itself is kept against the item's current version. `ShareItemSigned.name` (7) was added for a
-   removal, which carries no item. Tests: `shares.rs` units, `dispatch.rs`, store migration, `tests/devices.rs` over a real socket.
-3. The node: not started.
+   removal, which carries no item. A removal is kept even for a name never published (the owner can retire a name ahead, and a
+   captured older publish of it never comes back), the newest 256 removals at most. Tests: `shares.rs` units (the solo owner `owner`
+   and a team owner's own id each publish only with their own devices), `dispatch.rs`, store migration, `tests/devices.rs` over a
+   real socket.
+3. The node: not started. **The node is the authority, the hub only the first gate**: before it uses any item (a shared MCP server
+   is a program it would start in agents), the node verifies the signed word itself against its own trusted devices (ADR-0061, not
+   the hub's list), the content hash and the rules in `agora_protocol::share`, keeps the newest `issued_ms` per name itself, and
+   applies `share.items` and `share.mcp_commands` (the hub cannot widen node policy).
 4. The window: not started.
 5. Skills per kind: not started.
