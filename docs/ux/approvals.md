@@ -122,8 +122,12 @@ composer) they are a **card in short** with **Review**, and the whole request is
 An agent on another machine can ask this one to start a helper (`agent.start.remote`). The card is the start card with both machines in
 its title ("claude-code on mac asks to start a codex agent here on Laptop"), a line saying the folder is on this machine and the asking
 machine can follow the agent it starts, the folder, any settings and launch options, and the whole first prompt. "More like this" is a
-standing grant on this machine: later starts like this from that machine go ahead without a card, up to 6 of its helpers at a time, for
-at most 24 hours, revocable; "The agents it starts may ask too" extends it to the agents of that chain, on any machine. A start with
+standing grant on this machine: later starts like this from that machine go ahead without a card, up to 6 of its helpers at a time,
+revocable; "The agents it starts may ask too" extends it to the agents of that chain, on any machine. Its scope is chosen under it:
+"Any kind this machine runs", "Folders below this one too", and a time: 1 hour, 8 hours, or "Until its run ends (24 h at most)" (the
+grant ends with the asking run only when that run's machine says so; a machine that goes silent leaves it for the 24 hours). These
+choices are shut while "Only this one" is picked, and the sentence under the choice says the whole scope. A timed grant ends on the
+window's clock: a machine whose clock is ahead past that end refuses the answer, and the window says its clock may differ. A start with
 settings or launch options is never granted. The decision is signed over `agora-approval-start-v4` with the grant field by field. The
 terminal client answers such a card for this start only. A helper started this way hangs under its parent on the other machine in the
 agent tree.

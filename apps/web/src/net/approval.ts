@@ -145,6 +145,13 @@ export function detailSettings(detail: string): [string, string][] {
 
 /** Why an answer to an approval did not go through, as one of the web's own texts. `auth.forbidden` (this device may not answer for
  * that project) and `ROLE_REFUSAL` (this person's role may not, #1044) are lasting, so they never say to try again. */
+/** ADR-0119: the notice for a refused answer to a start another machine asked for. `timed`: it carried a standing grant with a time,
+ *  which ends on this window's clock; the machine refuses one whose end is already past on its own clock as it refuses a bad signature,
+ *  so that refusal is explained as the likely clock difference. */
+export function remoteStartFailureKey(code: string | undefined, timed: boolean): string {
+  return timed && code === 'approval.signature_invalid' ? 'start-approval-remote-clock' : approvalFailureKey(code);
+}
+
 export function approvalFailureKey(code: string | undefined): string {
   switch (code) {
     case 'approval.signature_invalid': return 'approval-not-trusted';

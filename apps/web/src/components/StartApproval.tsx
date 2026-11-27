@@ -147,13 +147,14 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
           <SegmentedControl labelledBy={`${scope}-label`} value={more ? 'more' : 'once'} onChange={(v) => setMore(v === 'more')}
             items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: moreText }]} />
           <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{moreText}</p>
-          {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t(start.remote ? 'start-approval-remote-nested' : 'start-approval-nested')}</span></label>}
-          {/* ADR-0119 decision 12: the rest of a standing grant's scope, chosen here and signed with it; always shown, so nothing moves. */}
+          {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} disabled={!more} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t(start.remote ? 'start-approval-remote-nested' : 'start-approval-nested')}</span></label>}
+          {/* ADR-0119 decision 12: the rest of a standing grant's scope, chosen here and signed with it; always shown, so nothing moves,
+              and only open to change with "More like this" (a box that changes nothing would read as a promise). */}
           {start.remote && <div className="flex min-w-0 flex-col items-start gap-1.5" data-remote-scope>
-            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={anyKind} onChange={(e) => setAnyKind(e.target.checked)} data-remote-any-kind /><span className="min-w-0 break-words">{t('start-approval-remote-any-kind')}</span></label>
-            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={below} onChange={(e) => setBelow(e.target.checked)} data-remote-below /><span className="min-w-0 break-words">{t('start-approval-remote-below')}</span></label>
+            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={anyKind} disabled={!more} onChange={(e) => setAnyKind(e.target.checked)} data-remote-any-kind /><span className="min-w-0 break-words">{t('start-approval-remote-any-kind')}</span></label>
+            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={below} disabled={!more} onChange={(e) => setBelow(e.target.checked)} data-remote-below /><span className="min-w-0 break-words">{t('start-approval-remote-below')}</span></label>
             <span id={`${scope}-for`} className="text-muted">{t('start-approval-remote-for')}</span>
-            <SegmentedControl labelledBy={`${scope}-for`} value={String(hours)} onChange={(v) => setHours(Number(v))}
+            <SegmentedControl labelledBy={`${scope}-for`} disabled={!more} value={String(hours)} onChange={(v) => setHours(Number(v))}
               items={REMOTE_GRANT_HOURS.map((h) => ({ value: String(h), label: h > 0 ? t('start-approval-remote-for-hours', { hours: h }) : t('start-approval-remote-for-run') }))} />
           </div>}
         </div>}

@@ -19,7 +19,7 @@ import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
-import { approvalFailureKey, indexedDbStore, NO_REMOTE_GRANT, signApproval, signRemoteStart, signStart, thisDevice, type Device, type RemoteGrantChoice } from './net/approval';
+import { approvalFailureKey, indexedDbStore, remoteStartFailureKey, NO_REMOTE_GRANT, signApproval, signRemoteStart, signStart, thisDevice, type Device, type RemoteGrantChoice } from './net/approval';
 import { answerFields, answerPlan } from './net/always';
 import type { StartChoice } from './components/StartApproval';
 import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
@@ -259,6 +259,9 @@ export function App() {
     if (!api || !device) { setNotice('approval-failed'); return false; }
     setNotice(undefined);
     if (answerPlan(a, approved, always).scope === 'none') { setNotice('approval-scope-unavailable'); return false; }
+    // ADR-0119: a standing grant with a time ends on the window's clock; a machine whose clock is ahead past that end refuses the
+    // answer as it refuses a bad signature, so that refusal is explained as the likely clock difference.
+    const timed = !!(a.start?.remote && approved && (choice?.grant ?? 0) > 0 && (choice?.remote?.hours ?? 0) > 0);
     try {
       // ADR-0057: a start is decided over the request exactly as shown, with the grant chosen.
       const helperGrant = a.start && approved ? choice?.grant ?? 0 : 0;
@@ -297,7 +300,8 @@ export function App() {
       return true;
     } catch (e) {
       forgetSkipAnswer(a.id);
-      setNotice(approvalFailureKey(refusalCode(e, 'ApprovalResolve')));
+      const code = refusalCode(e, 'ApprovalResolve');
+      setNotice(remoteStartFailureKey(code, timed));
       return false;
     }
   }, [api, device]);

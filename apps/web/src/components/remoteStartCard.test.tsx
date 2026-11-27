@@ -78,7 +78,10 @@ describe('a start another machine asks for', () => {
   it('sends no scope when the answer is this one start only', () => {
     const answers: [boolean, StartChoice][] = [];
     act(() => root.render(<StartApproval approval={approval} start={approval.start!} onResolve={(ok, c) => answers.push([ok, c])} />));
-    act(() => { host.querySelector<HTMLInputElement>('[data-remote-any-kind]')!.click(); });
+    // With "Only this one" the scope's boxes are shut: a ticked box that changes nothing would read as a promise.
+    for (const sel of ['[data-remote-any-kind]', '[data-remote-below]', '[data-grant-choice] input[type=checkbox]']) {
+      expect(host.querySelector<HTMLInputElement>(sel)?.disabled, sel).toBe(true);
+    }
     const allow = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Allow');
     act(() => { allow!.click(); });
     expect(answers).toEqual([[true, { grant: 0, nested: false }]]);

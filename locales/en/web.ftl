@@ -129,7 +129,8 @@ start-approval-remote-for-hours = { $hours ->
     [one] 1 hour
    *[other] { $hours } hours
     }
-start-approval-remote-for-run = Until its run ends
+start-approval-remote-for-run = Until its run ends (24 h at most)
+start-approval-remote-clock = That machine refused the answer. Its clock may be ahead of this device's: choose "Until its run ends" or a longer time, and answer again.
 start-approval-remote-nested = The agents it starts may ask too, from any machine (each within this grant)
 approval-review = Review
 approval-review-for = Read the whole request from { $name }

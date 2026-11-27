@@ -1,7 +1,7 @@
 // ADR-0119: a decision on a start another machine asked for is signed over `agora-approval-start-v4`, with the grant field by field.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { remoteStartSignedMessage, toHex } from './approval';
+import { remoteStartFailureKey, remoteStartSignedMessage, toHex } from './approval';
 
 interface V4Case {
   name: string; node: string; origin_node: string; origin_agent: string; approval_id: string; approved: boolean;
@@ -19,5 +19,13 @@ describe('a start another machine asked for', () => {
       const m = await remoteStartSignedMessage(c.node, c.origin_node, c.origin_agent, c.approval_id, c.approved, g, c.detail);
       expect(toHex(m), c.name).toBe(c.hex);
     }
+  });
+});
+
+describe('a refused answer to a start another machine asked for', () => {
+  it('is explained as a clock difference only when it carried a timed grant and was refused as unsigned', () => {
+    expect(remoteStartFailureKey('approval.signature_invalid', true)).toBe('start-approval-remote-clock');
+    expect(remoteStartFailureKey('approval.signature_invalid', false)).toBe('approval-not-trusted');
+    expect(remoteStartFailureKey('approval.expired', true)).toBe('approval-ran-out');
   });
 });
