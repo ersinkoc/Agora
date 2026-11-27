@@ -261,7 +261,10 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   and that machine decides from its own policy, with its person's signed card or a standing grant given there. The call answers with
   the helper as `<machine>/<agent>` once the target's result comes back (`node.timeout` when it never does; a start given up on
   withdraws its card there). The asking node offers `mesh.spawn.remote` only while its policy allows (`mesh.remote_helpers` with
-  `mesh.remote`). `agent_wait` and `agent_output` for a helper on another machine are not built yet.
+  `mesh.remote`). An agent's 3 helpers count its running helpers here and its starts on their way to other machines; the helpers
+  running on another machine are counted there, which holds each asking run to 3 (6 per asking machine) unless a standing grant
+  given there says otherwise. A caller whose process was replaced (a restart, a resume) asks as its new run: the machines its earlier
+  run asked are told that run is gone. `agent_wait` and `agent_output` for a helper on another machine are not built yet.
 - **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
   helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
   agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass

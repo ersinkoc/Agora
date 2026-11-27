@@ -114,6 +114,8 @@ pub(super) struct Asked {
     ticket: u64,
     target: String,
     caller: AgentId,
+    /// The run the caller asked from (a release names it).
+    run: Vec<u8>,
     deadline: Instant,
 }
 
@@ -131,8 +133,7 @@ pub(super) struct RemoteState {
     link: Option<Arc<crate::uplink_client::MeshOut>>,
     /// Starts this node's agents asked other machines for, by start id.
     asked: HashMap<Vec<u8>, Asked>,
-    /// Helpers on other machines each local agent started (`<machine>/<agent>`), and the machines it asked.
-    children: HashMap<AgentId, Vec<String>>,
+    /// The machines each local agent asked.
     /// The machines each local agent asked, with the run it asked from (a release must name that run, also once it ended).
     targets: HashMap<AgentId, (Vec<u8>, HashSet<String>)>,
     /// Results to send, with when they were first made.
@@ -715,13 +716,15 @@ impl Spawner {
                 }
                 _ => {}
             }
-            let remote = st.remote.children.get(caller).map_or(0, Vec::len)
-                + st.remote
-                    .asked
-                    .values()
-                    .filter(|x| x.caller == *caller)
-                    .count();
-            if Self::running_children(&st, &views, caller) + remote >= MAX_HELPERS {
+            // Starts still on their way count here; helpers running on other machines are counted by those machines, which hold each
+            // asking run to its own limit (review of step 4: this node cannot see when one ends there).
+            let pending = st
+                .remote
+                .asked
+                .values()
+                .filter(|x| x.caller == *caller)
+                .count();
+            if Self::running_children(&st, &views, caller) + pending >= MAX_HELPERS {
                 return Err(helper_limit("helpers", MAX_HELPERS));
             }
         }
@@ -733,7 +736,8 @@ impl Spawner {
             self.release(caller);
             return Err(Error::new(ErrorCode::Internal).with("incident_id", "start-id"));
         }
-        let ticket = {
+        let run = me.run_id.map(Vec::from).unwrap_or_default();
+        let (ticket, stale) = {
             let mut st = self.st();
             let ticket = Self::new_ticket(&mut st, None);
             st.remote.asked.insert(
@@ -742,17 +746,37 @@ impl Spawner {
                     ticket,
                     target: target.to_string(),
                     caller: caller.clone(),
+                    run: run.clone(),
                     deadline: Instant::now() + FIRST_ANSWER,
                 },
             );
+            // The caller's process was replaced since it last asked (a restart, a resume): the machines the earlier run asked hear that
+            // run is gone, and this run's asks are recorded under its own id (review of step 4).
+            let stale = replace_run(st.remote.targets.get(caller), &run).map(|machines| {
+                let old = st
+                    .remote
+                    .targets
+                    .get(caller)
+                    .map(|(old, _)| old.clone())
+                    .unwrap_or_default();
+                (old, machines)
+            });
+            if stale.is_some() {
+                st.remote.targets.remove(caller);
+            }
             st.remote
                 .targets
                 .entry(caller.clone())
-                .or_insert_with(|| (me.run_id.map(Vec::from).unwrap_or_default(), HashSet::new()))
+                .or_insert_with(|| (run.clone(), HashSet::new()))
                 .1
                 .insert(target.to_string());
-            ticket
+            (ticket, stale)
         };
+        if let Some((old_run, targets)) = stale {
+            for t in targets {
+                self.send_release(&t, caller, old_run.clone(), Vec::new(), false);
+            }
+        }
         let back = Arc::clone(&self.from_link);
         let id = start_id.clone();
         link.request(
@@ -806,13 +830,6 @@ impl Spawner {
             None => Ok(format!("{}/{}", x.target, r.agent_id)),
         };
         let mut st = self.st();
-        if let Ok(helper) = &outcome {
-            st.remote
-                .children
-                .entry(x.caller.clone())
-                .or_default()
-                .push(helper.clone());
-        }
         if let Some(t) = st.tickets.get_mut(&x.ticket) {
             *t = Some(outcome);
         }
@@ -863,13 +880,7 @@ impl Spawner {
                                 .with("node_id", x.target.as_str())));
                     }
                     st.busy.remove(&x.caller);
-                    let run = st
-                        .remote
-                        .targets
-                        .get(&x.caller)
-                        .map(|(run, _)| run.clone())
-                        .unwrap_or_default();
-                    release.push((x.target, id, x.caller, run));
+                    release.push((x.target, id, x.caller, x.run));
                 }
             }
         }
@@ -910,7 +921,6 @@ impl Spawner {
         let targets = {
             let mut st = self.st();
             let (run, targets) = st.remote.targets.remove(caller).unwrap_or_default();
-            st.remote.children.remove(caller);
             let waiting: Vec<Vec<u8>> = st
                 .remote
                 .asked
@@ -1142,6 +1152,19 @@ impl Drop for Following<'_> {
     }
 }
 
+/// The machines an earlier run of a caller asked, to be told that run is gone, when the caller now asks from another run (a restart,
+/// a resume); `None` when it is the same run or it never asked.
+fn replace_run(entry: Option<&(Vec<u8>, HashSet<String>)>, current: &[u8]) -> Option<Vec<String>> {
+    match entry {
+        Some((old, machines)) if old.as_slice() != current => {
+            let mut v: Vec<String> = machines.iter().cloned().collect();
+            v.sort();
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
 /// An error the target or the hub answered with, as this node's own.
 fn error_of(e: &v1::ErrorInfo) -> Error {
     let mut out = Error::new(ErrorCode::parse(&e.code));
@@ -1153,4 +1176,24 @@ fn error_of(e: &v1::ErrorInfo) -> Error {
         };
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review of step 4: a caller asking from a new run releases what its earlier run asked, and only then.
+    #[test]
+    fn a_new_run_releases_the_machines_its_earlier_run_asked() {
+        let entry = (
+            vec![1u8],
+            HashSet::from(["beta".to_string(), "alpha".to_string()]),
+        );
+        assert_eq!(replace_run(Some(&entry), &[1]), None);
+        assert_eq!(
+            replace_run(Some(&entry), &[2]),
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        );
+        assert_eq!(replace_run(None, &[2]), None);
+    }
 }
