@@ -612,6 +612,9 @@ mod tests {
         assert!(!viewer_may(&C::ApprovalResolve(
             v1::ApprovalResolve::default()
         )));
+        // ADR-0119: a viewer may list the grants a machine keeps but not revoke one.
+        assert!(viewer_may(&C::GrantList(v1::GrantList::default())));
+        assert!(!viewer_may(&C::GrantRevoke(v1::GrantRevoke::default())));
         assert!(Role::Owner > Role::Member && Role::Member > Role::Viewer);
     }
 }
