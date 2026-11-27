@@ -299,8 +299,9 @@ New threat-model rows (numbers are the next free ones when built):
    new fields on `AgentStarted`, `AgentInterrupted` and `AgentSnapshot`, `RemoteGrantInfo` in `GrantListResult.remote_grants`, the capability constant (offered by no one), the
    error code `mesh.remote_helpers_off`, the v4 vectors with their test, golden fixtures, `protocol.md` ("Helpers on another machine")
    and threat-model row T73. Node and hub refuse the four requests with `protocol.capability_missing` until steps 2 and 3.
-2. The target node: built, except that its results are only queued (step 3's hub carries them, and the link sends them then) and an
-   interrupted helper's `AgentInterrupted` does not yet carry its parent's machine (the ledger keeps only a local parent).
+2. The target node: built. Its results go out on the hub link (step 3). The session ledger keeps a helper's `parent_node_id` and
+   `parent_node_agent_id` from its first `AgentStarted`, so its `AgentInterrupted` and the `AgentStarted` of a restart, a resume or
+   a take-up still name the asking machine (decision 10).
    `crates/agora-node/src/spawn/remote.rs`: `HelperStart`, `HelperFollow` and `HelperRelease` are answered only on the hub link
    (`uplink_client::run_routed`), never from a local client; the policy key `mesh.remote_helpers` (default true, only with
    `mesh.remote`); the checks (a full folder path, the kind's manifest, settings and options, the prompt rules, depth below 3, 2

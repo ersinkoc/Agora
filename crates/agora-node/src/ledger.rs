@@ -65,6 +65,10 @@ pub struct Entry {
     pub branch: String,
     /// ADR-0057: the agent on this node that started it; empty when the user did.
     pub parent_agent_id: String,
+    /// ADR-0119 decision 10: for a helper another machine asked for, that machine and the agent there (from `AgentStarted`), kept so
+    /// that a restart, a resume or an interruption still names whose helper it is.
+    pub parent_node_id: String,
+    pub parent_node_agent_id: String,
     /// The agent's own session id (`claude --resume`, `codex resume`, an ACP session), empty until one is reported.
     pub session_id: String,
     /// ADR-0059's launch options, when that lands; kept for the record and never applied by a resume (a resumed agent asks again).
@@ -453,6 +457,8 @@ impl Entry {
             "git_root": self.git_root,
             "branch": self.branch,
             "parent_agent_id": self.parent_agent_id,
+            "parent_node_id": self.parent_node_id,
+            "parent_node_agent_id": self.parent_node_agent_id,
             "session_id": self.session_id,
             "launch_options": self.launch_options,
             "skips_permissions": self.skips_permissions,
@@ -487,6 +493,8 @@ impl Entry {
             git_root: field(v, "git_root"),
             branch: field(v, "branch"),
             parent_agent_id: field(v, "parent_agent_id"),
+            parent_node_id: field(v, "parent_node_id"),
+            parent_node_agent_id: field(v, "parent_node_agent_id"),
             // A file someone else wrote must not put an option on the agent's command line: such an id is dropped and the agent
             // is offered Start again only.
             session_id: Some(field(v, "session_id"))
@@ -565,8 +573,8 @@ impl Entry {
             interrupted_at_ms: self.interrupted_at_ms,
             last_state: proto_state(&self.last_state) as i32,
             still_running: self.still_running(),
-            parent_node_id: String::new(),
-            parent_node_agent_id: String::new(),
+            parent_node_id: self.parent_node_id.clone(),
+            parent_node_agent_id: self.parent_node_agent_id.clone(),
         }
     }
 
@@ -1221,6 +1229,12 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
             e.kind = bounded(&a.kind);
             e.project_id = bounded(&a.project_id);
             e.parent_agent_id = bounded(&a.parent_agent_id);
+            // ADR-0119: said by the start that launched it; a later `AgentStarted` of the same agent (a restart, a resume, a take-up)
+            // that does not say it keeps it.
+            if fresh || !a.parent_node_id.is_empty() {
+                e.parent_node_id = bounded(&a.parent_node_id);
+                e.parent_node_agent_id = bounded(&a.parent_node_agent_id);
+            }
             // ADR-0059: kept for the record only; a resume never applies them (a resumed agent asks before acting again).
             e.launch_options = a
                 .launch_options
@@ -1464,6 +1478,46 @@ mod tests {
         let offered: Vec<String> = l.interrupted().into_iter().map(|e| e.agent_id).collect();
         assert_eq!(offered, vec!["agent-4".to_string()]);
         assert_eq!(l.next_id(), 6, "agent-5 is never given again");
+    }
+
+    /// ADR-0119 decision 10: a helper another machine asked for names it in its `AgentInterrupted`, through the ledger's file, and a
+    /// later `AgentStarted` of the same agent that does not say it (a restart, a resume) does not drop it.
+    #[test]
+    fn a_helper_from_another_machine_keeps_naming_it_through_a_restart_and_an_interruption() {
+        let dir = temp("remote-parent");
+        let l = Ledger::open(&dir, 1).unwrap();
+        l.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-2".into(),
+                project_id: "p".into(),
+                node_id: "n".into(),
+                kind: "fake".into(),
+                parent_node_id: "node-mac".into(),
+                parent_node_agent_id: "agent-7".into(),
+                ..Default::default()
+            }),
+            1,
+        );
+        l.observe(&started("agent-2", "/wt/a", ""), 2);
+        drop(l);
+        let l = Ledger::open(&dir, 20).unwrap();
+        let e = l.get("agent-2").unwrap();
+        assert_eq!(
+            (e.parent_node_id.as_str(), e.parent_node_agent_id.as_str()),
+            ("node-mac", "agent-7")
+        );
+        let said = e.interrupted_event(false);
+        assert_eq!(
+            (
+                said.parent_node_id.as_str(),
+                said.parent_node_agent_id.as_str()
+            ),
+            ("node-mac", "agent-7")
+        );
+        assert!(
+            said.parent_agent_id.is_empty(),
+            "the local parent stays empty"
+        );
     }
 
     #[test]

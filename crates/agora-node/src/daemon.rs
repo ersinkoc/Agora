@@ -679,6 +679,14 @@ impl EventSink {
     ) {
         let agent = view.id.as_str();
         let record = |body| self.record_as(body, learn);
+        // ADR-0119 decision 10: a helper another machine asked for keeps naming it through a restart, a resume or a take-up (the
+        // ledger kept it from its first start). The ledger's lock is taken alone.
+        let (parent_node_id, parent_node_agent_id) = self
+            .ledger
+            .get()
+            .and_then(|l| l.get(agent))
+            .map(|e| (e.parent_node_id, e.parent_node_agent_id))
+            .unwrap_or_default();
         record(Body::AgentStarted(v1::AgentStarted {
             run_id: view.run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.into(),
@@ -705,8 +713,8 @@ impl EventSink {
             launch_options: view.launch_options.clone(),
             skips_permissions: view.skips_permissions,
             grant_id: String::new(),
-            parent_node_id: String::new(),
-            parent_node_agent_id: String::new(),
+            parent_node_id,
+            parent_node_agent_id,
         }));
         record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
