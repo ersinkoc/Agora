@@ -6,6 +6,61 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.41
+
+- On macOS, Claude Code installed with npm is recognised when you start it by hand in a Shell (macOS names its process `claude.exe`) (ADR-0094)
+- Agents installed from the ACP registry as their own program (goose, Kimi, Kilo, Junie and others) are recognised in a Shell too when you
+  start them by hand, shown as "goose in Shell" (ADR-0094)
+- On Windows too, a coding agent you start by hand in a plain terminal (Claude Code, Codex installed with bun, WrongStack) is recognised by its program name, so the terminal shows "Claude Code in Shell", when it is working or needs you, and stops when the program ends; this also works in a PowerShell started in the terminal. An agent installed through an npm shim runs as `node` and is not recognised (ADR-0094 Amendment A).
+- A Gallery screen shows both community catalogs (ADR-0120): themes drawn in their own colours with one-step install, plugins with their screenshots and what they ask to see, search, and sorting by popularity (as the catalog publishes it), newest, name or author. Open it from Settings, the theme editor, the Plugins dialog or the command palette.
+- A Shell where you started Claude Code, Codex or another known agent by hand now says so: "Claude Code in Shell" on its tile, pane header
+  and phone row, and `[Claude Code in Shell]` in the terminal client, with that agent's state (Linux and macOS machines) (ADR-0094)
+- Both community catalogs read index format 2 (ADR-0120): an entry may give the day it was first listed and a popularity the catalog publishes (Agora never counts installs), and a plugin may list up to 4 screenshots, which the hub fetches, checks (signed hash and size, PNG or WebP header, at most 2560 × 1600) and keeps; `agora hub plugins update` names any screenshot it did not keep. Format-1 catalogs work as before.
+- In the terminal client, a `--code` given on the command line is offered again while the hub cannot be reached, instead of being
+  reported as refused; questions whose yes signs something (a device, a start that skips permissions, a folder's project) set aside
+  keys typed before they appeared and take one key, never a paste
+- The activity log records an answer the hub had already received when a node's link ended as answered, not as "machine offline"
+- A coding agent you start by hand in a plain terminal (Claude Code, Codex, WrongStack) is now recognised on Linux and macOS by its program name and read with that agent's screen rules, so the terminal shows when it is working or needs you, and stops when the program ends. The terminal stays a plain terminal (ADR-0094).
+- `agora adapter install` stops with an error when its record of the registry version it last saw is damaged, instead of taking
+  any registry as newer; a registry entry whose version is `.` or `..`, or whose program name is empty, is refused (audit)
+- A `--since` that is not a number is a usage error instead of being ignored (audit)
+- `agora remote off` removes Agora's record of its Tailscale serve rule when that record cannot be read, and tells you to check
+  `tailscale serve status` yourself; `agora remote status` also sees a tailnet-names file that is a broken link (audit)
+- Messages from a machine you removed from the hub no longer show in the recent messages of a new window (audit)
+- An agent the machine has not registered can no longer list the other agents through the mesh (audit)
+- A folder listing in the window marks secret files correctly even when the folder is swapped for a link while it is read (audit)
+- A sandboxed agent started as a program at the top of the disk no longer gets read access to the whole disk (audit)
+- Saving a private file from two places at once in the same process no longer fails or mixes the two (audit)
+- Starting a sandboxed agent whose allowed paths include a named pipe no longer hangs (audit)
+- A device whose limits came through an endorsement (ADR-0061) now stays limited to its projects when the node cannot read its
+  trusted-devices file for a moment (damaged, unreadable or being replaced), instead of being treated as unlimited until the file
+  is readable again.
+- A machine whose clock is behind the hub's now renews its certificate anyway: a renewed certificate may start up to a day after the machine's clock, and an answer rejected only for time keeps the request (and its key) until the clock is right, instead of giving it up after five tries and ending in `superseded` refusals and a new join. `agora doctor` says when the machine's clock may be wrong (ADR-0085 Amendment A).
+- A theme whose name only became unsafe once it was cleaned (a removed mark or piece joined the rest into `url(` or `;`) was
+  accepted and then lost the next time the window opened, and could no longer be changed; it is now cleaned until safe (format 1)
+  or refused with the reason (format 2). In safe mode, a theme chosen for the visit no longer falls back to the default when
+  another tab changes its theme (ADR-0113, ADR-0114).
+- After a node restart, a chat agent the agent keeper kept running no longer has a late answer meant for the earlier node taken as
+  the answer to the new node's request (for example an approval you gave recorded as not delivered): each node that takes an agent up
+  asks it with request numbers of its own. (audit F2100)
+- The hub keeps accepting connections after a failed accept (for example when it briefly runs out of file descriptors under a flood of connections); before, it stopped listening and exited as if asked to, so nothing restarted it. A mesh message or command that the hub's own additions push past the frame limit is now refused to its sender instead of disconnecting the machine it was for (audit F2060, F2061).
+- Starting the node a second time on a machine where it already runs (or a second node on the same data folder) now stops at once,
+  before it reads or writes anything: it no longer brings back an agent the running node offers to resume, leaving a copy of it
+  running that no node shows, and no longer writes into the running node's records (audit F2040)
+- After the hub lost part of what a machine reported (a long time offline, a hub restored from a backup, a machine back with an
+  empty data folder), the window again shows which of your devices that machine trusts, instead of an old list (audit F2041)
+- A message you sent to a structured agent while your previous message was failing to reach it is no longer lost: it is sent next,
+  and the agent is no longer left looking busy so that later messages wait for good (ADR-0090, audit F2020).
+- A chat transcript kept under a very small `chat.history_max_bytes` limit (under about 160 bytes) now stays within that limit when its oldest entries are dropped. (ADR-0089)
+- A chat agent's reply no longer freezes the window for seconds or minutes when it holds a long run of spaces in a heading, a code fence
+  or a table, a long run of `[`, a list item with a line separator, or a web address ending in a run of dots; a request to run a command
+  of several lines shows every line of it beside Allow, not only the first (audit F2080, F2081, F2082).
+- Reject agent kind ids with a punctuation prefix and manifest commands whose program is only whitespace.
+- Reject agent manifests whose identifiers, engine version, terminal launch, or MCP process inputs cannot satisfy their runtime contract.
+- Reject session, environment, and MCP manifest values that cannot cross the operating-system process boundary.
+- Reject agent manifests with terminal-active display names or command arguments the operating system cannot start.
+- Make agent-rule diagnostics terminal-safe and reject manifests whose engine version is too old for their launch or credential declarations.
+
 ## 0.3.40
 
 - When the terminal holder cannot start an agent (so the node runs it itself and it will not outlive the node), `run/hold.log` now

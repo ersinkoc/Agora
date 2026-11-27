@@ -1,1 +1,0 @@
-- Reject agent manifests whose identifiers, engine version, terminal launch, or MCP process inputs cannot satisfy their runtime contract.

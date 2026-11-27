@@ -1,1 +1,0 @@
-- Reject session, environment, and MCP manifest values that cannot cross the operating-system process boundary.

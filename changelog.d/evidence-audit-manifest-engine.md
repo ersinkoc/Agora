@@ -1,1 +1,0 @@
-- Make agent-rule diagnostics terminal-safe and reject manifests whose engine version is too old for their launch or credential declarations.

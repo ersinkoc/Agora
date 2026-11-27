@@ -1,1 +1,0 @@
-- Reject agent manifests with terminal-active display names or command arguments the operating system cannot start.

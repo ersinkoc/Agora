@@ -1,1 +1,0 @@
-- On macOS, Claude Code installed with npm is recognised when you start it by hand in a Shell (macOS names its process `claude.exe`) (ADR-0094)

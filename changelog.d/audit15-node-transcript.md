@@ -1,1 +1,0 @@
-- A chat transcript kept under a very small `chat.history_max_bytes` limit (under about 160 bytes) now stays within that limit when its oldest entries are dropped. (ADR-0089)

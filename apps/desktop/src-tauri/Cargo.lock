@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agora-desktop"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "agora-desktop-tunnel",
  "agora-i18n",
@@ -23,7 +23,7 @@ dependencies = [
 
 [[package]]
 name = "agora-desktop-tunnel"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "agora-platform",
  "ring",
@@ -34,11 +34,11 @@ dependencies = [
 
 [[package]]
 name = "agora-i18n"
-version = "0.3.40"
+version = "0.3.41"
 
 [[package]]
 name = "agora-platform"
-version = "0.3.40"
+version = "0.3.41"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
