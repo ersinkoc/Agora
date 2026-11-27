@@ -8,6 +8,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **`agora node trust --from-hub` outside a terminal** (the maintainer, 2026-11-27, through Claude Code's `!`): it lists the devices and
+  their fingerprints, then stops with "not an interactive terminal". Print the ready command for the listed devices
+  (`--yes --fingerprint A --fingerprint B`) under the list, so the person compares and runs it in one step.
 - **A CSP error in the window's console on every load** (seen by the maintainer, 2026-11-27): `long.js` (bundled through protobufjs) tries a
   tiny WebAssembly module for 64-bit multiplication, the hub's page policy refuses it (no `'wasm-unsafe-eval'`, on purpose), and the
   library falls back to plain JavaScript. Harmless, but noisy: take the probe out of the bundle (a `long` build without it, or an alias),
