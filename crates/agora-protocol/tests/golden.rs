@@ -165,3 +165,26 @@ fn no_orphan_fixtures() {
         );
     }
 }
+
+#[test]
+fn node_startup_with_retained_agent_run_matches_fixture() {
+    let fixture = dir().join("../retained-agent-run/agora.v1.Event.retained-agent-run");
+    let json =
+        std::fs::read_to_string(fixture.with_extension("retained-agent-run.json")).expect("JSON");
+    let desc = pool().get_message_by_name("agora.v1.Event").expect("Event");
+    let mut de = serde_json::Deserializer::from_str(&json);
+    let bytes = DynamicMessage::deserialize(desc, &mut de)
+        .expect("retained run fixture")
+        .encode_to_vec();
+    let bin = fixture.with_extension("retained-agent-run.bin");
+    if std::env::var_os("AGORA_WRITE_FIXTURES").is_some() && !bin.exists() {
+        std::fs::write(&bin, &bytes).expect("new fixture");
+    }
+    assert_eq!(std::fs::read(bin).expect("binary fixture"), bytes);
+    let event = agora_protocol::v1::Event::decode(bytes.as_slice()).expect("typed event");
+    assert_eq!(event.encode_to_vec(), bytes);
+    assert!(
+        matches!(event.body, Some(agora_protocol::v1::event::Body::NodeOnline(online))
+        if online.retained_agent_runs.len() == 1 && online.retained_agent_runs[0].run_id.len() == 16)
+    );
+}

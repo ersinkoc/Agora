@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
-use agora_core::{AgentId, LeaseTable};
+use agora_core::{AgentId, LeaseTable, TaskId};
 use agora_mesh::broker::{AgentInfo, Limits, Mesh};
 use agora_mesh::mcp::{
     board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
@@ -408,31 +408,80 @@ impl Boards {
         mesh.take_events()
     }
 
-    /// A node's process started again: every agent it had is gone, even if a new one will carry the same local id (`agent-1`). Gives
-    /// their tasks and leases back now, in every board in memory, and returns each project with the events that produced.
-    pub fn node_restarted(&self, node: &str, now_ms: u64) -> Vec<(String, Vec<Body>)> {
+    /// A board restored later may still name agents from before this startup.
+    pub(crate) fn note_restart(&self, node: &str) {
         self.restarted
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(node.to_string());
-        let prefix = format!("{node}/");
+    }
+
+    pub(crate) fn loaded_projects(&self) -> Vec<String> {
+        self.by_project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn has_events(&self, project: &str) -> bool {
+        self.by_project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project)
+            .is_some_and(Mesh::has_events)
+    }
+
+    pub(crate) fn defer_events(&self, project: &str, events: Vec<Body>) {
         let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
-        let mut out = Vec::new();
-        for (project, mesh) in g.iter_mut() {
-            let gone: Vec<AgentId> = mesh
+        if let Some(mesh) = g.get_mut(project) {
+            mesh.defer_events(events);
+        }
+    }
+
+    /// Refresh continuity holds before releasing claims and leases on startup.
+    pub(crate) fn reconcile_runs(
+        &self,
+        project: &str,
+        retained: BTreeMap<TaskId, AgentId>,
+        lost: &[(String, AgentId)],
+        restarted: impl IntoIterator<Item = impl AsRef<str>>,
+        now_ms: u64,
+    ) -> Vec<Body> {
+        let mut g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = g.get_mut(project) else {
+            return Vec::new();
+        };
+        mesh.retain_claims(retained);
+        for (task, receiver) in lost {
+            mesh.task_release(receiver, task);
+        }
+        for node in restarted {
+            let prefix = format!("{}/", node.as_ref());
+            let agents: BTreeSet<AgentId> = mesh
                 .agent_ids()
                 .into_iter()
+                .chain(mesh.claim_owners().cloned())
                 .filter(|id| id.as_str().starts_with(&prefix))
                 .collect();
-            for id in &gone {
-                mesh.unregister(id, now_ms);
-            }
-            let events = mesh.take_events();
-            if !gone.is_empty() || !events.is_empty() {
-                out.push((project.clone(), events));
+            for id in agents {
+                mesh.unregister(&id, now_ms);
             }
         }
-        out
+        mesh.take_events()
+    }
+
+    #[cfg(test)]
+    fn node_restarted(&self, node: &str, now_ms: u64) -> Vec<(String, Vec<Body>)> {
+        self.note_restart(node);
+        self.loaded_projects()
+            .into_iter()
+            .filter_map(|project| {
+                let events = self.reconcile_runs(&project, BTreeMap::new(), &[], [node], now_ms);
+                (!events.is_empty()).then_some((project, events))
+            })
+            .collect()
     }
 
     /// True while the project's board has a task that is not done or a lease that has not ended.
@@ -459,8 +508,18 @@ impl Boards {
             .contains_key(project)
     }
 
-    /// The project's tasks as stored text (ADR-0039: the board is part of the hub's SQLite file and its backup).
+    /// Captures a board without a log position, for import into another hub.
     pub fn snapshot(&self, project: &str, now_ms: u64) -> Option<Vec<u8>> {
+        self.snapshot_through(project, now_ms, 0)
+    }
+
+    /// The project's tasks as stored text (ADR-0039: the board is part of the hub's SQLite file and its backup).
+    pub(crate) fn snapshot_through(
+        &self,
+        project: &str,
+        now_ms: u64,
+        through: u64,
+    ) -> Option<Vec<u8>> {
         use agora_mesh::broker::TaskStatus;
         let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
         let mesh = g.get(project)?;
@@ -484,14 +543,14 @@ impl Boards {
             })
             .collect();
         Some(
-            json!({"next": next, "tasks": tasks, "leases": leases})
+            json!({"next": next, "tasks": tasks, "leases": leases, "through": through})
                 .to_string()
                 .into_bytes(),
         )
     }
 
-    /// ADR-0115: one [`snapshot`](Self::snapshot) text from several of one project's boards (an older hub kept one per spelling of a
-    /// GitHub, GitLab, Bitbucket or Codeberg path), to [`load`](Self::load) as that project's board. The first is taken as it is; a
+    /// ADR-0115: one stored board from several of one project's boards (an older hub kept one per spelling of a
+    /// GitHub, GitLab, Bitbucket or Codeberg path), to load as that project's board. The first is taken as it is; a
     /// task of a later one whose id is already taken gets a new one above every id of all of them (its own `depends_on` follows, and
     /// its owner is told, as `task_moved` after a join, unless the task is done), and where several boards' live leases hold one
     /// path, or paths one of which is inside the other (`src` and `src/a.rs`), one holder keeps it, the others' leases are passed on
@@ -672,8 +731,9 @@ impl Boards {
                 json!({"board": "lease_conflict", "path": path, "other": holder}),
             ));
         }
+        let through = boards.first().and_then(|b| b["through"].as_u64());
         Merged {
-            bytes: json!({"next": next, "tasks": tasks, "leases": leases})
+            bytes: json!({"next": next, "tasks": tasks, "leases": leases, "through": through})
                 .to_string()
                 .into_bytes(),
             notices,
@@ -709,8 +769,20 @@ impl Boards {
             .collect()
     }
 
-    /// Restores a board from [`snapshot`](Self::snapshot) text. A damaged snapshot is ignored: the board starts empty.
-    pub fn load(&self, project: &str, bytes: &[u8], now_ms: u64) {
+    #[cfg(test)]
+    fn load(&self, project: &str, bytes: &[u8], now_ms: u64) {
+        self.load_retaining(project, bytes, now_ms, BTreeMap::new(), &BTreeMap::new());
+    }
+
+    /// Restores a stored board. A damaged snapshot is ignored.
+    pub(crate) fn load_retaining(
+        &self,
+        project: &str,
+        bytes: &[u8],
+        now_ms: u64,
+        retained: BTreeMap<TaskId, AgentId>,
+        node_starts: &BTreeMap<String, u64>,
+    ) {
         use agora_mesh::broker::{TaskEntry, TaskStatus};
         let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
             return;
@@ -902,6 +974,7 @@ impl Boards {
         let mesh = g
             .entry(project.to_string())
             .or_insert_with(|| Mesh::new(Limits::default()));
+        mesh.retain_claims(retained);
         mesh.import_tasks(next, &tasks);
         let (leases, ended): (Vec<(String, AgentId, u64)>, Vec<_>) = restored_leases
             .into_iter()
@@ -930,8 +1003,9 @@ impl Boards {
         // Those leases were granted before the hub stopped: not news. A board is loaded once, before any call, so nothing else waits.
         let _ = mesh.take_events();
         mesh.import_leases(project, &ended, now_ms);
-        // A node that started again since this hub opened lost every agent it had when the board was saved: its claims and leases
-        // go back now, or a new agent with a reused id (`agent-1`) would inherit them.
+        // Apply any startup the snapshot predates, including events the hub saved before a crash.
+        // For snapshots written by an older hub, use the restarts this hub saw while the board was unloaded.
+        let through = v["through"].as_u64().filter(|pos| *pos != 0);
         let dead: BTreeSet<AgentId> = tasks
             .iter()
             .filter_map(|t| t.owner.clone())
@@ -939,7 +1013,10 @@ impl Boards {
             .filter(|id| {
                 id.as_str()
                     .split_once('/')
-                    .is_some_and(|(node, _)| restarted.contains(node))
+                    .is_some_and(|(node, _)| match through {
+                        Some(pos) => node_starts.get(node).is_some_and(|start| *start > pos),
+                        None => restarted.contains(node),
+                    })
             })
             .collect();
         for id in &dead {
@@ -1748,6 +1825,8 @@ mod tests {
                     launch_settings: Vec::new(),
                     run_id: None,
                     started_seq: 0,
+                    run_since: 0,
+                    awaiting_restart_start: false,
                     node_id: (*n).into(),
                     project_id: "p".into(),
                     worktree_id: String::new(),

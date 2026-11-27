@@ -1944,8 +1944,20 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
 /// ADR-0109 over the real hub uplink and the node's MCP and durable inbox paths.
 #[test]
 fn two_fake_agents_on_different_nodes_use_the_durable_handoff() {
-    use agora_node::supervisor::StartRequest;
+    durable_handoff_over_uplink(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pending_handoff_reaches_the_same_agent_after_its_node_reattaches_to_the_holder() {
+    durable_handoff_over_uplink(true);
+}
+
+fn durable_handoff_over_uplink(reattach: bool) {
+    use agora_node::control::Client;
+    use agora_node::holder::HolderSetup;
     use agora_node::uplink_client::MeshOut;
+    use agora_protocol::v1::{self, command_ok, command_request};
     use serde_json::{json, Value};
     if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
         return;
@@ -1960,15 +1972,61 @@ fn two_fake_agents_on_different_nodes_use_the_durable_handoff() {
             .unwrap()
             .success()
     );
+    let suffix = if reattach { "-held" } else { "" };
     let hub = hubside("durable-giver");
     let addr = hub.listen("127.0.0.1:0");
     let project = agora_core::ProjectId::portable("06ab78a2-d589-4494-8a79-4d505677ef3b").unwrap();
-    let start = |name: &str| {
-        let dir = tmp(name);
+    // Only a holder whose pid and start time still match this test's role file is stopped.
+    struct HolderCleanup(PathBuf);
+    impl Drop for HolderCleanup {
+        fn drop(&mut self) {
+            if let Ok(pid_file) = std::fs::read_to_string(self.0.join("run/hold.pid")) {
+                let mut fields = pid_file.split_whitespace();
+                let pid = fields.next().and_then(|s| s.parse::<u32>().ok());
+                let started = fields.next().and_then(|s| s.parse::<u64>().ok());
+                if let (Some(pid), Some(started)) = (pid, started) {
+                    if agora_platform::process_start_time(pid) == Some(started) {
+                        let _ = agora_platform::terminate_process(pid);
+                    }
+                }
+            }
+        }
+    }
+    let receiver_home = tmp(&format!("durable-receiver{suffix}"));
+    let _cleanup = HolderCleanup(receiver_home.clone());
+    let held = reattach.then(|| {
+        let run = receiver_home.join("run");
+        agora_platform::ensure_private_dir(&run).unwrap();
+        let pid = std::process::id();
+        let started = agora_platform::process_start_time(pid).unwrap();
+        std::fs::write(run.join("node.lock"), format!("{pid} {started} test\n")).unwrap();
+        HolderSetup {
+            home: receiver_home.clone(),
+            exe: env!("CARGO_BIN_EXE_agora").into(),
+        }
+    });
+    let connect = |node: &agora_node::daemon::Node,
+                   cfg: &agora_node::daemon::NodeConfig,
+                   cert: &(String, String)| {
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = cert.clone();
+        link.commands = Some(cfg.socket.clone());
+        link.mesh = Some(Arc::clone(&node.mesh));
+        link.mesh_out = Some(out);
+        spawn(Arc::clone(&node.events), link).unwrap()
+    };
+    let start = |name: &str, dir: PathBuf, setup: Option<HolderSetup>| {
         let manifests = dir.join("manifests");
         let folder = dir.join("repo");
         std::fs::create_dir_all(&manifests).unwrap();
         std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join(agora_node::directory::METADATA),
+            r#"{"project_id":"06ab78a2-d589-4494-8a79-4d505677ef3b"}"#,
+        )
+        .unwrap();
         std::fs::write(
             manifests.join("ad.toml"),
             format!(
@@ -1993,34 +2051,25 @@ command = [{:?}, "--adapter"]
             projects: vec![],
             limits: Default::default(),
         };
-        let node = agora_node::daemon::Node::start(&cfg).unwrap();
-        let out = MeshOut::new();
-        node.mesh.set_remote(out.clone());
-        let mut link = hub.link(addr);
-        (link.cert_pem, link.key_pem) = hub.enroll(name);
-        link.commands = Some(cfg.socket);
-        link.mesh = Some(Arc::clone(&node.mesh));
-        link.mesh_out = Some(out);
-        let uplink = spawn(Arc::clone(&node.events), link).unwrap();
+        let node = agora_node::daemon::Node::start_with_holder(&cfg, setup).unwrap();
+        let cert = hub.enroll(name);
+        let uplink = connect(&node, &cfg, &cert);
         node.events
             .checkout_discovered(name, &project.to_string(), &folder);
-        let id = node
-            .supervisor
-            .lock()
+        let launched = Client::connect(&cfg.socket)
             .unwrap()
-            .start_in_directory(
-                &StartRequest {
-                    kind: "adapted".into(),
-                    checkout: folder,
-                    name: "handoff".into(),
-                    worktree_root: cfg.worktree_root,
-                    base: None,
-                },
-                project.clone(),
-                std::time::Instant::now(),
-            )
+            .call(command_request::Command::AgentLaunch(v1::AgentLaunch {
+                path: folder.to_string_lossy().into_owned(),
+                project_id: project.to_string(),
+                kind: "adapted".into(),
+                ..Default::default()
+            }))
+            .unwrap()
             .unwrap();
-        node.events.announce();
+        let Some(command_ok::Result::AgentLaunch(launched)) = launched.result else {
+            panic!("agent launch must return its ID");
+        };
+        let id = AgentId::new(launched.agent_id);
         let mut conn = agora_platform::local_connect(&node.mesh.socket_path(&id)).unwrap();
         mcp(
             &mut conn,
@@ -2028,10 +2077,16 @@ command = [{:?}, "--adapter"]
             "initialize",
             json!({"protocolVersion": "2025-03-26"}),
         );
-        (node, uplink, id, conn, cfg.data_dir)
+        (node, uplink, id, conn, cfg, cert)
     };
-    let (_giver, _giver_link, giver_id, mut from, _) = start("durable-giver");
-    let (_receiver, _receiver_link, receiver_id, mut to, receiver_data) = start("durable-receiver");
+    let (_giver, _giver_link, giver_id, mut from, _, _) = start(
+        "durable-giver",
+        tmp(&format!("durable-giver{suffix}")),
+        None,
+    );
+    let (mut receiver_node, mut receiver_link, receiver_id, mut to, cfg, cert) =
+        start("durable-receiver", receiver_home, held.clone());
+    let receiver_data = &cfg.data_dir;
     let receiver = format!("durable-receiver/{}", receiver_id.as_str());
     wait("both agents on the shared board", || {
         let view = hub.state.hub.view().0;
@@ -2050,11 +2105,92 @@ command = [{:?}, "--adapter"]
         .unwrap()
         .to_string();
     call(&mut from, "task_claim", json!({"task_id":id}));
+    // Park the receiver's route so the transfer is durably queued before its actual node can
+    // receive a command. An authenticated uplink takes over the route after the holder is adopted.
+    let parked = if reattach {
+        assert!(receiver_node
+            .supervisor
+            .lock()
+            .unwrap()
+            .held_agents()
+            .0
+            .contains(&receiver_id));
+        wait("the kept adapter's session in the ledger", || {
+            receiver_node
+                .ledger
+                .get(receiver_id.as_str())
+                .is_some_and(|e| {
+                    e.holder_pid != 0
+                        && !e.adapter_session.is_empty()
+                        && !e.adapter_capabilities.is_empty()
+                })
+        });
+        let caps = vec![agora_protocol::handshake::TASK_HANDOFF_V1.into()];
+        Some(
+            hub.state
+                .hub
+                .node_link_opened("durable-receiver", caps, server::now_ms())
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     call(
         &mut from,
         "handoff",
         json!({"task_id":id, "to":receiver, "summary":"port the parser"}),
     );
+    if let Some(parked) = parked {
+        assert_eq!(
+            hub.state.hub.view().0.tasks[&format!("{project}/{id}")].owner,
+            receiver
+        );
+        let run = receiver_node
+            .supervisor
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|a| a.id == receiver_id)
+            .unwrap()
+            .run_id
+            .unwrap();
+        drop(to);
+        drop(receiver_link);
+        // In this test the process outlives its first node, so close the old socket explicitly.
+        receiver_node.mesh.unregister(&receiver_id);
+        drop(receiver_node);
+        drop(parked);
+        receiver_node = agora_node::daemon::Node::start_with_holder(&cfg, held).unwrap();
+        let startup = receiver_node
+            .events
+            .events_after(0)
+            .into_iter()
+            .rev()
+            .find_map(|ev| match ev.body {
+                Some(v1::event::Body::NodeOnline(start)) => Some(start),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            startup
+                .retained_agent_runs
+                .iter()
+                .any(|a| a.agent_id == receiver_id.as_str() && a.run_id == run),
+            "the new NodeOnline must name the exact run that the holder kept"
+        );
+        assert!(receiver_node.mesh.is_registered(&receiver_id));
+        receiver_link = connect(&receiver_node, &cfg, &cert);
+        let socket = receiver_node.mesh.socket_path(&receiver_id);
+        wait("the recovered agent's mesh endpoint", || socket.exists());
+        to = agora_platform::local_connect(&socket).unwrap();
+        mcp(
+            &mut to,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26"}),
+        );
+    }
     wait("the receiver durably stored the handoff", || {
         std::fs::read_dir(receiver_data.join("handoffs"))
             .unwrap()
@@ -2080,6 +2216,7 @@ command = [{:?}, "--adapter"]
                 && delivery.task_id == id && delivery.receiver_agent_id == receiver)
         },
     );
+    drop((receiver_link, receiver_node));
 }
 
 /// ADR-0112: three machines with different projects on a real hub. An agent on a solo hub sees every machine that agreed on the view

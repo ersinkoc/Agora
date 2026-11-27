@@ -1662,18 +1662,11 @@ where
         return Ok(());
     }
     // ADR-0115: a window gets an older node's project id folded, as the snapshot has it.
-    let folded = crate::projection::fold_event(&d.event);
-    let event = folded.as_ref().unwrap_or(&d.event);
-    match (owner, crate::scope::without_full_binary(event)) {
-        (false, Some(event)) => {
-            send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
-        }
-        _ => match folded {
-            Some(event) => {
-                send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await
-            }
-            None => send_positioned(conn, d).await,
-        },
+    let shown = crate::scope::redact_startup(&d.event, owner)
+        .or_else(|| crate::projection::fold_event(&d.event));
+    match shown {
+        Some(event) => send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await,
+        None => send_positioned(conn, d).await,
     }
 }
 

@@ -29,18 +29,22 @@ pub fn short_binary(path: &str) -> String {
         .to_string()
 }
 
-/// [`short_binary`] applied to one event, when it carries a machine's executable; `None` when there is nothing to shorten.
-pub fn without_full_binary(ev: &Event) -> Option<Event> {
-    match &ev.body {
-        Some(Body::NodeOnline(n)) if !n.binary.is_empty() => {
-            let mut ev = ev.clone();
-            if let Some(Body::NodeOnline(n)) = &mut ev.body {
-                n.binary = short_binary(&n.binary);
-            }
-            Some(ev)
-        }
-        _ => None,
+/// Redacts node startup facts before sending them to a window. ADR-0124 evidence is hub-only.
+pub fn redact_startup(ev: &Event, owner: bool) -> Option<Event> {
+    let Some(Body::NodeOnline(start)) = &ev.body else {
+        return None;
+    };
+    if start.retained_agent_runs.is_empty() && (owner || start.binary.is_empty()) {
+        return None;
     }
+    let mut shown = ev.clone();
+    if let Some(Body::NodeOnline(start)) = &mut shown.body {
+        start.retained_agent_runs.clear();
+        if !owner {
+            start.binary = short_binary(&start.binary);
+        }
+    }
+    Some(shown)
 }
 
 /// A project's hub-wide key on a machine (`node/project`), its id folded (ADR-0115): an older node's spelling of a repository on a
@@ -548,9 +552,29 @@ mod tests {
             })),
             ..Default::default()
         };
-        let shown = super::without_full_binary(&ev("/home/eda/bin/agora")).unwrap();
+        let shown = super::redact_startup(&ev("/home/eda/bin/agora"), false).unwrap();
         assert!(matches!(shown.body, Some(Body::NodeOnline(n)) if n.binary == "agora"));
-        assert!(super::without_full_binary(&ev("")).is_none());
+        assert!(super::redact_startup(&ev(""), false).is_none());
+    }
+
+    #[test]
+    fn retained_runs_are_hidden_from_every_window() {
+        let event = ev(
+            "n1",
+            Body::NodeOnline(v1::NodeOnline {
+                binary: "/home/eda/bin/agora".into(),
+                retained_agent_runs: vec![v1::RetainedAgentRun {
+                    agent_id: "private".into(),
+                    run_id: vec![3; 16],
+                }],
+                ..Default::default()
+            }),
+        );
+        for (owner, expected_binary) in [(true, "/home/eda/bin/agora"), (false, "agora")] {
+            let shown = redact_startup(&event, owner).unwrap();
+            assert!(matches!(shown.body, Some(Body::NodeOnline(n))
+                if n.retained_agent_runs.is_empty() && n.binary == expected_binary));
+        }
     }
 
     use super::*;
@@ -1084,6 +1108,7 @@ mod tests {
                     os: "o".into(),
                     build: "b".into(),
                     binary: String::new(),
+                    retained_agent_runs: Vec::new(),
                 }),
             ),
             ev(
@@ -1094,6 +1119,7 @@ mod tests {
                     os: "o".into(),
                     build: "b".into(),
                     binary: String::new(),
+                    retained_agent_runs: Vec::new(),
                 }),
             ),
         ]
@@ -1139,6 +1165,7 @@ mod tests {
                     os: "o".into(),
                     build: "b".into(),
                     binary: String::new(),
+                    retained_agent_runs: Vec::new(),
                 }),
             ),
         ] {

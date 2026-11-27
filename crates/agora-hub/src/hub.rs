@@ -34,6 +34,37 @@ const PAGE: usize = 1000;
 pub const MAX_REPLAY_EVENTS: u64 = 10_000;
 pub const MAX_REPLAY_BYTES: usize = 8 << 20;
 
+#[derive(Default)]
+struct BoardRuns {
+    retained: std::collections::BTreeMap<agora_core::TaskId, agora_core::AgentId>,
+    lost: Vec<(String, agora_core::AgentId)>,
+}
+
+impl BoardRuns {
+    fn for_project(g: &Inner, project: &str) -> Self {
+        let mut runs = Self::default();
+        for pending in g.handoffs.values().filter(|p| p.board_project == project) {
+            let id = &pending.delivery.task_id;
+            let Some(task) = g.view.tasks.get(&format!("{project}/{id}")) else {
+                continue;
+            };
+            if task.board_revision != Some(pending.task_revision) {
+                continue;
+            }
+            let receiver = agora_core::AgentId::new(pending.receiver());
+            if pending.receiver_run(&g.view).is_some_and(|agent| {
+                (agent.running || agent.awaiting_restart_start)
+                    && agent.run_since <= task.board_position
+            }) {
+                runs.retained.insert(agora_core::TaskId::new(id), receiver);
+            } else {
+                runs.lost.push((id.clone(), receiver));
+            }
+        }
+        runs
+    }
+}
+
 /// One event with its place in the global log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Delivered {
@@ -56,6 +87,8 @@ struct Inner {
     pos: u64,
     hub_seq: u64,
     handoffs: crate::handoff::Queue,
+    /// A board restart transaction that must be retried before another board operation.
+    board_restarts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     subs: Vec<SyncSender<Delivered>>,
     /// Subscribers let go because their queue was full (a slow window) or closed (`GET /api/metrics`).
     subs_dropped: u64,
@@ -254,6 +287,7 @@ impl Hub {
                 pos,
                 hub_seq,
                 handoffs,
+                board_restarts: Default::default(),
                 subs: Vec::new(),
                 subs_dropped: 0,
                 approval_wait: crate::metrics::Histogram::with_bounds(&crate::metrics::ANSWER_US),
@@ -499,9 +533,31 @@ impl Hub {
             crate::metrics::saturating_add(&self.metrics.events_ingested, 1);
             // The session already decoded it successfully, so this cannot fail; stay defensive anyway.
             if let Ok(event) = Event::decode(stored.as_deref().unwrap_or(payload)) {
-                let restarted = match &event.body {
-                    Some(Body::NodeOnline(n)) => Some((n.node_id.clone(), event.at_ms)),
-                    _ => None,
+                let at_ms = event.at_ms;
+                let (restarted, changed_agent) = match &event.body {
+                    Some(Body::NodeOnline(_)) => (Some(event.producer_id.clone()), None),
+                    Some(Body::AgentStarted(a)) => (
+                        None,
+                        Some(crate::projection::qualified(
+                            &event.producer_id,
+                            &a.agent_id,
+                        )),
+                    ),
+                    Some(Body::AgentExited(a)) => (
+                        None,
+                        Some(crate::projection::qualified(
+                            &event.producer_id,
+                            &a.agent_id,
+                        )),
+                    ),
+                    Some(Body::AgentInterrupted(a)) => (
+                        None,
+                        Some(crate::projection::qualified(
+                            &event.producer_id,
+                            &a.agent_id,
+                        )),
+                    ),
+                    _ => (None, None),
                 };
                 // Read before the event is folded in: whether an agent is new, and what a decision was about.
                 let audit = spawn_audit(&g.view, &event);
@@ -528,21 +584,99 @@ impl Hub {
                     let _ = crate::audit::Audit::new(self.store())
                         .record(at_ms, &who, &action, &node, &outcome);
                 }
-                // A node announces itself only when its process starts (a resync re-states it only for a start the hub missed,
-                // ADR-0055): the agents it had are gone, so their tasks and leases go back.
-                if let Some((node, at_ms)) = restarted {
-                    for (project, events) in self.boards.node_restarted(&node, at_ms) {
-                        if let Some(bytes) = self.boards.snapshot(&project, at_ms) {
-                            let _ = self.store.set_setting(&format!("board.{project}"), &bytes);
-                        }
-                        for body in events {
-                            let _ = self.emit(g, body, at_ms);
-                        }
+                if let Some(node) = restarted.as_deref() {
+                    self.boards.note_restart(node);
+                    for project in self.boards.loaded_projects() {
+                        g.board_restarts
+                            .entry(project.clone())
+                            .or_default()
+                            .insert(node.to_string());
+                        self.reconcile_after_agent_event(g, &project, at_ms);
+                    }
+                } else if let Some(agent) = changed_agent {
+                    let projects: std::collections::BTreeSet<_> = g
+                        .handoffs
+                        .values()
+                        .filter(|pending| {
+                            pending.receiver() == agent && self.boards.has(&pending.board_project)
+                        })
+                        .map(|pending| pending.board_project.clone())
+                        .collect();
+                    for project in projects {
+                        self.reconcile_after_agent_event(g, &project, at_ms);
                     }
                 }
             }
         }
         Ok(outcome)
+    }
+
+    fn reconcile_after_agent_event(&self, g: &mut Inner, project: &str, now_ms: u64) {
+        if let Err(error) =
+            self.reconcile_board_runs(g, project, &format!("board.{project}"), now_ms)
+        {
+            eprintln!("board restart reconciliation: {project}: {error}");
+        }
+    }
+
+    fn reconcile_board_runs(
+        &self,
+        g: &mut Inner,
+        project: &str,
+        key: &str,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let runs = BoardRuns::for_project(g, project);
+        let may_change = g.board_restarts.contains_key(project)
+            || !runs.lost.is_empty()
+            || self.boards.has_events(project);
+        let before = may_change.then(|| self.boards.checkpoint(project));
+        let events = self.board_run_changes(g, project, runs, now_ms);
+        if !events.is_empty() {
+            if let Err(error) = self.store_board(g, project, key, events, (&[], None), now_ms) {
+                if let Some(before) = before {
+                    self.boards.restore(project, before);
+                }
+                return Err(error);
+            }
+        }
+        g.board_restarts.remove(project);
+        Ok(())
+    }
+
+    fn board_run_changes(
+        &self,
+        g: &Inner,
+        project: &str,
+        runs: BoardRuns,
+        now_ms: u64,
+    ) -> Vec<Body> {
+        self.boards.reconcile_runs(
+            project,
+            runs.retained,
+            &runs.lost,
+            g.board_restarts.get(project).into_iter().flatten(),
+            now_ms,
+        )
+    }
+
+    // Join results and legacy reverts have already happened on the node. Keep accepting them in
+    // memory if the store refuses, and retry their events with the board on the next operation.
+    fn record_accepted_board_changes(
+        &self,
+        g: &mut Inner,
+        project: &str,
+        key: &str,
+        events: Vec<Body>,
+        now_ms: u64,
+    ) {
+        if !events.is_empty()
+            && self
+                .store_board(g, project, key, events.clone(), (&[], None), now_ms)
+                .is_err()
+        {
+            self.boards.defer_events(project, events);
+        }
     }
 
     /// ADR-0053: the hub stops listing a closed agent. `agent` is the hub-wide key. Refused while it runs; its earlier events stay in
@@ -869,33 +1003,26 @@ impl Hub {
     ) -> Vec<crate::board::Notice> {
         let mut g = self.lock();
         let (key, mut notices) = self.restore_board(&mut g, project, now_ms);
+        let mut changes =
+            self.board_run_changes(&g, project, BoardRuns::for_project(&g, project), now_ms);
+        g.board_restarts.remove(project);
         let (events, joined) = self.boards.joined(&g.view, node, project, work, now_ms);
+        changes.extend(events);
+        self.record_accepted_board_changes(&mut g, project, &key, changes, now_ms);
         notices.extend(joined);
-        if !events.is_empty() {
-            if let Some(bytes) = self.boards.snapshot(project, now_ms) {
-                let _ = self.store.set_setting(&key, &bytes);
-            }
-        }
-        for body in events {
-            let _ = self.emit(&mut g, body, now_ms);
-        }
         notices
     }
 
     /// A handoff could not be delivered after the board accepted it: give the task back to the giver.
     pub fn board_revert(&self, h: &crate::board::Handoff, now_ms: u64) {
         let mut g = self.lock();
-        let events = self.boards.revert_handoff(h);
-        if !events.is_empty() {
-            if let Some(bytes) = self.boards.snapshot(&h.project_id, now_ms) {
-                let _ = self
-                    .store
-                    .set_setting(&format!("board.{}", h.project_id), &bytes);
-            }
-        }
-        for body in events {
-            let _ = self.emit(&mut g, body, now_ms);
-        }
+        let project = &h.project_id;
+        let key = format!("board.{project}");
+        let mut changes =
+            self.board_run_changes(&g, project, BoardRuns::for_project(&g, project), now_ms);
+        g.board_restarts.remove(project);
+        changes.extend(self.boards.revert_handoff(h));
+        self.record_accepted_board_changes(&mut g, project, &key, changes, now_ms);
     }
 
     /// A board tool call from `node` (ADR-0039). The caller's identity is the connection's, never the call's. Events the
@@ -930,6 +1057,14 @@ impl Hub {
         let project = agora_core::fold_project_id(&call.project_id);
         let project = project.as_ref();
         let (key, notices) = self.restore_board(&mut g, project, now_ms);
+        if self
+            .reconcile_board_runs(&mut g, project, &key, now_ms)
+            .is_err()
+        {
+            let mut answer = refused();
+            answer.notices = notices;
+            return answer;
+        }
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
         // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
         // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
@@ -1071,6 +1206,7 @@ impl Hub {
             giver_run,
             giver_started_seq,
             attempted: false,
+            acknowledged_while_reattaching: false,
         };
         crate::handoff::reserve(&g.handoffs, &pending)?;
         Ok(Some(pending))
@@ -1100,6 +1236,8 @@ impl Hub {
 
     fn handoff_can_send(view: &View, pending: &crate::handoff::Pending, now_ms: u64) -> bool {
         pending.delivery.valid_until_ms > now_ms
+            && !pending.acknowledged_while_reattaching
+            && !pending.awaiting_restart_start(view)
             && view
                 .handoff_deliveries
                 .get(&pending.id())
@@ -1121,12 +1259,28 @@ impl Hub {
         settling: impl Fn(&[u8]) -> bool,
     ) -> Result<(), StoreError> {
         let mut g = self.lock();
+        // An owner can acknowledge in the reannouncement gap. The queue entry still protects the
+        // claim until the node confirms the run or its loss, even if the status has been evicted.
+        let acknowledged: Vec<_> = g
+            .handoffs
+            .values()
+            .filter(|p| p.acknowledged_while_reattaching && !p.awaiting_restart_start(&g.view))
+            .cloned()
+            .collect();
+        for pending in acknowledged {
+            let board_key = self.reconcile_handoff_board(&mut g, &pending, now_ms)?;
+            self.store_handoff_result(&mut g, &pending, board_key.as_deref(), Vec::new(), now_ms)?;
+            g.handoffs.remove(&pending.delivery.delivery_id);
+        }
         let events: Vec<_> = g
             .handoffs
             .values()
             .filter_map(|pending| {
                 let deadline = pending.delivery.valid_until_ms;
-                if !initialize && (deadline > now_ms || settling(&pending.delivery.delivery_id)) {
+                if pending.acknowledged_while_reattaching
+                    || (!initialize
+                        && (deadline > now_ms || settling(&pending.delivery.delivery_id)))
+                {
                     return None;
                 }
                 let existing = g.view.handoff_deliveries.get(&pending.id());
@@ -1185,18 +1339,33 @@ impl Hub {
             delivery_id.push(u8::from_str_radix(text, 16).map_err(|_| invalid())?);
         }
         let internal = || Error::new(ErrorCode::Internal).with("incident_id", "board.handoff");
-        let pending = g.handoffs.get(&delivery_id).ok_or_else(invalid)?;
+        let mut pending = g.handoffs.get(&delivery_id).cloned().ok_or_else(invalid)?;
         let key = pending.key();
         self.write_unrecorded(&mut g).map_err(|_| internal())?;
-        self.store_hub_events(
-            &mut g,
-            vec![Body::TaskHandoffDeliveryChanged(updated)],
-            &[],
-            Some(&key),
-            now_ms,
-        )
-        .map_err(|_| internal())?;
-        g.handoffs.remove(&delivery_id);
+        let deferred = pending.awaiting_restart_start(&g.view);
+        let events = vec![Body::TaskHandoffDeliveryChanged(updated)];
+        if deferred {
+            pending.acknowledged_while_reattaching = true;
+            self.store_hub_events(
+                &mut g,
+                events,
+                &[(key.as_str(), &pending.encode_to_vec())],
+                None,
+                now_ms,
+            )
+            .map_err(|_| internal())?;
+        } else {
+            let board_key = self
+                .reconcile_handoff_board(&mut g, &pending, now_ms)
+                .map_err(|_| internal())?;
+            self.store_handoff_result(&mut g, &pending, board_key.as_deref(), events, now_ms)
+                .map_err(|_| internal())?;
+        }
+        if deferred {
+            g.handoffs.insert(delivery_id, pending);
+        } else {
+            g.handoffs.remove(&delivery_id);
+        }
         Ok(())
     }
 
@@ -1230,60 +1399,103 @@ impl Hub {
         pending: &crate::handoff::Pending,
         outcome: &crate::handoff::Attempt,
         now_ms: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         use crate::handoff::Attempt;
         let id = &pending.delivery.delivery_id;
         let mut g = self.lock();
-        if *outcome == Attempt::Retry || !g.handoffs.contains_key(id) {
-            return Ok(());
+        if *outcome == Attempt::Retry
+            || g.handoffs
+                .get(id)
+                .is_none_or(|p| p.acknowledged_while_reattaching)
+        {
+            return Ok(true);
+        }
+        if pending.awaiting_restart_start(&g.view) {
+            return Ok(false);
         }
         self.write_unrecorded(&mut g)?;
+        let board_key = self.reconcile_handoff_board(&mut g, pending, now_ms)?;
         let key = pending.key();
         let status = match outcome {
             Attempt::Delivered => pending.status(DeliveryState::Delivered, now_ms, ""),
             Attempt::Rejected(code) => pending.status(DeliveryState::Failed, now_ms, code.as_str()),
-            Attempt::Retry => return Ok(()),
+            Attempt::Retry => return Ok(true),
         };
-        if matches!(outcome, Attempt::Rejected(_)) {
+        if let (Attempt::Rejected(_), Some(board_key)) = (outcome, board_key.as_deref()) {
             let project = &pending.board_project;
-            let task = format!("{project}/{}", pending.delivery.task_id);
-            let still_current = |g: &Inner| {
-                g.view
-                    .tasks
-                    .get(&task)
-                    .is_some_and(|t| t.board_revision == Some(pending.task_revision))
-            };
-            if still_current(&g) {
-                let (board_key, notices) = self.restore_board(&mut g, project, now_ms);
-                // The board merge can restate the task. Do not undo it if it did.
-                for notice in &notices {
-                    crate::server::board_notice(self, notice);
+            let before = self.boards.checkpoint(project);
+            let mut events = self.boards.revert_tracked(pending, &g.view, now_ms);
+            if !events.is_empty() {
+                events.push(status);
+                if let Err(error) = self.store_board(
+                    &mut g,
+                    project,
+                    board_key,
+                    events,
+                    (&[], Some(&key)),
+                    now_ms,
+                ) {
+                    self.boards.restore(project, before);
+                    return Err(error);
                 }
-                if still_current(&g) {
-                    let before = self.boards.checkpoint(project);
-                    let mut events = self.boards.revert_tracked(pending, &g.view, now_ms);
-                    if !events.is_empty() {
-                        events.push(status);
-                        if let Err(error) = self.store_board(
-                            &mut g,
-                            project,
-                            &board_key,
-                            events,
-                            (&[], Some(&key)),
-                            now_ms,
-                        ) {
-                            self.boards.restore(project, before);
-                            return Err(error);
-                        }
-                        g.handoffs.remove(id);
-                        return Ok(());
-                    }
-                }
+                g.handoffs.remove(id);
+                return Ok(true);
             }
         }
-        self.store_hub_events(&mut g, vec![status], &[], Some(&key), now_ms)?;
+        self.store_handoff_result(&mut g, pending, board_key.as_deref(), vec![status], now_ms)?;
         g.handoffs.remove(id);
-        Ok(())
+        Ok(true)
+    }
+
+    /// A removed reservation no longer protects a retained claim during replay. Store the board
+    /// through this startup together with the result, even if reconciliation produced no events.
+    fn store_handoff_result(
+        &self,
+        g: &mut Inner,
+        pending: &crate::handoff::Pending,
+        board_key: Option<&str>,
+        bodies: Vec<Body>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let key = pending.key();
+        match board_key {
+            Some(board_key) => self.store_board(
+                g,
+                &pending.board_project,
+                board_key,
+                bodies,
+                (&[], Some(&key)),
+                now_ms,
+            ),
+            None => self.store_hub_events(g, bodies, &[], Some(&key), now_ms),
+        }
+    }
+
+    // A receipt or acknowledgement can remove the only record that identifies the recipient run.
+    // Reconcile that claim while the record is still available, including when the board is unloaded.
+    fn reconcile_handoff_board(
+        &self,
+        g: &mut Inner,
+        pending: &crate::handoff::Pending,
+        now_ms: u64,
+    ) -> Result<Option<String>, StoreError> {
+        let project = &pending.board_project;
+        let task = format!("{project}/{}", pending.delivery.task_id);
+        let still_current = |g: &Inner| {
+            g.view
+                .tasks
+                .get(&task)
+                .is_some_and(|t| t.board_revision == Some(pending.task_revision))
+        };
+        if !still_current(g) {
+            return Ok(None);
+        }
+        let (key, notices) = self.restore_board(g, project, now_ms);
+        for notice in &notices {
+            crate::server::board_notice(self, notice);
+        }
+        self.reconcile_board_runs(g, project, &key, now_ms)?;
+        Ok((still_current(g) && self.boards.has(project)).then_some(key))
     }
 
     /// ADR-0112: `fleet_status`, answered for a solo hub, or a team hub whose owner turned it on; refused `board.not_allowed`
@@ -1355,20 +1567,40 @@ impl Hub {
                 merged.push(marker);
             }
         }
+        let runs = BoardRuns::for_project(g, project);
         match (parts.len(), merged.is_empty()) {
             (0, _) => {}
-            (1, true) => self.boards.load(project, &parts[0], now_ms),
+            (1, true) => self.boards.load_retaining(
+                project,
+                &parts[0],
+                now_ms,
+                runs.retained,
+                &g.view.node_starts,
+            ),
             _ => {
                 let m = self
                     .boards
                     .merge_snapshots(&parts, now_ms, |a| runs_in(&g.view, a, project));
                 let none = self.boards.checkpoint(project);
-                self.boards.load(project, &m.bytes, now_ms);
+                self.boards.load_retaining(
+                    project,
+                    &m.bytes,
+                    now_ms,
+                    runs.retained.clone(),
+                    &g.view.node_starts,
+                );
                 // #1150: the window learns what the merge changed (a task with a new id, and the one that kept the id it had), and
                 // the merged board is stored with its markers and those events in one transaction. A board stored without its
                 // markers would be merged again at the next start and its tasks added twice; so if the store refuses, the folded
                 // board is used alone, as it was stored, and the merge is tried again at the next start.
-                let changes = self.boards.task_changes(project, &m.restated);
+                let mut changes = self.boards.task_changes(project, &m.restated);
+                changes.extend(self.boards.reconcile_runs(
+                    project,
+                    runs.retained.clone(),
+                    &runs.lost,
+                    std::iter::empty::<&str>(),
+                    now_ms,
+                ));
                 // As after a join, only an agent running in the project is told (a node that started again lost its agents). One
                 // whose machine is not connected now (after a hub start, before it is back) is told when it connects: the markers
                 // are stored, so this merge will not run again to tell it, and its notices are stored with them (#1150).
@@ -1407,7 +1639,13 @@ impl Hub {
                 if !stored {
                     self.boards.restore(project, none);
                     if let Some(bytes) = own {
-                        self.boards.load(project, &bytes, now_ms);
+                        self.boards.load_retaining(
+                            project,
+                            &bytes,
+                            now_ms,
+                            runs.retained,
+                            &g.view.node_starts,
+                        );
                     }
                     return (key, Vec::new());
                 }
@@ -1428,9 +1666,10 @@ impl Hub {
         (settings, remove): (&[(String, Vec<u8>)], Option<&str>),
         now_ms: u64,
     ) -> Result<(), StoreError> {
+        self.write_unrecorded(g)?;
         let snapshot = self
             .boards
-            .snapshot(project, now_ms)
+            .snapshot_through(project, now_ms, g.pos)
             .ok_or_else(|| StoreError(format!("no board for {project}")))?;
         let all: Vec<(&str, &[u8])> = std::iter::once((key, snapshot.as_slice()))
             .chain(settings.iter().map(|(k, v)| (k.as_str(), v.as_slice())))
@@ -1783,6 +2022,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })),
         }
         .encode_to_vec()
@@ -2602,6 +2842,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })
         };
         // "up": its connection (generation 2) was open when the hub was killed; it was last heard at 500.
@@ -3511,6 +3752,293 @@ mod tests {
                 "to": "receiver/a", "task_id": id, "summary": "context", "refs": ["commit"]
             }),
         )
+    }
+
+    fn emit_node_event(hub: &Hub, node: &str, seq: u64, body: Body) {
+        let support = support();
+        let mut session = open_session(hub, &support, node);
+        hub.ingest(
+            &mut session,
+            &Event {
+                producer_id: node.into(),
+                seq,
+                at_ms: crate::server::now_ms(),
+                body: Some(body),
+            }
+            .encode_to_vec(),
+        )
+        .unwrap();
+    }
+
+    fn restart_receiver(hub: &Hub, evidence: &[u8]) {
+        use agora_protocol::v1::{CheckoutDiscovered, RetainedAgentRun};
+        for node in ["giver", "receiver"] {
+            emit_node_event(
+                hub,
+                node,
+                2,
+                Body::CheckoutDiscovered(CheckoutDiscovered {
+                    project_id: "p".into(),
+                    node_id: node.into(),
+                    checkout_id: "checkout".into(),
+                    ..Default::default()
+                }),
+            );
+        }
+        emit_node_event(
+            hub,
+            "receiver",
+            3,
+            Body::NodeOnline(NodeOnline {
+                node_id: "receiver".into(),
+                retained_agent_runs: evidence
+                    .iter()
+                    .map(|byte| RetainedAgentRun {
+                        agent_id: "a".into(),
+                        run_id: vec![*byte; 16],
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+        );
+    }
+
+    fn restart_receiver_agent(hub: &Hub, run: u8) {
+        let started = Event::decode(agent("receiver", 4, "a").as_slice()).unwrap();
+        let Some(Body::AgentStarted(mut a)) = started.body else {
+            panic!("expected start")
+        };
+        a.run_id = vec![run; 16];
+        a.same_process = run == 2;
+        emit_node_event(hub, "receiver", 4, Body::AgentStarted(a));
+    }
+
+    #[test]
+    fn handoff_claim_survives_holder_restart_and_lazy_board_restore() {
+        use agora_protocol::handshake::TASK_HANDOFF_V1;
+        let cap = vec![TASK_HANDOFF_V1.into()];
+        let (hub, path) = hub_on_file("handoff-holder-restart");
+        let (id, _links) = stage_handoff(&hub, cap.clone());
+        board_result(transfer(&hub, &id));
+        let ordinary = board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_create",
+            serde_json::json!({"title": "ordinary"}),
+        ));
+        let ordinary = ordinary["task_id"].as_str().unwrap();
+        board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_claim",
+            serde_json::json!({"task_id": ordinary}),
+        ));
+        restart_receiver(&hub, &[2]);
+        assert_eq!(hub.view().0.tasks[&format!("p/{id}")].owner, "receiver/a");
+        assert!(hub.view().0.tasks[&format!("p/{ordinary}")]
+            .owner
+            .is_empty());
+        assert!(hub
+            .pending_handoffs(crate::server::now_ms(), |_| true, 1)
+            .is_empty());
+        drop(hub);
+
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let _links: Vec<_> = ["giver", "receiver"]
+            .into_iter()
+            .map(|n| {
+                hub.board_join_settled(n, "p");
+                hub.node_link_opened(n, cap.clone(), 10).unwrap()
+            })
+            .collect();
+        assert!(!hub.boards.has("p"));
+        let rows = board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_list",
+            serde_json::json!({}),
+        ));
+        assert!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["task_id"] == id && t["owner"] == "receiver/a"),
+            "{rows}"
+        );
+        let refused = call_task_board(
+            &hub,
+            "giver",
+            "task_claim",
+            serde_json::json!({"task_id": id}),
+        );
+        assert!(matches!(
+            refused.verdict,
+            crate::board::Verdict::Done { is_error: true, .. }
+        ));
+        assert!(!hub.view().0.agents["receiver/a"].running);
+        restart_receiver_agent(&hub, 2);
+        let pending = hub
+            .pending_handoffs(crate::server::now_ms(), |_| true, 1)
+            .pop()
+            .unwrap();
+        assert!(hub
+            .settle_handoff(
+                &pending,
+                &crate::handoff::Attempt::Delivered,
+                crate::server::now_ms()
+            )
+            .unwrap());
+        assert_eq!(hub.view().0.tasks[&format!("p/{id}")].owner, "receiver/a");
+        drop(hub);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn a_delivered_handoff_keeps_its_claim_after_the_restart_is_replayed() {
+        use agora_protocol::handshake::TASK_HANDOFF_V1;
+        let cap = vec![TASK_HANDOFF_V1.into()];
+        let (hub, path) = hub_on_file("handoff-claim-after-delivery");
+        let (id, _links) = stage_handoff(&hub, cap.clone());
+        board_result(transfer(&hub, &id));
+        let now = crate::server::now_ms();
+        let pending = hub.pending_handoffs(now, |_| true, 1).pop().unwrap();
+        restart_receiver(&hub, &[2]);
+        assert!(!hub
+            .settle_handoff(&pending, &crate::handoff::Attempt::Delivered, now)
+            .unwrap());
+        restart_receiver_agent(&hub, 2);
+        assert!(hub
+            .settle_handoff(&pending, &crate::handoff::Attempt::Delivered, now)
+            .unwrap());
+        drop(hub);
+
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let _links: Vec<_> = ["giver", "receiver"]
+            .into_iter()
+            .map(|n| {
+                hub.board_join_settled(n, "p");
+                hub.node_link_opened(n, cap.clone(), 10).unwrap()
+            })
+            .collect();
+        let rows = board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_list",
+            serde_json::json!({}),
+        ));
+        assert_eq!(rows[0]["owner"], "receiver/a");
+        drop(hub);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn handoff_claim_opens_for_missing_or_ambiguous_evidence_and_replaced_runs() {
+        use agora_protocol::handshake::TASK_HANDOFF_V1;
+        for (evidence, new_run) in [(&[][..], 2), (&[2, 9][..], 2), (&[9][..], 2), (&[2][..], 9)] {
+            let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+            let (id, _links) = stage_handoff(&hub, vec![TASK_HANDOFF_V1.into()]);
+            board_result(transfer(&hub, &id));
+            restart_receiver(&hub, evidence);
+            restart_receiver_agent(&hub, new_run);
+            assert!(
+                hub.view().0.tasks[&format!("p/{id}")].owner.is_empty(),
+                "{evidence:?}/{new_run}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_receipt_retries_failed_restart_cleanup_before_removing_its_run() {
+        use agora_protocol::handshake::TASK_HANDOFF_V1;
+        for reopen in [false, true] {
+            let (hub, path) = hub_on_file(if reopen {
+                "handoff-restart-crash"
+            } else {
+                "handoff-restart-cleanup-failed"
+            });
+            let (id, _links) = stage_handoff(&hub, vec![TASK_HANDOFF_V1.into()]);
+            board_result(transfer(&hub, &id));
+            let ordinary = board_result(call_task_board(
+                &hub,
+                "receiver",
+                "task_create",
+                serde_json::json!({"title": "ordinary"}),
+            ));
+            let ordinary = ordinary["task_id"].as_str().unwrap();
+            board_result(call_task_board(
+                &hub,
+                "receiver",
+                "task_claim",
+                serde_json::json!({"task_id": ordinary}),
+            ));
+            let now = crate::server::now_ms();
+            let pending = hub.pending_handoffs(now, |_| true, 1).pop().unwrap();
+            let other = rusqlite::Connection::open(&path).unwrap();
+            other
+                .execute_batch(
+                    "CREATE TRIGGER fail_board BEFORE INSERT ON settings WHEN NEW.key = 'board.p'
+            BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+                )
+                .unwrap();
+            restart_receiver(&hub, &[]);
+            restart_receiver_agent(&hub, 9);
+            assert_eq!(hub.view().0.tasks[&format!("p/{id}")].owner, "receiver/a");
+            assert!(hub
+                .settle_handoff(&pending, &crate::handoff::Attempt::Delivered, now)
+                .is_err());
+            assert!(hub.store().setting(&pending.key()).unwrap().is_some());
+            let hub = if reopen {
+                drop(hub);
+                Hub::open(SqliteStore::open(&path).unwrap()).unwrap()
+            } else {
+                hub
+            };
+            other.execute_batch("DROP TRIGGER fail_board;").unwrap();
+            assert!(hub
+                .settle_handoff(&pending, &crate::handoff::Attempt::Delivered, now)
+                .unwrap());
+            for task in [&id, ordinary] {
+                assert!(hub.view().0.tasks[&format!("p/{task}")].owner.is_empty());
+            }
+            assert!(hub.store().setting(&pending.key()).unwrap().is_none());
+            drop(other);
+            drop(hub);
+            remove_db(&path);
+        }
+    }
+
+    #[test]
+    fn acknowledging_expiry_during_reattachment_leaves_the_claim_in_place() {
+        use agora_protocol::handshake::TASK_HANDOFF_V1;
+        let hub = Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap();
+        let (id, _links) = stage_handoff(&hub, vec![TASK_HANDOFF_V1.into()]);
+        board_result(transfer(&hub, &id));
+        let pending = hub
+            .pending_handoffs(crate::server::now_ms(), |_| true, 1)
+            .pop()
+            .unwrap();
+        restart_receiver(&hub, &[2]);
+        let now = pending.delivery.valid_until_ms;
+        hub.expire_handoffs(now, |_| false).unwrap();
+        hub.acknowledge_task_handoff(&pending.id(), now).unwrap();
+        assert!(hub.store().setting(&pending.key()).unwrap().is_some());
+        board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_list",
+            serde_json::json!({}),
+        ));
+        assert_eq!(hub.view().0.tasks[&format!("p/{id}")].owner, "receiver/a");
+        restart_receiver_agent(&hub, 2);
+        board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_complete",
+            serde_json::json!({"task_id": id, "summary": "done"}),
+        ));
+        hub.expire_handoffs(now, |_| false).unwrap();
+        assert!(hub.store().setting(&pending.key()).unwrap().is_none());
+        assert!(hub.view().0.tasks[&format!("p/{id}")].done);
     }
 
     #[tokio::test]

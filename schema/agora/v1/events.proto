@@ -92,6 +92,13 @@ message NodeOnline {
   // say to run `agora` from that folder; empty otherwise, and from an old node. Only the hub's owner receives it whole; the hub sends
   // everyone else its file name alone (`agora.exe`), since a folder may hold the machine's user name.
   string binary = 5;
+  // ADR-0124: live runs the node is about to reannounce. For the hub only, at most 1,024 entries.
+  repeated RetainedAgentRun retained_agent_runs = 6;
+}
+
+message RetainedAgentRun {
+  string agent_id = 1; // Node-local id, at most 256 bytes.
+  bytes run_id = 2; // The same opaque 16-byte run id as AgentStarted.
 }
 
 message NodeOffline {

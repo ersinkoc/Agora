@@ -411,6 +411,7 @@ async fn a_client_registers_lists_and_asks_and_the_hub_carries_endorsements_only
             os: "linux".into(),
             build: "b".into(),
             binary: String::new(),
+            retained_agent_runs: Vec::new(),
         }),
         Body::NodeTrustedDevices(v1::NodeTrustedDevices {
             device_ids: vec!["web-old".into()],

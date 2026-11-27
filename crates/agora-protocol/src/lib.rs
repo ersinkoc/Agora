@@ -15,6 +15,11 @@ pub mod ws;
 pub use error::{Error, ErrorCode, ParamValue};
 pub use frame::{Decoder, Frame};
 
+/// ADR-0124: maximum number of retained runs in a node's startup announcement.
+pub const MAX_RETAINED_AGENT_RUNS: usize = 1024;
+/// ADR-0124: maximum byte length of a retained run's node-local agent ID.
+pub const MAX_RETAINED_AGENT_ID_BYTES: usize = 256;
+
 /// Messages of protocol generation 1, generated from `schema/agora/v1/*.proto`.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod v1 {

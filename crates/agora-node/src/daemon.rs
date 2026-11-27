@@ -77,7 +77,7 @@ fn node_announcer(
         };
         before_record();
         if how == Announce::Restart {
-            ev.node_online(&node);
+            ev.node_online_with_runs(&node, views.iter());
         }
         for (id, root) in &known_checkouts {
             ev.checkout_discovered(&node, id, root);
@@ -1158,6 +1158,22 @@ impl EventSink {
 
     /// The node announces itself; the hub marks it online.
     pub fn node_online(&self, node: &str) {
+        self.node_online_with_runs(node, std::iter::empty());
+    }
+
+    fn node_online_with_runs<'a>(&self, node: &str, views: impl Iterator<Item = &'a AgentView>) {
+        let retained_agent_runs = views
+            .filter(|v| {
+                v.running && v.id.as_str().len() <= agora_protocol::MAX_RETAINED_AGENT_ID_BYTES
+            })
+            .filter_map(|v| {
+                Some(v1::RetainedAgentRun {
+                    agent_id: v.id.as_str().to_string(),
+                    run_id: v.run_id?.to_vec(),
+                })
+            })
+            .take(agora_protocol::MAX_RETAINED_AGENT_RUNS)
+            .collect();
         let host = std::env::var("HOSTNAME")
             .or_else(|_| std::env::var("COMPUTERNAME"))
             .unwrap_or_else(|_| node.to_string());
@@ -1167,6 +1183,7 @@ impl EventSink {
             os: std::env::consts::OS.to_string(),
             build: env!("CARGO_PKG_VERSION").to_string(),
             binary: binary_off_path(),
+            retained_agent_runs,
         }));
     }
 
@@ -2195,25 +2212,30 @@ impl Node {
         }
         // ADR-0039: every agent the holder kept has joined the mesh again and got its renewed leases back; the rest are not taken up.
         mesh.forget_unadopted_lease_renewals();
-        events.node_online(&cfg.node_id);
+        let views = sup.list();
+        let kept: Vec<_> = taken_up
+            .iter()
+            .filter_map(|(id, session)| {
+                views
+                    .iter()
+                    .find(|v| v.id == *id && v.running)
+                    .map(|v| (id, session, v))
+            })
+            .collect();
+        events.node_online_with_runs(&cfg.node_id, kept.iter().map(|(_, _, v)| *v));
         for p in &projects {
             events.checkout_discovered(&cfg.node_id, &p.id, &p.root);
         }
         // `NodeOnline` tells the hub that whatever this node ran before is gone; the agents taken up from the holder are not, so each is
         // said up again after it, as an announcement does (#907).
-        if !taken_up.is_empty() {
-            let views = sup.list();
-            for (id, session) in &taken_up {
-                if let Some(v) = views.iter().find(|v| v.id == *id && v.running) {
-                    events.agent_taken_up(v, session.as_ref());
-                    // #932: its modes, settings and commands as the supervisor holds them, judged again as a report is, so what the
-                    // window shows matches `skips_permissions_now`.
-                    events.supervisor_events(&sup.session_events(id), &views);
-                    // ADR-0101: the kept process still holds its always answers; the hub cleared them on the `AgentStarted` above.
-                    for a in ledger.kept_session(id.as_str()).always {
-                        events.restate(Body::AgentAlwaysAllowed(a));
-                    }
-                }
+        for (id, session, v) in kept {
+            events.agent_taken_up(v, session.as_ref());
+            // #932: its modes, settings and commands as the supervisor holds them, judged again as a report is, so what the
+            // window shows matches `skips_permissions_now`.
+            events.supervisor_events(&sup.session_events(id), &views);
+            // ADR-0101: the kept process still holds its always answers; the hub cleared them on the `AgentStarted` above.
+            for a in ledger.kept_session(id.as_str()).always {
+                events.restate(Body::AgentAlwaysAllowed(a));
             }
         }
         // ADR-0060: what was running when the node last stopped, offered again (Resume, or Start again in the same folder).

@@ -17,9 +17,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   never by widening the page policy.
 - **The hub's own CA is not name-constrained**: a person who adds it to a device's trusted roots to silence the warning trusts it for
   every site. Constrain new CAs to the hub's names, and steer people to `agora remote tailscale --serve` (a real certificate) first.
-- **Task ownership across receiver reattachment** (ADR-0109, ADR-0124 Accepted, **schema**): when the receiver's node process restarts instead of reconnecting,
-  the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the claim of a
-  still-running receiver across holder reattachment without giving it to a replacement run.
 - **Durable node handoff writes**: the node writes, syncs and prunes records while it holds the broker mutex. Measure worst-case contention before moving I/O out of the lock.
 - **Board handoffs and members** (**decision**): a handoff made with the hub board's `handoff` tool is stamped `producer_id: "hub"`, so
   `Scope::admit` hides it from a member even when both ends are theirs (`lease_visible` special-cases the hub id; messages and handoffs do

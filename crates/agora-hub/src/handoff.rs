@@ -35,12 +35,36 @@ pub(crate) struct Pending {
     pub giver_started_seq: u64,
     #[prost(bool, tag = "7")]
     pub attempted: bool,
+    #[prost(bool, tag = "8")]
+    pub acknowledged_while_reattaching: bool,
 }
 
 impl Pending {
+    pub(crate) fn receiver(&self) -> String {
+        crate::projection::qualified(&self.receiver_node, &self.delivery.agent_id)
+    }
+
+    pub(crate) fn receiver_run<'a>(
+        &self,
+        view: &'a crate::projection::View,
+    ) -> Option<&'a crate::projection::AgentView> {
+        view.agents.get(&self.receiver()).filter(|a| {
+            a.project_id == self.board_project
+                && a.run_id
+                    .is_some_and(|run| run.as_slice() == self.delivery.receiver_run_id)
+        })
+    }
+
+    pub(crate) fn awaiting_restart_start(&self, view: &crate::projection::View) -> bool {
+        self.receiver_run(view)
+            .is_some_and(|a| a.awaiting_restart_start)
+    }
+
     fn reserved_bytes(&self) -> usize {
-        // The first attempt may add the protobuf tag and value for the boolean.
-        self.encoded_len() + 2 * usize::from(!self.attempted)
+        // The first attempt and an acknowledgement while reattaching may add a tag and value.
+        self.encoded_len()
+            + 2 * usize::from(!self.attempted)
+            + 2 * usize::from(!self.acknowledged_while_reattaching)
     }
 
     pub(crate) fn id(&self) -> String {
@@ -97,7 +121,8 @@ pub(crate) fn load(store: &SqliteStore) -> Result<Queue, StoreError> {
                 .insert(pending.delivery.delivery_id.clone(), pending)
                 .is_some()
             || queue.len() > MAX_COUNT
-            || total > MAX_BYTES
+            // A queue saved before ADR-0124 did not reserve bytes for deferred acknowledgements.
+            || total > MAX_BYTES + 2 * MAX_COUNT
         {
             return Err(StoreError("invalid task handoff queue".into()));
         }
@@ -189,7 +214,9 @@ pub(crate) async fn run(hub: &Hub) {
         tick.tick().await;
         let now = now_ms();
         // Keep answers while their transactions are unavailable, without retrying or expiring those deliveries.
-        settling.retain(|_, (pending, outcome)| hub.settle_handoff(pending, outcome, now).is_err());
+        settling.retain(|_, (pending, outcome)| {
+            !matches!(hub.settle_handoff(pending, outcome, now), Ok(true))
+        });
         if let Err(error) = hub.expire_handoffs(now, |id| settling.contains_key(id)) {
             eprintln!("task handoff expiry: {error}");
         }
@@ -229,8 +256,11 @@ pub(crate) async fn run(hub: &Hub) {
             let id = pending.delivery.delivery_id.clone();
             if outcome != Attempt::Retry {
                 retry.remove(&id);
-                if let Err(error) = hub.settle_handoff(&pending, &outcome, now_ms()) {
+                let result = hub.settle_handoff(&pending, &outcome, now_ms());
+                if let Err(error) = &result {
                     eprintln!("task handoff settlement: {error}");
+                }
+                if !matches!(result, Ok(true)) {
                     settling.insert(id, (pending, outcome));
                 }
             } else {
@@ -259,9 +289,10 @@ mod tests {
             reserve(&Queue::new(), &pending).unwrap_err().code,
             ErrorCode::NodeResourceLimit,
         );
-        pending.delivery.summary.truncate(MAX_BYTES - excess - 2);
+        pending.delivery.summary.truncate(MAX_BYTES - excess - 4);
         assert!(reserve(&Queue::new(), &pending).is_ok());
         pending.attempted = true;
+        pending.acknowledged_while_reattaching = true;
         assert_eq!(pending.encoded_len(), MAX_BYTES);
         assert!(reserve(&Queue::new(), &pending).is_ok());
     }

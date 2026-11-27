@@ -73,6 +73,7 @@ fn online(node: &str) -> Body {
         os: "linux".into(),
         build: "b".into(),
         binary: String::new(),
+        retained_agent_runs: Vec::new(),
     })
 }
 
@@ -1681,6 +1682,7 @@ async fn a_member_never_receives_another_projects_snapshot_events_or_commands() 
             os: "linux".into(),
             build: "b".into(),
             binary: path.into(),
+            retained_agent_runs: Vec::new(),
         })
     };
     for (seq, body) in [

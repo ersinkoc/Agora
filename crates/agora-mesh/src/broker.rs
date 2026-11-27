@@ -299,6 +299,7 @@ pub struct Mesh {
     sent: BTreeMap<AgentId, VecDeque<u64>>,
     asks: BTreeMap<String, Ask>,
     tasks: BTreeMap<TaskId, TaskRec>,
+    retained_claims: BTreeMap<TaskId, AgentId>,
     leases: BTreeMap<String, LeaseTable>,
     batches: BTreeMap<String, LeaseBatch>,
     next: u64,
@@ -323,6 +324,7 @@ impl Mesh {
             sent: BTreeMap::new(),
             asks: BTreeMap::new(),
             tasks: BTreeMap::new(),
+            retained_claims: BTreeMap::new(),
             leases: BTreeMap::new(),
             batches: BTreeMap::new(),
             next: 1,
@@ -472,6 +474,16 @@ impl Mesh {
         while inbox.len() > self.limits.inbox_capacity {
             inbox.pop_front();
         }
+    }
+
+    /// Whether recent broker changes still have events to publish.
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// Keep accepted broker changes for publication after a transient storage failure.
+    pub fn defer_events(&mut self, events: Vec<Body>) {
+        self.events.extend(events);
     }
 
     /// Audit events queued since the last call, oldest first.
@@ -629,6 +641,16 @@ impl Mesh {
         })
     }
 
+    /// Owners of claimed tasks, including tasks loaded before their agents register.
+    pub fn claim_owners(&self) -> impl Iterator<Item = &AgentId> {
+        self.tasks
+            .values()
+            .filter_map(|task| match task.task.state() {
+                TaskState::Claimed(owner) => Some(owner),
+                _ => None,
+            })
+    }
+
     /// The title of a task `agent` has claimed, if it holds one (the first by id).
     pub fn claimed_task(&self, agent: &AgentId) -> Option<&str> {
         self.tasks.values().find_map(|t| match t.task.state() {
@@ -645,7 +667,12 @@ impl Mesh {
             .collect()
     }
 
-    /// The agent ended: it leaves the registry, loses its leases and open asks, and gives its tasks back.
+    /// Keep only these exact task claims while their owners wait to reannounce on the shared board.
+    pub fn retain_claims(&mut self, claims: BTreeMap<TaskId, AgentId>) {
+        self.retained_claims = claims;
+    }
+
+    /// The agent leaves the registry, loses its leases and open asks, and gives back claims that were not retained.
     pub fn unregister(&mut self, agent: &AgentId, now_ms: u64) {
         if let Some(gone) = self.agents.remove(agent) {
             if !self.agents.values().any(|a| a.worktree == gone.worktree) {
@@ -689,7 +716,10 @@ impl Mesh {
         let owned: Vec<TaskId> = self
             .tasks
             .iter()
-            .filter(|(_, t)| matches!(t.task.state(), TaskState::Claimed(a) if a == agent))
+            .filter(|(id, t)| {
+                self.retained_claims.get(*id) != Some(agent)
+                    && matches!(t.task.state(), TaskState::Claimed(a) if a == agent)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in owned {
@@ -1315,7 +1345,9 @@ impl Mesh {
             .tasks
             .iter()
             .filter_map(|(id, t)| match t.task.state() {
-                TaskState::Claimed(a) if !self.agents.contains_key(a) => {
+                TaskState::Claimed(a)
+                    if !self.agents.contains_key(a) && self.retained_claims.get(id) != Some(a) =>
+                {
                     Some((id.clone(), a.clone()))
                 }
                 _ => None,

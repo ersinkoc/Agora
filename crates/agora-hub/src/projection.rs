@@ -103,6 +103,10 @@ const MAX_COMMANDS: usize = 100;
 pub struct AgentView {
     pub(crate) run_id: Option<[u8; 16]>,
     pub(crate) started_seq: u64,
+    /// Latest log position where continuity of the run was lost or a new run started.
+    pub(crate) run_since: u64,
+    /// A startup announcement named this exact run. Wait for its AgentStarted before accepting calls.
+    pub(crate) awaiting_restart_start: bool,
     pub node_id: String,
     pub project_id: String,
     pub worktree_id: String,
@@ -192,6 +196,7 @@ pub struct ApprovalView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskView {
     pub(crate) board_revision: Option<u64>,
+    pub(crate) board_position: u64,
     pub project_id: String,
     pub title: String,
     /// `<node>/<agent>`; empty while the task is open.
@@ -211,6 +216,8 @@ pub struct View {
     pub workspaces: BTreeMap<String, agora_protocol::v1::WorkspaceRegistered>,
     pub agent_workspaces: BTreeMap<String, String>,
     pub nodes: BTreeMap<String, NodeView>,
+    /// ADR-0124: positions of startup events, used to replay cleanup a stored board has yet to apply.
+    pub(crate) node_starts: BTreeMap<String, u64>,
     /// checkout id → (node id, project id, path)
     pub checkouts: BTreeMap<String, (String, String, String)>,
     pub worktrees: BTreeMap<String, WorktreeView>,
@@ -723,7 +730,7 @@ impl View {
     /// [`View::apply`] for an event at log position `pos`, which also keeps a `MessagePosted` for snapshots (ADR-0103). The hub's
     /// publish and its rebuild from the log both come here, so a rebuilt view has the same tail as the live one.
     pub fn apply_at(&mut self, pos: u64, ev: &Event) {
-        self.apply(ev);
+        self.apply_positioned(pos, ev);
         if let Some(Body::MessagePosted(m)) = &ev.body {
             self.keep_message(pos, ev, &m.from_agent_id, &m.to);
         }
@@ -791,6 +798,10 @@ impl View {
     }
 
     pub fn apply(&mut self, ev: &Event) {
+        self.apply_positioned(0, ev);
+    }
+
+    fn apply_positioned(&mut self, pos: u64, ev: &Event) {
         // ADR-0115: an older node's project id for a repository on a case-insensitive host is read folded, and its spelling kept.
         self.note_spelling(ev);
         let folded = fold_event(ev);
@@ -826,14 +837,28 @@ impl View {
             // The node id is the connection's, never the body's: a node speaks for itself only (T19), and a history stored before
             // the session refused such events is read the same way.
             Body::NodeOnline(e) => {
+                self.node_starts.insert(producer.to_string(), pos);
                 // A node announces itself when its process starts, never when only the link to the hub comes back. A resync
-                // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055). So whatever it had running
-                // before is gone (agents and their terminals die with the node) and its waiting approvals are lost.
-                for a in self
-                    .agents
-                    .values_mut()
-                    .filter(|a| a.node_id == producer && a.running)
-                {
+                // announcement (ADR-0054) leads with it only when the hub missed that start (ADR-0055).
+                let mut retained = BTreeMap::new();
+                for entry in e.retained_agent_runs.iter().take(agora_protocol::MAX_RETAINED_AGENT_RUNS) {
+                    let id = entry.agent_id.as_str();
+                    if id.is_empty() || id.contains('/') || id.len() > agora_protocol::MAX_RETAINED_AGENT_ID_BYTES {
+                        continue;
+                    }
+                    let run: Option<[u8; 16]> = entry.run_id.as_slice().try_into().ok();
+                    // Ambiguous evidence cannot establish continuity, even if one duplicate happens to match.
+                    retained.entry(id).and_modify(|r| *r = None).or_insert(run);
+                }
+                for (id, a) in self.agents.iter_mut().filter(|(_, a)| {
+                    a.node_id == producer && (a.running || a.awaiting_restart_start)
+                }) {
+                    a.awaiting_restart_start = split_key(id).is_some_and(|(_, local)| {
+                        retained.get(local).and_then(|r| *r).is_some_and(|run| a.run_id == Some(run))
+                    });
+                    if !a.awaiting_restart_start {
+                        a.run_since = pos;
+                    }
                     a.running = false;
                     a.state = AgentState::Done;
                     // ADR-0101: an always answer lives in the agent's process.
@@ -979,11 +1004,17 @@ impl View {
                     ),
                     None => (0, 0, String::new(), SessionView::default()),
                 };
+                let run_id = e.run_id.as_slice().try_into().ok();
+                let run_since = self.agents.get(&q(&e.agent_id)).filter(|a| {
+                    run_id.is_some() && a.run_id == run_id && a.project_id == e.project_id
+                }).map_or(pos, |a| a.run_since);
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
-                        run_id: e.run_id.as_slice().try_into().ok(),
+                        run_id,
                         started_seq: ev.seq,
+                        run_since,
+                        awaiting_restart_start: false,
                         // The agent runs on the node that started it: the connection decides, not the body (T19).
                         node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
@@ -1029,6 +1060,8 @@ impl View {
                     .or_insert_with(|| AgentView {
                         run_id: None,
                         started_seq: 0,
+                        run_since: pos,
+                        awaiting_restart_start: false,
                         node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
                         worktree_id: q(""),
@@ -1058,6 +1091,8 @@ impl View {
                         runs_inside: String::new(),
                     });
                 a.running = false;
+                a.awaiting_restart_start = false;
+                a.run_since = pos;
                 a.always_allowed.clear();
                 a.runs_inside.clear();
                 a.session.config = None;
@@ -1187,6 +1222,8 @@ impl View {
                     a.session.commands = None;
                     a.running = false;
                     a.exit_code = Some(e.exit_code);
+                    a.awaiting_restart_start = false;
+                    a.run_since = pos;
                     a.state = AgentState::Done;
                     a.always_allowed.clear();
                     a.runs_inside.clear();
@@ -1306,9 +1343,12 @@ impl View {
                     self.tasks.get(&key).and_then(|task| task.board_revision)
                 };
                 self.tasks.insert(
-                    key,
+                    key.clone(),
                     TaskView {
                         board_revision,
+                        board_position: if producer == RESERVED_HUB_ID { pos } else {
+                            self.tasks.get(&key).map_or(0, |task| task.board_position)
+                        },
                         project_id: t.project_id.clone(),
                         title: t.title.clone(),
                         owner,
@@ -1664,6 +1704,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })
         };
         let mut v = View::default();
@@ -1732,6 +1773,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })
         };
         let mut v = View::default();
@@ -1828,6 +1870,7 @@ mod tests {
                 os: "windows".into(),
                 build: "b".into(),
                 binary: binary.into(),
+                retained_agent_runs: Vec::new(),
             })
         };
         let mut v = View::default();
@@ -1847,6 +1890,7 @@ mod tests {
             os: "linux".into(),
             build: "b".into(),
             binary: String::new(),
+            retained_agent_runs: Vec::new(),
         });
         let interrupted = |id: &str, resumable: bool| {
             Body::AgentInterrupted(AgentInterrupted {
@@ -1925,6 +1969,7 @@ mod tests {
             os: "linux".into(),
             build: "b".into(),
             binary: String::new(),
+            retained_agent_runs: Vec::new(),
         })
     }
 
@@ -2072,6 +2117,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             }),
         ));
         v.apply(&ev(
@@ -2106,6 +2152,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })
         };
         let mut v = View::default();
@@ -2141,6 +2188,7 @@ mod tests {
                 os: "linux".into(),
                 build: "b".into(),
                 binary: String::new(),
+                retained_agent_runs: Vec::new(),
             })
         };
         let terminal = |agent: &str| {
@@ -2492,6 +2540,7 @@ mod tests {
             os: "linux".into(),
             build: "b".into(),
             binary: String::new(),
+            retained_agent_runs: Vec::new(),
         });
         let log = [
             ev("n1", 4, online),
@@ -2837,11 +2886,11 @@ mod tests {
         }
         events.push(ev("n1", 6 + first, decided("r-0")));
         events.push(ev("n1", 7 + first, asked("r-0")));
-        for e in &events {
+        for (index, e) in events.iter().enumerate() {
             store
                 .append(&e.producer_id, e.seq, e.at_ms, &e.encode_to_vec())
                 .unwrap();
-            live.apply(e);
+            live.apply_at(index as u64 + 1, e);
         }
         assert_eq!(
             live.approvals.keys().collect::<Vec<_>>(),
@@ -2981,11 +3030,11 @@ mod tests {
                 Body::AgentStarted(s)
             }),
         ];
-        for e in &events {
+        for (index, e) in events.iter().enumerate() {
             store
                 .append(&e.producer_id, e.seq, e.at_ms, &e.encode_to_vec())
                 .unwrap();
-            live.apply(e);
+            live.apply_at(index as u64 + 1, e);
         }
         // A payload from the future that does not decode must not break the rebuild.
         store.append("n3", 1, 0, &[0xff, 0xff]).unwrap();

@@ -121,6 +121,12 @@ holder kept (ADR-0079, ADR-0093) re-adds each right after its start `NodeOnline`
 session it knew, `TerminalOpened` for a terminal agent; `docs/specs/holder-link.md`). Both say `AgentStarted.same_process`, so the hub
 keeps the agent's counters (section "A kept agent's counters", ADR-0104).
 
+Under ADR-0124, startup lists the holder processes already taken up in `NodeOnline.retained_agent_runs`. A resync led by
+`NodeOnline` lists live processes it will reannounce. The hub reads at most 1,024 entries and checks each local agent ID
+(up to 256 bytes) and 16-byte run ID against the authenticated node's previous agent record. It keeps the exact pending
+handoff claim while the same run reannounces, and accepts that agent's board calls after `AgentStarted`. Empty evidence,
+a replacement or a later end follows ordinary claim cleanup. Windows never receive the evidence.
+
 SSH stdio transport (ADR-0011): `agora node stdio` copies the node's local-socket frames to stdin/stdout, so a person or a
 tool can reach a node with `ssh host agora node stdio` and no open port. Frames are exactly those of the local control
 socket, so whoever speaks them has the owner's own authority there (the routed-command checks, grants included, apply to the

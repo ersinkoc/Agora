@@ -1,0 +1,10 @@
+{
+  "producerId": "receiver",
+  "seq": "7",
+  "nodeOnline": {
+    "nodeId": "receiver",
+    "retainedAgentRuns": [
+      {"agentId": "agent-1", "runId": "AAECAwQFBgcICQoLDA0ODw=="}
+    ]
+  }
+}
