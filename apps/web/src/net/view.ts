@@ -935,7 +935,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.
 interface SubtaskProgress { accepted: number; total: number }
-export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'review' | 'done'; review?: TaskReviewModel; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[]; handoffs?: HandoffDeliveryModel[]; parent?: { title: string }; subtasks?: SubtaskProgress }
+export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'review' | 'done'; review?: TaskReviewModel; owner: string; ownerId?: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[]; handoffs?: HandoffDeliveryModel[]; parent?: { title: string }; subtasks?: SubtaskProgress }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; reviewEnabled?: boolean; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -987,7 +987,7 @@ export function boards(v: View): BoardModel[] {
     const review = v.reviews.get(id);
     const parent = t.parentTaskId ? v.tasks.get(`${t.projectId}/${t.parentTaskId}`) : undefined;
     const progress = subtasks.get(id);
-    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: review?.state === 'pending' ? 'review' : t.done ? 'done' : t.ownerId ? 'claimed' : 'open', ...(review ? { review } : {}), owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [], handoffs: handoffsByTask.get(id)?.reverse(), ...(parent ? { parent: { title: parent.title } } : {}), ...(progress ? { subtasks: progress } : {}) });
+    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: review?.state === 'pending' ? 'review' : t.done ? 'done' : t.ownerId ? 'claimed' : 'open', ...(review ? { review } : {}), owner: t.ownerId ? label(t.ownerId) : '', ...(t.ownerId ? { ownerId: t.ownerId } : {}), ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [], handoffs: handoffsByTask.get(id)?.reverse(), ...(parent ? { parent: { title: parent.title } } : {}), ...(progress ? { subtasks: progress } : {}) });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

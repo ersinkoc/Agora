@@ -2,7 +2,7 @@
 // beyond their machine, a helper further out from its parent; a message travels through the hub between two machines.
 import { describe, expect, it } from 'vitest';
 import type { AgentTileModel } from '../model';
-import { AGENTS_PER_MACHINE, EXTENT, along, fleetMap, route } from './fleetMap';
+import { AGENTS_PER_MACHINE, EXTENT, along, fleetMap, fromHub, route, taskSignals } from './fleetMap';
 
 const machine = (id: string, online = true) => ({ id, name: id, os: 'linux', online, agentsRunning: 0, lastSeenMs: 1 });
 const agent = (id: string, over: Partial<AgentTileModel> = {}): AgentTileModel => ({
@@ -56,5 +56,19 @@ describe('the fleet map', () => {
     const at = performance.now();
     for (let i = 0; i < 50; i++) fleetMap(ms, as);
     expect((performance.now() - at) / 50).toBeLessThan(4);
+  });
+
+  it('sends a task or a handoff from the hub, once per owner and once per delivery', () => {
+    const m = fleetMap([machine('a')], [agent('a/1')]);
+    expect(fromHub(m, 'a/1')).toHaveLength(3);
+    expect(fromHub(m, '1')?.[2]).toEqual(m.agents[0]); // a machine's own id
+    expect(fromHub(m, 'b/9')).toBeUndefined();
+    const boards = [{ tasks: [
+      { id: 'p/t1', title: 'Fix login', ownerId: 'a/1', handoffs: [{ id: 'h1', receiver: 'a/1', state: 'delivered' }, { id: 'h2', receiver: 'a/1', state: 'waiting' }] },
+      { id: 'p/t2', title: 'Unowned' },
+    ] }];
+    const s = taskSignals(boards);
+    expect(s.map((x) => x.key.split('\u0000')[0])).toEqual(['task', 'handoff']);
+    expect(s.every((x) => x.to === 'a/1' && x.words === 'Fix login')).toBe(true);
   });
 });

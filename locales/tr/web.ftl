@@ -890,6 +890,7 @@ map-you = siz
 map-machine-offline = { $name } (çevrim dışı)
 map-agent = { $name }, { $state }
 map-message = { $from } → { $to }: { $text }
+map-task = Görev: { $text }
 preview-panel = Önizleme
 preview-unavailable = Bu pencereden önizleme kullanılamıyor.
 preview-none = Açık önizleme yok. Makinelerinizden birinde bir ajanın uygulamasının dinlediği portu açın.

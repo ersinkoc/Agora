@@ -76,6 +76,30 @@ export function route(map: FleetMap, fromId: string, toId: string): MapPoint[] |
   return fm && tm ? [from, fm, map.hub, tm, to] : [from, map.hub, to];
 }
 
+/** The way from the hub to an agent (a task or a handoff the hub gives it); `undefined` when the agent is not drawn. `id` may be the
+ *  hub-wide key or a machine's own agent id. */
+export function fromHub(map: FleetMap, id: string): MapPoint[] | undefined {
+  const to = map.agents.find((a) => a.id === id || a.id.endsWith(`/${id}`));
+  if (!to) return undefined;
+  const m = map.machines.find((x) => x.id === to.machine);
+  return m ? [map.hub, m, to] : [map.hub, to];
+}
+
+/** A task given to an agent, or a handoff delivered to one, as the map moves it: a stable key and where it goes. */
+export interface MapTaskSignal { key: string; to: string; words: string }
+
+/** What the boards say was given to whom: each claimed task once per owner, each delivered handoff once. */
+export function taskSignals(boards: readonly { tasks: readonly { id: string; title: string; ownerId?: string; handoffs?: readonly { id: string; receiver: string; state: string }[] }[] }[]): MapTaskSignal[] {
+  const out: MapTaskSignal[] = [];
+  for (const b of boards) {
+    for (const t of b.tasks) {
+      if (t.ownerId) out.push({ key: `task\u0000${t.id}\u0000${t.ownerId}`, to: t.ownerId, words: t.title });
+      for (const h of t.handoffs ?? []) if (h.state === 'delivered' && h.receiver) out.push({ key: `handoff\u0000${h.id}`, to: h.receiver, words: t.title });
+    }
+  }
+  return out;
+}
+
 /** Where along a path a moving item is at `t` (0..1), by length. */
 export function along(path: readonly MapPoint[], t: number): MapPoint {
   if (path.length === 1) return path[0] as MapPoint;

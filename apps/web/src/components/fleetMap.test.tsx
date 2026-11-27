@@ -48,6 +48,18 @@ describe('the fleet map', () => {
     expect(dots[0]?.querySelector('title')?.textContent).toBe('mac · a1 to win · w1: new');
   });
 
+  it('moves a task given to an agent while it is open, as a card from the hub', () => {
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => {});
+    const board = (owner?: string) => [{ projectId: 'p', project: 'p', folders: [], leases: [], tasks: [{ id: 'p/t1', title: 'Fix login', status: 'claimed' as const, owner: owner ?? '', ...(owner ? { ownerId: owner } : {}) }] }];
+    act(() => root.render(<FleetMap machines={machines} fleet={fleet} messages={[]} boards={board()} onOpen={() => {}} />));
+    expect(host.querySelectorAll('.fleet-map__card')).toHaveLength(0);
+    act(() => root.render(<FleetMap machines={machines} fleet={fleet} messages={[]} boards={board('mac/a1')} onOpen={() => {}} />));
+    const cards = host.querySelectorAll('.fleet-map__card');
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.querySelector('title')?.textContent).toBe('Task: Fix login');
+  });
+
   it('flashes the recipient instead of moving anything under reduced motion', () => {
     vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('reduce'), addEventListener() {}, removeEventListener() {} }));
     act(() => root.render(<FleetMap machines={machines} fleet={fleet} messages={[]} onOpen={() => {}} />));

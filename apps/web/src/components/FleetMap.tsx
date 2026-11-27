@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
-import { along, fleetMap, route, type MapPoint } from '../net/fleetMap';
-import type { MachineModel, MessageModel } from '../net/view';
+import { along, fleetMap, fromHub, route, taskSignals, type MapPoint } from '../net/fleetMap';
+import type { BoardModel, MachineModel, MessageModel } from '../net/view';
 import { visible } from '../net/view';
 
 /** How long a moving item takes, and how many move at once (the oldest arrives at once beyond that). */
 const FLIGHT_MS = 1100;
 const MAX_FLIGHTS = 20;
 
-interface Flight { key: string; path: MapPoint[]; start: number; words: string }
+interface Flight { key: string; path: MapPoint[]; start: number; words: string; card?: boolean }
 
 const reduced = () => typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 const messageKey = (m: MessageModel) => `${m.atMs}\u0000${m.fromId ?? m.from}\u0000${m.toId ?? m.to}\u0000${m.body.slice(0, 40)}`;
@@ -18,14 +18,15 @@ const messageKey = (m: MessageModel) => `${m.atMs}\u0000${m.fromId ?? m.from}\u0
 // out from its parent; a mesh message travels as a dot from its sender to its recipient (through the hub between two machines). Clicking
 // an agent opens it, a machine opens its page. Everything drawn is plain text from the view; nothing here changes state, and the frame
 // loop runs only while something moves.
-export function FleetMap({ machines, fleet, messages, onOpen }: {
-  machines: readonly MachineModel[]; fleet: readonly AgentTileModel[]; messages: readonly MessageModel[]; onOpen: (agentId: string) => void;
+export function FleetMap({ machines, fleet, messages, boards = [], onOpen }: {
+  machines: readonly MachineModel[]; fleet: readonly AgentTileModel[]; messages: readonly MessageModel[]; boards?: readonly BoardModel[]; onOpen: (agentId: string) => void;
 }) {
   const map = useMemo(() => fleetMap(machines, fleet), [machines, fleet]);
   const [flights, setFlights] = useState<Flight[]>([]);
   const [now, setNow] = useState(() => performance.now());
   const [flash, setFlash] = useState<string | undefined>();
   const seen = useRef<Set<string> | undefined>(undefined);
+  const seenTasks = useRef<Set<string> | undefined>(undefined);
   // The pane's size in pixels: the picture is fitted to it, and text and marks keep the same size on screen whatever it is.
   const box = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 600, h: 600 });
@@ -53,6 +54,23 @@ export function FleetMap({ machines, fleet, messages, onOpen }: {
     }
     if (add.length) setFlights((f) => [...f, ...add].slice(-MAX_FLIGHTS));
   }, [messages, map]);
+
+  // A task given to an agent and a handoff delivered to one, since the map opened, move as a card from the hub.
+  const signals = useMemo(() => taskSignals(boards), [boards]);
+  useEffect(() => {
+    if (!seenTasks.current) { seenTasks.current = new Set(signals.map((s) => s.key)); return; }
+    const fresh = signals.filter((s) => !seenTasks.current?.has(s.key));
+    for (const s of fresh) seenTasks.current.add(s.key);
+    if (fresh.length === 0) return;
+    if (reduced()) { setFlash(map.agents.find((a) => a.id === fresh[0]?.to || a.id.endsWith(`/${fresh[0]?.to}`))?.id); return; }
+    const at = performance.now();
+    const add: Flight[] = [];
+    for (const s of fresh) {
+      const path = fromHub(map, s.to);
+      if (path) add.push({ key: s.key, path, start: at, words: t('map-task', { text: visible(s.words).slice(0, 120) }), card: true });
+    }
+    if (add.length) setFlights((f) => [...f, ...add].slice(-MAX_FLIGHTS));
+  }, [signals, map]);
 
   // The frame loop: only while something moves.
   useEffect(() => {
@@ -120,7 +138,9 @@ export function FleetMap({ machines, fleet, messages, onOpen }: {
         <g className="fleet-map__flights" aria-hidden>
           {flights.map((f) => {
             const p = along(f.path, (now - f.start) / FLIGHT_MS);
-            return <circle key={f.key} cx={p.x} cy={p.y} r={px(4.5)} className="fleet-map__dot"><title>{f.words}</title></circle>;
+            return f.card
+              ? <rect key={f.key} x={p.x - px(6)} y={p.y - px(4.5)} width={px(12)} height={px(9)} rx={px(1.5)} className="fleet-map__card"><title>{f.words}</title></rect>
+              : <circle key={f.key} cx={p.x} cy={p.y} r={px(4.5)} className="fleet-map__dot"><title>{f.words}</title></circle>;
           })}
         </g>
       </svg>

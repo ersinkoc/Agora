@@ -53,5 +53,6 @@ between them, in the web window and the desktop app"; **decision**: an ADR and a
    an agent opens on a click or Enter, a machine links to its page; a mesh message that arrives while the map is open travels from
    sender to recipient, through the hub between two machines, at most 20 at once; reduced motion flashes the recipient instead). The
    terminal client names the panel and says to open it in the window.
-2. Tasks, dispatches and handoffs moving on the map: not yet (the messages do).
+2. Tasks and handoffs: done (2026-11-27). A task given to an agent (its owner on a shared board) and a handoff delivered to one move
+   as a small card from the hub to that agent, once each (`taskSignals`, `fromHub`); reduced motion flashes the agent instead.
 

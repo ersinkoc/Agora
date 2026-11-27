@@ -281,6 +281,7 @@
   .fleet-map__agent--needs-you .fleet-map__ring { stroke: var(--color-needs-you); }
   .fleet-map__agent--flash .fleet-map__ring { stroke: var(--color-accent); }
   .fleet-map__dot { fill: var(--color-accent); }
+  .fleet-map__card { fill: var(--color-surface-1); stroke: var(--color-accent); }
   /* ADR-0088: the Preview pane: a bar (which preview, its address, reload, new tab, size, until, close), the frame on its own origin. */
   .preview-pane { @apply flex min-h-0 flex-1 flex-col; }
   .preview-pane--empty { @apply grid content-start gap-3 overflow-y-auto p-4; }

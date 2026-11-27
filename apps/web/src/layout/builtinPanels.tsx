@@ -156,7 +156,7 @@ const RENDERS: Record<Exclude<BuiltinPanel, 'empty'>, PanelRender> = {
   tasks: details('board'),
   messages: details('messages'),
   usage: details('usage'),
-  map: ({ state, actions }) => <FleetMap machines={state.machines} fleet={state.fleet} messages={state.messages} onOpen={actions.openAgent} />,
+  map: ({ state, actions }) => <FleetMap machines={state.machines} fleet={state.fleet} messages={state.messages} boards={state.boards} onOpen={actions.openAgent} />,
   preview: ({ state, actions }) => <PreviewPane state={state.previews} actions={actions.previews} machines={state.machines} fleet={state.fleet} />,
   theme: () => <div className="min-h-0 flex-1 overflow-y-auto"><ThemeEditor /></div>,
   terminal: tool('terminal'),

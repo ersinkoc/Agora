@@ -918,6 +918,7 @@ map-you = you
 map-machine-offline = { $name } (offline)
 map-agent = { $name }, { $state }
 map-message = { $from } to { $to }: { $text }
+map-task = Task: { $text }
 preview-panel = Preview
 preview-unavailable = Previews are not available from this window.
 preview-none = No preview is open. Open a port an agent's app listens on, on one of your machines.
