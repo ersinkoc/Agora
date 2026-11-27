@@ -1,6 +1,7 @@
 # 0127. Show accepted task notices
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer explicitly approved ADR-0127 in chat).
 
 ## Context
 
