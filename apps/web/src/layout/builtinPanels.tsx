@@ -104,7 +104,8 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
       <CloseConfirm agent={a} where="pane" />
       {!asksUnderHeader(a) ? null : <ApprovalBanners approvals={approvals.filter((x) => x.agentId === a.id)} agent={a} guard={banners} onResolve={onResolve} />}
       <AgentAddress agent={a} />
-      {helperGrants && revokeGrant && !a.closed && fleet.some((c) => c.parentId === a.id) &&
+      {/* ADR-0119 (review of d37ac8c9): a live grant is shown whether or not helpers are listed: it is what acts next. */}
+      {helperGrants && revokeGrant && !a.closed &&
         <HelperGrants view={a.id} list={() => helperGrants(a)} revoke={(g) => revokeGrant(a, g)} refresh={fleet.filter((c) => c.parentId === a.id && !c.closed).length} />}
       {a.closed ? <ClosedSummary agent={a} now={now} source={a.terminal === false ? chatOf?.(a) : undefined}
         onReview={loadDiff ? () => review(a.id) : undefined} onHistory={loadHistory && a.git !== false ? () => history(a.id) : undefined} onFiles={filesOf ? () => browse(a.id) : undefined}

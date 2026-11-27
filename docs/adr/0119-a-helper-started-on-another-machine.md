@@ -344,7 +344,8 @@ New threat-model rows (numbers are the next free ones when built):
    machine hangs under its parent there in the agent tree (the hub fills `AgentSnapshot.parent_node_id` and
    `parent_node_agent_id`). The terminal client signs v4 for this start only (no grant). The live grants an agent was given on other
    machines are listed in its panel beside its local helper grants ("On Beta: up to 6 codex at a time without asking (4 free)"), each
-   revoked on the machine that keeps it. Not built yet: the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
+   revoked on the machine that keeps it, whether or not helpers are listed; and each machine's card on the Machines page lists the
+   grants that machine keeps ("agent-3 on Mac may start up to 6 codex here at a time without asking"), with Revoke. Not built yet: the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
 
 ## Consequences
 

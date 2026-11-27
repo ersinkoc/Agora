@@ -109,3 +109,14 @@ describe('a standing grant another machine gave', () => {
     expect(revoked).toEqual(['beta/ap-7']);
   });
 });
+
+describe('the standing grants a machine keeps', () => {
+  it('say who may start what there, and are revoked there', async () => {
+    const revoked: string[] = [];
+    const list = async () => [{ id: 'ap-7', kind: '', folder: '/w', remaining: 6, machine: 'beta', max: 6, from: 'agent-3 on Mac' }];
+    await act(async () => { root.render(<HelperGrants view="beta" list={list} revoke={async (g) => { revoked.push(`${g.machine}/${g.id}`); }} refresh={0} />); });
+    expect(host.textContent).toContain('agent-3 on Mac may start up to 6 agents of any kind here at a time without asking (6 free)');
+    await act(async () => { host.querySelector<HTMLButtonElement>('button')?.click(); });
+    expect(revoked).toEqual(['beta/ap-7']);
+  });
+});

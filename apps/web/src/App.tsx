@@ -314,11 +314,24 @@ export function App() {
   const remoteGrantsOf = useCallback(async (machine: string, local: string): Promise<HelperGrant[]> => {
     if (!api || !live) return [];
     const others = machines(live).filter((m) => m.online && m.id !== machine);
-    const lists = await Promise.all(others.map((m) => api.command(m.id, { grantList: {} }).then((ok) => [m, ok] as const, () => undefined)));
+    // In parallel, each with a short time of its own, so one slow machine never holds the list back.
+    const within = <T,>(p: Promise<T>): Promise<T | undefined> => Promise.race([p, new Promise<undefined>((r) => { setTimeout(() => r(undefined), 5000); })]);
+    const lists = await Promise.all(others.map((m) => within(api.command(m.id, { grantList: {} })).then((ok) => (ok ? [m, ok] as const : undefined), () => undefined)));
     return lists.flatMap((x) => (x ? (x[1].grantList?.remoteGrants ?? [])
       .filter((g) => g.originNode === machine && (g.originAgent === local || (g.chain && g.rootNode === machine && g.rootAgent === local)))
       .map((g) => ({ id: g.grantId ?? '', kind: g.anyKind ? '' : g.kind ?? '', folder: g.folder ?? '', remaining: Math.max(0, (g.maxRunning ?? 0) - (g.running ?? 0)), machine: x[0].id, machineName: x[0].name, max: g.maxRunning ?? 0 })) : []));
   }, [api, live]);
+  // ADR-0119: the standing grants a machine keeps for other machines' agents (Machines page), and ending one there.
+  const heldGrants = useCallback(async (machine: string): Promise<HelperGrant[]> => {
+    if (!api) return [];
+    const ok = await api.command(machine, { grantList: {} });
+    const name = (id: string) => (live ? machines(live).find((m) => m.id === id)?.name : undefined) || id;
+    return (ok.grantList?.remoteGrants ?? []).map((g) => ({ id: g.grantId ?? '', kind: g.anyKind ? '' : g.kind ?? '', folder: g.folder ?? '', remaining: Math.max(0, (g.maxRunning ?? 0) - (g.running ?? 0)), machine, max: g.maxRunning ?? 0, from: t('helper-grant-from', { agent: g.originAgent ?? '', machine: name(g.originNode ?? '') }) }));
+  }, [api, live]);
+  const revokeHeld = useCallback(async (machine: string, grant: HelperGrant) => {
+    if (!api) return;
+    await api.command(machine, { grantRevoke: { grantId: grant.id } });
+  }, [api]);
   const revokeGrant = useCallback(async (agent: AgentTileModel, grant: HelperGrant) => {
     // A standing grant is kept (and ended) by the machine that gave it; a local one by the agent's own machine.
     const machine = grant.machine ?? agent.machineId;
@@ -707,7 +720,7 @@ export function App() {
     } : undefined}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
-      {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
+      {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined} heldGrants={hub && api ? heldGrants : undefined} revokeHeld={hub && changes ? revokeHeld : undefined}
         pairing={pairing.ui} onStart={hub && api && live && changes ? (node) => { toWindow(); openStart(node); } : undefined} onNewTerminal={hub && api && live && changes ? (node) => { toWindow(); openStart(node, true); } : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
           loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}

@@ -5,6 +5,7 @@ import { endedWithError, machineKey, type AgentTileModel } from '../model';
 import { visible } from '../net/hidden';
 import { bytesLabel, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
+import { HelperGrants, type HelperGrant } from './HelperGrants';
 import { Icon } from './Icon';
 import { AgentAvatar, Button, Callout, ListRow, Pill, StatusPill } from './kit';
 import { NoAskBadge } from './NoAskBadge';
@@ -18,7 +19,10 @@ import { isolated } from './pairChoice';
 // everywhere. Nothing here moves on its own: the old diagram's animated links are gone (visual-language.md, "nothing decorative loops").
 // ADR-0073: machines not seen for a day are listed apart, as old, folded; an offline machine can be forgotten, and the old ones cleaned
 // up in one go (`onForget` absent: no such actions, as in the demo). `now` fixes the clock (the gallery); by default it ticks every 5 s.
-export function NetworkView({ machines: all, agents, hubName, onForget, focus, now: clock, pairing, onStart, onNewTerminal }: {
+export function NetworkView({ machines: all, agents, hubName, onForget, focus, now: clock, pairing, onStart, onNewTerminal, heldGrants, revokeHeld }: {
+  /** ADR-0119: the standing grants a machine keeps for other machines' agents, and ending one there. */
+  heldGrants?: (machine: string) => Promise<HelperGrant[]>;
+  revokeHeld?: (machine: string, grant: HelperGrant) => Promise<void>;
   focus?: string;
   machines: readonly MachineModel[];
   agents: readonly AgentTileModel[];
@@ -81,7 +85,8 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
     <ul className="machines__grid">
       {machines.map((m) => <li key={m.id}>
         <MachineCard m={m} now={now} focused={focus === m.id} agents={agents.filter((a) => machineKey(a) === m.id)} share={totalMem > 0 && m.memoryBytes ? m.memoryBytes / totalMem : undefined}
-          onForget={onForget ? () => setForgetting({ list: [m], cleanup: false }) : undefined} onStart={onStart} onNewTerminal={onNewTerminal} />
+          onForget={onForget ? () => setForgetting({ list: [m], cleanup: false }) : undefined} onStart={onStart} onNewTerminal={onNewTerminal}
+          held={heldGrants && revokeHeld ? { list: () => heldGrants(m.id), revoke: (g) => revokeHeld(m.id, g) } : undefined} />
       </li>)}
       <li>
         <button type="button" className="kit-card machine-card machine-card--add" aria-controls="machines-add" onClick={add}>
@@ -113,9 +118,10 @@ function Stat({ value, label, needs }: { value: ReactNode; label: string; needs?
   return <div className="hub-stat"><dt className={needs ? 'text-needs-you' : undefined}>{label}</dt><dd>{value}</dd></div>;
 }
 
-function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewTerminal }: {
+function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewTerminal, held }: {
   m: MachineModel; now: number; focused: boolean; agents: readonly AgentTileModel[]; share?: number;
   onForget?: () => void; onStart?: (node: string) => void; onNewTerminal?: (node: string) => void;
+  held?: { list: () => Promise<HelperGrant[]>; revoke: (g: HelperGrant) => Promise<void> };
 }) {
   const nameId = `machine-${m.id}-name`;
   // The meter is this machine's share of the memory Agora uses on all the machines listed: the one total the window knows.
@@ -137,6 +143,8 @@ function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewT
           leading={<AgentAvatar accent={a.accent} kind={a.kind ?? a.name} size="s" />}
           meta={<>{!a.closed && <NoAskBadge agent={a} nested />}<StatusPill state={a.state} failed={endedWithError(a)} /></>} /></li>)}
       </ul>}
+      {/* ADR-0119: what other machines' agents may start here without asking, where that authority lives, with Revoke. */}
+      {held && <div data-held-grants><HelperGrants view={m.id} list={held.list} revoke={held.revoke} refresh={m.agentsRunning} /></div>}
       {!!m.memoryBytes && <div className="machine-meter">
         <div className="machine-meter__row"><span>{t('machine-memory')}</span><span>{bytesLabel(m.memoryBytes)}{m.terminalsOpen ? ` · ${t('network-terminals', { count: m.terminalsOpen })}` : ''}</span></div>
         <div className="machine-meter__bar" role="img" aria-label={t('machine-memory-share', { percent })}><span style={{ '--share': `${percent}%` } as CSSProperties} /></div>

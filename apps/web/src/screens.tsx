@@ -4,7 +4,7 @@ import { AppNotifySettings } from './components/AppNotifySettings';
 import { useAppNotify } from './components/useAppNotify';
 import { KeyboardSettings } from './keys/KeyboardSettings';
 import { StartApproval, type StartChoice } from './components/StartApproval';
-import { HelperGrants } from './components/HelperGrants';
+import { HelperGrants, type HelperGrant } from './components/HelperGrants';
 import { DeviceRequest } from './components/DeviceRequest';
 import { PairCardView, PairRequest } from './components/PairRequest';
 import { SignInWaiting } from './components/SignInWaiting';
@@ -236,6 +236,7 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
           the danger dialog; nothing is sent from the gallery. */}
       <div data-machines className="max-w-5xl">
         <NetworkView now={MACHINES_NOW} machines={galleryMachines} agents={galleryMachineAgents} hubName="localhost:7444" pairing={galleryPairing}
+          heldGrants={async (m) => (m === galleryMachines[0]?.id ? [{ id: 'ap-7', kind: 'codex', folder: '/home/dev/code/login-fix', remaining: 4, machine: m, max: 6, from: 'agent-3 on Mac' }] : [])} revokeHeld={async () => {}}
           onForget={async (ids) => new Map(ids.map((id) => [id, undefined]))} onStart={() => {}} onNewTerminal={() => {}} />
       </div>
       {/* The sign-in card while it waits for the owner's approval and once refused (ADR-0065 decision 6), and Home's first run. */}
@@ -705,10 +706,10 @@ export function SignInCard({ onSubmit, onPasskey, notice, passwordRequired = fal
 }
 
 // `pairing`: an owner's session (requests to join are shown here in full, not floating); `onStart` / `onNewTerminal`: a live link.
-export function MachinesPage({ machines, agents = [], onBack, onForget, focus, pairing, onStart, onNewTerminal }: { focus?: string; machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; onBack: () => void; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>>; pairing?: PairingUi; onStart?: (node: string) => void; onNewTerminal?: (node: string) => void }) {
+export function MachinesPage({ machines, agents = [], onBack, onForget, focus, pairing, onStart, onNewTerminal, heldGrants, revokeHeld }: { focus?: string; machines: readonly MachineModel[]; agents?: readonly AgentTileModel[]; onBack: () => void; onForget?: (ids: string[], refuseReturn: boolean) => Promise<Map<string, string | undefined>>; pairing?: PairingUi; onStart?: (node: string) => void; onNewTerminal?: (node: string) => void; heldGrants?: (machine: string) => Promise<HelperGrant[]>; revokeHeld?: (machine: string, grant: HelperGrant) => Promise<void> }) {
   return (
     <PageFrame wide title={t('machines-title')} onBack={onBack}>
-      <NetworkView machines={machines} agents={agents} hubName={window.location.host} onForget={onForget} focus={focus} pairing={pairing} onStart={onStart} onNewTerminal={onNewTerminal} />
+      <NetworkView machines={machines} agents={agents} hubName={window.location.host} onForget={onForget} focus={focus} pairing={pairing} onStart={onStart} onNewTerminal={onNewTerminal} heldGrants={heldGrants} revokeHeld={revokeHeld} />
     </PageFrame>
   );
 }
