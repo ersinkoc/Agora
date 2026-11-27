@@ -229,17 +229,23 @@ pub fn skill_header_ok(skill: &v1::SkillDef) -> bool {
     if lines.next() != Some("---") {
         return false;
     }
+    // The first key starts the line, which sets the mapping's indentation at 0: an indented line after it can only continue the value
+    // above it. An indented line before any key (a whole mapping indented, which YAML allows) is refused.
+    let mut keyed = false;
     for line in lines {
         if line == "---" {
-            return true;
+            return keyed;
         }
-        if line.trim().is_empty()
-            || line.starts_with('#')
-            || line.starts_with(' ')
-            || line.starts_with('\t')
-        {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !keyed {
+                return false;
+            }
+            continue;
+        }
+        keyed = true;
         match line.split_once(':') {
             Some((key, _)) if key == "name" || key == "description" => {}
             _ => return false,
@@ -1548,6 +1554,9 @@ mod tests {
             "---\n? allowed-tools\n---\n",
             "---\nname: r\n",
             "---\nnamex: r\n---\n",
+            "---\n allowed-tools: Bash\n name: x\n description: y\n---\n",
+            "---\n# note\n  allowed-tools: Bash\nname: x\n---\n",
+            "---\n---\n",
         ] {
             assert!(!skill_header_ok(&skill(bad)), "{bad:?}");
         }
