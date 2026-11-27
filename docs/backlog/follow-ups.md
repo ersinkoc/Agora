@@ -38,8 +38,7 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   id cut at 160 bytes makes `agents_list {scope:"hub", project}` miss other machines' agents; the hub answers `fleet_status` without
   checking that the asking node's link agreed `mesh.fleet_status.v1`; two clones differing only in case on one older node get commands in
   the latest clone's spelling; a `Repo.GIT` remote does not fold (`.git` stripped case-sensitively).
-- **Web and terminal client** (suspected, #1232): a sound waiting for its 1 s gap still plays after `AgentAlerts` stops knowing the fleet;
-  sound settings have no storage listener across windows; on Windows AltGr arrives as Ctrl+Alt, so a Ctrl+Alt+Q binding takes AltGr+Q from
+- **Web and terminal client** (suspected, #1232): on Windows AltGr arrives as Ctrl+Alt, so a Ctrl+Alt+Q binding takes AltGr+Q from
   text fields; a chord started outside a terminal completes before the terminal-keeps-its-keys rule; `agora … 2>&1 | head -1` can panic
   writing to a closed stderr; the terminal client's `load_file` checks a theme's size, then reads the whole file.
 - **Title rules** (#1204): the stale title after a denied or escaped approval and after Esc mid-turn is not captured (**human**: real

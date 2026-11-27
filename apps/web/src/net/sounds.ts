@@ -75,7 +75,16 @@ export const soundPrefs = {
   subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; },
   // For tests: forget what this visit held.
   reset() { prefs = undefined; muted = undefined; emit(); },
+  /** Another window of this browser changed the sound settings or the muted agents: read them again (#1232). */
+  changedElsewhere(key: string | null) {
+    if (key !== null && key !== PREFS_KEY && key !== MUTED_KEY) return;
+    if (key === null || key === PREFS_KEY) prefs = undefined;
+    if (key === null || key === MUTED_KEY) muted = undefined;
+    emit();
+  },
 };
+// The browser tells every other window when one writes storage; `null` is a cleared storage.
+if (typeof window !== 'undefined') window.addEventListener('storage', (e) => soundPrefs.changedElsewhere(e.key));
 
 // One event: a sound that may play. `agent` is the hub-wide key of the agent it is for (an event for no agent is never muted by one).
 export interface SoundEvent { kind: SoundKind; agent?: string }

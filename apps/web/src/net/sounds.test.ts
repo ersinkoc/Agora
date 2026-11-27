@@ -169,4 +169,23 @@ describe('a burst is one sound', () => {
     // 25 events from 50.00 s to 53.12 s: one sound a second (at 50, 51, 52, 53 and 54 s), not 25.
     expect(played.map((t) => t - 50_000)).toEqual([0, 1000, 2000, 3000, 4000]);
   });
+
+  it("reads the settings again when another window changes them (#1232)", () => {
+    const store = new Map<string, string>();
+    const kv = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } };
+    soundPrefs.reset();
+    expect(soundPrefs.get(kv).on).toBe(false);
+    // Another window turns sounds on and mutes an agent.
+    store.set('agora.sounds.v1', JSON.stringify({ ...SOUND_DEFAULTS, on: true }));
+    let told = 0;
+    const off = soundPrefs.subscribe(() => { told += 1; });
+    soundPrefs.changedElsewhere('some.other.key');
+    expect(told).toBe(0);
+    expect(soundPrefs.get(kv).on).toBe(false);
+    soundPrefs.changedElsewhere('agora.sounds.v1');
+    expect(told).toBe(1);
+    expect(soundPrefs.get(kv).on).toBe(true);
+    off();
+    soundPrefs.reset();
+  });
 });

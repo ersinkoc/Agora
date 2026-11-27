@@ -1,0 +1,1 @@
+- Sound settings changed in one window apply in the others at once, and a waiting sound for an agent the window no longer knows is not played.

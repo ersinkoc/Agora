@@ -55,7 +55,9 @@ export function AgentAlerts({ agents, attention, ready, safe = SAFE, page = read
   const where = (): SoundPresence => ({ ...latest.current.page(), viewing: onScreen.get().focused });
   const stillAudible = (ev: SoundEvent): boolean => {
     if (!audible(ev, soundPrefs.get(), soundPrefs.muted(), where(), latest.current.safe)) return false;
-    // A sound that waited says something still true: the agent still asks, or is still finished.
+    // A sound that waited says something still true: the agent still asks, or is still finished, and the window still knows it (a
+    // fleet that went away with the connection says nothing any more, #1232).
+    if (ev.agent !== undefined && !latest.current.agents.some((x) => x.id === ev.agent)) return false;
     const s = seen.current;
     if (!s || ev.agent === undefined) return true;
     return ev.kind === 'needs-you' ? s.asking.has(ev.agent) : s.states.get(ev.agent) === 'idle' || s.states.get(ev.agent) === 'finished';
