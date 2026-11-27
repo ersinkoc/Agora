@@ -106,7 +106,7 @@ format = "json"                         # only json for now
 # hold at once. Working and blocked readings apply at once. While a change waits, the next check is at the visible floor (100 ms).
 # The node's facts and the agent's own reports bypass it. 0 (or no table) is "at once".
 # idle_confirm_ms = 300                      # 0..=2000
-# blocked_hold_ms = 800                      # 0..=5000
+# blocked_hold_ms = 800                      # 0..=5000; needs idle_confirm_ms > 0 (rest after a hold is confirmed too)
 
 [skills]
 # ADR-0122 step 5 (optional; older engines ignore it): how the kind loads a folder of the owner's shared skills. The node writes the

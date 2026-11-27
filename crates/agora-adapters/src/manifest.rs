@@ -765,7 +765,12 @@ impl Manifest {
             return Err(invalid("min_engine"));
         }
         if let Some(d) = &self.detection {
-            if d.idle_confirm_ms > 2000 || d.blocked_hold_ms > 5000 {
+            // A hold without a confirm would let a frame caught mid-redraw after a key make a blocked agent idle at once (agora-ac's
+            // read of 3d29c44b): a kind that holds blocked also confirms rest.
+            if d.idle_confirm_ms > 2000
+                || d.blocked_hold_ms > 5000
+                || (d.blocked_hold_ms > 0 && d.idle_confirm_ms == 0)
+            {
                 return Err(invalid("detection"));
             }
         }
@@ -1119,6 +1124,7 @@ mod launch_tests {
         for bad in [
             "idle_confirm_ms = 2001",
             "blocked_hold_ms = 5001",
+            "blocked_hold_ms = 800",
             "idle_confirm_ms = -1",
             "other = 1",
         ] {
