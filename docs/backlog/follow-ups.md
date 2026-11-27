@@ -53,6 +53,11 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   and every agent (and what they start, builds included) in the one `agora-node.service` cgroup. When it reached 21.7 GB, systemd-oomd
   killed the whole unit (8 processes): the node and the agents the holder was meant to keep. Give each held agent its own transient
   scope (`systemd-run --user --scope`, platform code), so pressure ends one agent and never the node or the others; measure first.
+- **WrongStack agents have no mesh** (external, WrongStack 1.7.22, 2026-11-27): `wstack --mcp-config <file>` starts Agora's
+  `agora mesh stdio` and completes `initialize` and `tools/list`, but WrongStack never adds the server's tools to its catalog
+  (`tool_search` finds none; `tool_use` says "not found" for every name). Reproduced with a one-tool stdio server; a project
+  `.mcp.json` is not read and `wstack mcp add` refuses ids outside its own catalog. Nothing to change on Agora's side; a note went to
+  WrongStack's developer. Recheck on the next WrongStack release (the `wrongstack` manifest's `[mcp]` stays as it is).
 
 ## Windows (**win**)
 
