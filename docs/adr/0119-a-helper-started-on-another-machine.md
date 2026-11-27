@@ -337,7 +337,13 @@ New threat-model rows (numbers are the next free ones when built):
    it asked (with the run it asked from). The target's results go out on the same link, offered again for 15 minutes when the hub
    cannot take them. The node offers `mesh.spawn.remote` while its policy allows. End to end through a real hub:
    `crates/agora/tests/hub_dial.rs` `an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there`.
-5. The window and the terminal client: not started.
+5. The window and the terminal client: in part. The web window reads `agent.start.remote` (`net/view.ts` `startRequest`), shows the
+   card with both machines and "More like this" as a standing grant (6 at a time; its helpers may ask too), signs v4
+   (`net/approval.ts` `remoteStartSignedMessage`, checked against the shared vectors) and sends `remote_grant`; a helper from another
+   machine hangs under its parent there in the agent tree (the hub fills `AgentSnapshot.parent_node_id` and
+   `parent_node_agent_id`). The terminal client signs v4 for this start only (no grant). Not built yet: the live-grant indicator with
+   Revoke, the choice of a time, "any integrated kind" and "folders below" on the card, and following a remote helper from the asking
+   side. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
 
 ## Consequences
 

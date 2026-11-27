@@ -178,6 +178,44 @@ pub fn start_message_v3(
     m
 }
 
+/// ADR-0119 decision 4: the bytes a device signs to decide an `agent.start.remote` card (`agora-node::approvals::start_signed_message_v4`,
+/// shared vectors `schema/fixtures/signing/approval-start-v4.json`): the domain, one NUL, then each field as its byte length, `:`, the field.
+/// This client gives no standing grant (every grant field `0`); grants are given in the web window.
+#[allow(clippy::too_many_arguments)]
+pub fn start_message_v4(
+    node_id: &str,
+    origin_node: &str,
+    origin_agent: &str,
+    approval_id: &str,
+    approved: bool,
+    settings: &[(String, String)],
+    options: &[String],
+    detail: &str,
+) -> Vec<u8> {
+    let hash = hex(ring::digest::digest(&ring::digest::SHA256, detail.as_bytes()).as_ref());
+    let mut m = b"agora-approval-start-v4\0".to_vec();
+    for part in [
+        node_id,
+        origin_node,
+        origin_agent,
+        approval_id,
+        if approved { "1" } else { "0" },
+        &signed_pairs(settings),
+        &signed_list(options),
+        "0",
+        "0",
+        "0",
+        "0",
+        "0",
+        &hash,
+    ] {
+        m.extend_from_slice(part.len().to_string().as_bytes());
+        m.push(b':');
+        m.extend_from_slice(part.as_bytes());
+    }
+    m
+}
+
 /// The exact bytes a device signs for a grant (ADR-0041): a domain tag, then node id, grant id, scope, the commands joined by commas and
 /// the expiry in decimal milliseconds, NUL-separated.
 pub fn grant_message(
@@ -625,6 +663,33 @@ pub fn new_grant_id() -> Option<String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// ADR-0119: the v4 vectors with no grant are signed byte for byte as the node checks them.
+    #[test]
+    fn the_shared_start_v4_vectors_without_a_grant_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v4.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut seen = 0;
+        for c in v["cases"].as_array().unwrap() {
+            if c["grant"]["max_running"].as_u64() != Some(0) {
+                continue;
+            }
+            seen += 1;
+            let s = |k: &str| c[k].as_str().unwrap().to_string();
+            let detail = s("detail");
+            let m = crate::client::decision_message(
+                &s("node"),
+                &s("approval_id"),
+                "agent.start.remote",
+                &detail,
+                c["approved"].as_bool().unwrap(),
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, s("hex"), "{}", c["name"]);
+        }
+        assert!(seen >= 3);
+    }
 
     #[test]
     fn the_message_is_the_one_the_node_rebuilds() {

@@ -44,6 +44,42 @@ export async function startSignedMessage(
   return Uint8Array.from(out);
 }
 
+/** ADR-0119 decision 12: the scope of a standing grant given on a card for a start another machine asked for. `maxRunning` 0 is no
+ * grant (every other field then 0 or false). */
+export interface RemoteGrantChoice { maxRunning: number; anyKind: boolean; belowFolder: boolean; chain: boolean; untilMs: number }
+
+export const NO_REMOTE_GRANT: RemoteGrantChoice = Object.freeze({ maxRunning: 0, anyKind: false, belowFolder: false, chain: false, untilMs: 0 });
+
+/** ADR-0119 decision 4: the bytes of a decision on an `agent.start.remote` card: `agora-approval-start-v4`, one NUL, then F(node_id)
+ * F(origin_node) F(origin_agent) F(approval_id) F(verdict) F(settings) F(launch_options) F(grant_max_running) F(grant_any_kind)
+ * F(grant_below_folder) F(grant_chain) F(grant_until_ms) F(sha256(detail)), F(x) being the UTF-8 byte length of x, `:`, then x; the
+ * settings and options written as in v3 (crates/agora-node/src/approvals.rs `start_signed_message_v4`, vectors in
+ * schema/fixtures/signing/approval-start-v4.json). The settings and options are read from the detail as shown and hashed. */
+export async function remoteStartSignedMessage(
+  nodeId: string, originNode: string, originAgent: string, approvalId: string, approved: boolean, grant: RemoteGrantChoice, detail: string,
+  subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const enc = new TextEncoder();
+  const hash = toHex(new Uint8Array(await subtle.digest('SHA-256', enc.encode(detail) as BufferSource)));
+  const flag = (b: boolean) => (b ? '1' : '0');
+  const fields = [
+    nodeId, originNode, originAgent, approvalId, flag(approved),
+    signedPairs(detailSettings(detail)), signedList(detailLaunchOptions(detail).map((o) => o.id)),
+    String(grant.maxRunning), flag(grant.anyKind), flag(grant.belowFolder), flag(grant.chain), String(grant.untilMs), hash,
+  ];
+  const body = fields.map((f) => `${enc.encode(f).length}:${f}`).join('');
+  return Uint8Array.from([...enc.encode('agora-approval-start-v4'), 0, ...enc.encode(body)]);
+}
+
+/** ADR-0119: the signature of a decision on an `agent.start.remote` card. */
+export async function signRemoteStart(
+  device: Device, nodeId: string, originNode: string, originAgent: string, approvalId: string, approved: boolean, grant: RemoteGrantChoice,
+  detail: string, subtle: SubtleCrypto = crypto.subtle,
+): Promise<Uint8Array> {
+  const message = await remoteStartSignedMessage(nodeId, originNode, originAgent, approvalId, approved, grant, detail, subtle);
+  return new Uint8Array(await subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, device.keys.privateKey, message as BufferSource));
+}
+
 /** ADR-0101: the bytes of an "always" answer (`ApprovalResolve.scope` = ALWAYS, approved): `agora-approval-always-v1`, one NUL, then
  * F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id), where F(x) is
  * the UTF-8 byte length of x, `:`, then x (crates/agora-node/src/approvals.rs, vectors in schema/fixtures/signing/approval-always-v1.json).

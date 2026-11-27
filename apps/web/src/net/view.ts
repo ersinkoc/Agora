@@ -190,7 +190,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       nodeId: a.nodeId ?? '', worktreeId: a.worktreeId ?? '', kind: a.kind ?? '', state: a.state ?? 0,
       reported: !!a.reported, running: !!a.running, sinceMs: 0,
       tokens: num(a.inputTokens) + num(a.outputTokens),
-      parentId: a.parentAgentId || undefined,
+      parentId: a.parentAgentId || remoteParent(a.parentNodeId, a.parentNodeAgentId),
       ...(a.interrupted ? { interrupted: { resumable: !!a.resumable, atMs: num(a.interruptedAtMs), folder: a.folder ?? '', stillRunning: !!a.stillRunning }, sinceMs: num(a.interruptedAtMs) } : {}),
       skipsPermissions: !!a.skipsPermissions,
       // #902: how a closed agent ended (`AgentSnapshot.exit_code`), so a reloaded window still shows one that failed as failed.
@@ -399,7 +399,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       v.agents.set(q(b.agentId), {
         nodeId: b.nodeId ?? '', worktreeId: q(b.worktreeId), kind: b.kind ?? '', state: 3 /* idle */,
         reported: false, running: true, sinceMs: at, tokens: kept ? kept.tokens : 0, startedMs: kept ? kept.startedMs : at,
-        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : remoteParent(b.parentNodeId, b.parentNodeAgentId),
         skipsPermissions: !!b.skipsPermissions,
         ...(session ? { session } : {}),
       });
@@ -474,7 +474,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (!v.agents.has(key) && v.forgottenAgents?.has(key)) break; // the hub keeps it forgotten (ADR-0053)
       const a: AgentV = v.agents.get(key) ?? {
         nodeId: producer, worktreeId: q(''), kind: b.kind ?? '', state: 4, reported: false, running: false, sinceMs: 0, tokens: 0,
-        parentId: b.parentAgentId ? q(b.parentAgentId) : undefined,
+        parentId: b.parentAgentId ? q(b.parentAgentId) : remoteParent(b.parentNodeId, b.parentNodeAgentId),
       };
       a.running = false;
       a.state = 4 /* done */;
@@ -678,7 +678,10 @@ export interface ApprovalModel {
 
 // An agent's request to start another (ADR-0057), read from the approval's detail. Every field is the asking agent's text: shown, never
 // interpreted. The detail itself is what the decision is signed over, so it is kept as it came.
-export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[]; options: StartOption[] }
+export interface StartRequest { agent: string; agentKind: string; node: string; kind: string; folder: string; prompt: string; inside: boolean; worktree: boolean; depth: number; grantAllowed: boolean; settings: StartSetting[]; options: StartOption[]; remote?: RemoteStart }
+// ADR-0119: a start another machine asked this one for (`agent.start.remote`): the asking machine (the hub's word) and its agent and that
+// agent's kind (the asking machine's word).
+export interface RemoteStart { originNode: string; originAgent: string; originAgentKind: string }
 // ADR-0066: a launch setting the request asks for (`label` is the machine's Fluent id for it, `value` the agent's text: shown, never interpreted).
 export interface StartSetting { id: string; label: string; value: string }
 
@@ -693,7 +696,23 @@ export function startSettings(raw: unknown): StartSetting[] {
   });
 }
 
+/** ADR-0119 decision 10: a helper another machine asked for hangs under its parent there (the hub-wide key `<machine>/<agent>`); its own
+ *  `parent_agent_id` stays empty so an older window shows it at the top level, never under a wrong local agent. */
+function remoteParent(node: string | null | undefined, agent: string | null | undefined): string | undefined {
+  return node && agent && !node.includes('/') && !agent.includes('/') ? `${node}/${agent}` : undefined;
+}
+
 export function startRequest(action: string, detail: string): StartRequest | undefined {
+  if (action === 'agent.start.remote') {
+    try {
+      const d = JSON.parse(detail) as Record<string, unknown>;
+      const s = (k: string) => (typeof d[k] === 'string' ? (d[k] as string) : '');
+      // The folder is a full path on this machine, named by the asker: never "outside" anything here, and the depth is the asker's.
+      return { agent: s('origin_agent'), agentKind: s('origin_agent_kind'), node: s('node'), kind: s('kind'), folder: s('folder'), prompt: s('prompt'), inside: true, worktree: d.worktree === true, depth: typeof d.depth === 'number' ? d.depth : 0, grantAllowed: d.grant_allowed === true, settings: startSettings(d.settings), options: detailLaunchOptions(detail), remote: { originNode: s('origin_node'), originAgent: s('origin_agent'), originAgentKind: s('origin_agent_kind') } };
+    } catch {
+      return undefined;
+    }
+  }
   if (action !== 'agent.start') return undefined;
   try {
     const d = JSON.parse(detail) as Record<string, unknown>;

@@ -2694,6 +2694,31 @@ pub fn decision_message(
     detail: &str,
     approved: bool,
 ) -> Vec<u8> {
+    if action == "agent.start.remote" {
+        // ADR-0119: decided over v4, with no standing grant from this client. The asking machine and agent are the node's words in the
+        // detail, which the node binds to its own record of the request.
+        let v: serde_json::Value = serde_json::from_str(detail).unwrap_or_default();
+        let s = |k: &str| {
+            v.get(k)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let options: Vec<String> = start_option_rows(detail)
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect();
+        return crate::device::start_message_v4(
+            node,
+            &s("origin_node"),
+            &s("origin_agent"),
+            local,
+            approved,
+            &start_settings(detail),
+            &options,
+            detail,
+        );
+    }
     if action != "agent.start" {
         return approval_message(node, local, approved);
     }

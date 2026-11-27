@@ -123,6 +123,9 @@ pub struct AgentView {
     pub session: SessionView,
     /// ADR-0057: the hub-wide key (`<node>/<agent>`) of the agent that started this one; empty when the user did.
     pub parent_agent_id: String,
+    /// ADR-0119 decision 10: a helper another machine asked for: its parent's machine and that machine's agent (empty otherwise).
+    pub parent_node_id: String,
+    pub parent_node_agent_id: String,
     /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
     pub launch_options: Vec<String>,
     pub skips_permissions: bool,
@@ -999,6 +1002,8 @@ impl View {
                         } else {
                             q(&e.parent_agent_id)
                         },
+                        parent_node_id: e.parent_node_id.clone(),
+                        parent_node_agent_id: e.parent_node_agent_id.clone(),
                         interrupted: None,
                         launch_options: e.launch_options.clone(),
                         skips_permissions: e.skips_permissions,
@@ -1035,6 +1040,8 @@ impl View {
                         } else {
                             q(&e.parent_agent_id)
                         },
+                        parent_node_id: e.parent_node_id.clone(),
+                        parent_node_agent_id: e.parent_node_agent_id.clone(),
                         interrupted: None,
                         launch_options: Vec::new(),
                         skips_permissions: false,
@@ -2276,6 +2283,28 @@ mod tests {
         v.apply(&ev("n1", 2, helper));
         assert_eq!(v.agents["n1/b"].parent_agent_id, "n1/a");
         assert_eq!(v.agents["n1/a"].parent_agent_id, "");
+    }
+
+    /// ADR-0119 decision 10: a helper another machine asked for names its parent there, and no local parent.
+    #[test]
+    fn a_helper_from_another_machine_keeps_its_parents_machine() {
+        let mut v = View::default();
+        let mut s = match started("h") {
+            Body::AgentStarted(s) => s,
+            _ => unreachable!(),
+        };
+        s.parent_node_id = "mac".into();
+        s.parent_node_agent_id = "agent-3".into();
+        v.apply(&ev("n1", 1, Body::AgentStarted(s)));
+        let a = &v.agents["n1/h"];
+        assert_eq!(
+            (
+                a.parent_agent_id.as_str(),
+                a.parent_node_id.as_str(),
+                a.parent_node_agent_id.as_str()
+            ),
+            ("", "mac", "agent-3")
+        );
     }
 
     #[test]

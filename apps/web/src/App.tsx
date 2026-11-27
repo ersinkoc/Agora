@@ -19,7 +19,7 @@ import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
 import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
-import { approvalFailureKey, indexedDbStore, signApproval, signStart, thisDevice, type Device } from './net/approval';
+import { approvalFailureKey, indexedDbStore, NO_REMOTE_GRANT, signApproval, signRemoteStart, signStart, thisDevice, type Device, type RemoteGrantChoice } from './net/approval';
 import { answerFields, answerPlan } from './net/always';
 import type { StartChoice } from './components/StartApproval';
 import { forgetSkipAnswer, forgetSkipCapable, isSkipCapable, recordSkipAnswer, signSkip, SKIP_ACTION } from './net/skipApproval';
@@ -268,16 +268,28 @@ export function App() {
       if (a.skipUnknown || (a.action === SKIP_ACTION && !a.skip)) { setNotice('skip-approval-unknown'); return false; }
       if (a.skip && !isSkipCapable(a.node)) { setNotice('skip-approval-other-window'); return false; }
       // ADR-0101: an "always" answer over its own bytes with scope ALWAYS; any other over its own message, with no scope.
+      // ADR-0119: a start another machine asked for is decided over v4; "more like this" is a standing grant (its N, and whether the
+      // helpers may ask too), signed field by field. The local grant fields stay 0 there.
+      const remote = a.start?.remote;
+      const remoteGrant: RemoteGrantChoice = remote && approved && helperGrant > 0
+        ? { maxRunning: Math.min(helperGrant, 20), anyKind: false, belowFolder: false, chain: helpersMayStart, untilMs: 0 }
+        : NO_REMOTE_GRANT;
       const fields = await answerFields(device, a, approved, always, () => (a.skip
         ? signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
-        : a.start
-          ? signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
-          : signApproval(device, a.node, a.localId, approved)));
+        : remote
+          ? signRemoteStart(device, a.node, remote.originNode, remote.originAgent, a.localId, approved, remoteGrant, a.detail)
+          : a.start
+            ? signStart(device, a.node, a.localId, approved, helperGrant, helpersMayStart, a.detail)
+            : signApproval(device, a.node, a.localId, approved)));
       if (!fields) { setNotice('approval-scope-unavailable'); return false; }
       const { signature } = fields;
       // What this window answered, kept before the answer goes so a switch applied at once is still known as approved here.
       if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
-      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature, helperGrant, helpersMayStart, ...(fields.scope ? { scope: fields.scope } : {}) } });
+      await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature,
+        ...(remote
+          ? { helperGrant: 0, helpersMayStart: false, ...(remoteGrant.maxRunning > 0 ? { remoteGrant: { maxRunning: remoteGrant.maxRunning, anyKind: false, belowFolder: false, chain: remoteGrant.chain, untilMs: 0 } } : {}) }
+          : { helperGrant, helpersMayStart }),
+        ...(fields.scope ? { scope: fields.scope } : {}) } });
       return true;
     } catch (e) {
       forgetSkipAnswer(a.id);

@@ -117,6 +117,17 @@ composer) they are a **card in short** with **Review**, and the whole request is
   `review-once-home-*.png` (Review opened from Home's row), `review-once-attention-*.png` (from the attention dialog, in its place) and
   `review-once-grant-*.png` (the grant's segmented control, "More like this" chosen by keyboard).
 
+### A start another machine asks for (ADR-0119)
+
+An agent on another machine can ask this one to start a helper (`agent.start.remote`). The card is the start card with both machines in
+its title ("claude-code on mac asks to start a codex agent here on Laptop"), a line saying the folder is on this machine and the asking
+machine can follow the agent it starts, the folder, any settings and launch options, and the whole first prompt. "More like this" is a
+standing grant on this machine: later starts like this from that machine go ahead without a card, up to 6 of its helpers at a time, for
+at most 24 hours, revocable; "The agents it starts may ask too" extends it to the agents of that chain, on any machine. A start with
+settings or launch options is never granted. The decision is signed over `agora-approval-start-v4` with the grant field by field. The
+terminal client answers such a card for this start only. A helper started this way hangs under its parent on the other machine in the
+agent tree.
+
 ## A viewer's window (ADR-0106)
 
 A viewer watches: the hub refuses their answer and writes the refusal down in the owner's Activity, so their window offers none

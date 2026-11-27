@@ -827,6 +827,8 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 input_tokens: a.input_tokens,
                 output_tokens: a.output_tokens,
                 parent_agent_id: a.parent_agent_id.clone(),
+                parent_node_id: a.parent_node_id.clone(),
+                parent_node_agent_id: a.parent_node_agent_id.clone(),
                 interrupted: a.interrupted.is_some(),
                 resumable: a.interrupted.as_ref().is_some_and(|i| i.resumable),
                 interrupted_at_ms: a.interrupted.as_ref().map_or(0, |i| i.at_ms),

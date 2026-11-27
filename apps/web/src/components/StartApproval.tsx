@@ -10,6 +10,8 @@ export interface StartChoice { grant: number; nested: boolean }
 
 // How many starts a "more like this" answer allows, this one included (the node takes at most 10).
 export const GRANT_SIZE = 3;
+// ADR-0119 decision 12: for a start another machine asked for, how many of its helpers a standing grant lets run here at once (at most 20).
+export const REMOTE_GRANT_SIZE = 6;
 
 // ADR-0066: a setting's name in the window's own words: the machine's label when it is one of the window's setting texts (`setting-model`,
 // `setting-effort`), else the setting's id as text. Never the agent's words: the label comes from the machine's manifest, not the request.
@@ -22,6 +24,10 @@ const settingName = (st: StartSetting) => (/^setting-[a-z0-9-]{1,32}$/.test(st.l
  *  kind it would start. The machine's and the agent's names as this window knows them; where it does not know one, words, never an id
  *  (the request's own `node` and `agent` fields are ids). */
 export function startTitle(approval: ApprovalModel, start: StartRequest, machine = true): string {
+  // ADR-0119: another machine's agent asks this one; the asking machine is the hub's word, the agent's kind that machine's.
+  if (start.remote) {
+    return t('start-approval-remote-title', { agentKind: visible(start.remote.originAgentKind || start.remote.originAgent), from: visible(start.remote.originNode), machine: visible(approval.machineName?.trim() || start.node), kind: visible(start.kind) });
+  }
   const who = visible(approvalName(approval));
   return machine && approval.machineName?.trim()
     ? t('start-approval-title', { name: who, machine: visible(approval.machineName), kind: visible(start.kind) })
@@ -83,7 +89,11 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
   // The node gives a grant only when the request says it may (inside the asker's folder, not a shell); the choice is not offered otherwise.
   const who = visible(approvalName(approval));
   const title = startTitle(approval, start);
-  const choice = (): StartChoice => (start.grantAllowed ? { grant: more ? GRANT_SIZE : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
+  const size = start.remote ? REMOTE_GRANT_SIZE : GRANT_SIZE;
+  const choice = (): StartChoice => (start.grantAllowed ? { grant: more ? size : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
+  const moreText = start.remote
+    ? t('start-approval-remote-more', { count: size, kind: visible(start.kind), from: visible(start.remote.originNode) })
+    : t('start-approval-more', { count: size, kind: visible(start.kind), name: who });
   const facts = [
     { label: t('start-approval-folder'), value: <span dir="ltr">{visible(start.folder)}{start.worktree ? ` · ${t('start-approval-worktree')}` : ''}</span>, mono: true },
     ...start.settings.map((st) => ({ label: settingName(st), value: <span dir="ltr">{visible(st.value)}</span>, mono: true })),
@@ -103,7 +113,8 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
       <div className="flex flex-col gap-2 text-xs">
         <KeyValue items={facts} />
         {skipping.length > 0 && <p className="m-0 text-danger">{t('start-approval-does-not-ask')}</p>}
-        {start.depth > 1 && <p className="m-0 text-muted">{t('start-approval-helper')}</p>}
+        {start.remote && <p className="m-0 text-muted" data-remote-start>{t('start-approval-remote-note', { from: visible(start.remote.originNode) })}</p>}
+        {start.depth > (start.remote ? 0 : 1) && <p className="m-0 text-muted">{t('start-approval-helper')}</p>}
         {!start.inside && <p className="m-0 text-danger">{t('start-approval-outside')}</p>}
         <div>
           <span className="text-muted">{t('start-approval-prompt')}</span>
@@ -118,9 +129,9 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
         {onResolve && start.grantAllowed && <div className="flex min-w-0 flex-col items-start gap-1.5" data-grant-choice>
           <span id={`${scope}-label`} className="text-muted">{t('start-approval-scope')}</span>
           <SegmentedControl labelledBy={`${scope}-label`} value={more ? 'more' : 'once'} onChange={(v) => setMore(v === 'more')}
-            items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who }) }]} />
-          <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{t('start-approval-more', { count: GRANT_SIZE, kind: visible(start.kind), name: who })}</p>
-          {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t('start-approval-nested')}</span></label>}
+            items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: moreText }]} />
+          <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{moreText}</p>
+          {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t(start.remote ? 'start-approval-remote-nested' : 'start-approval-nested')}</span></label>}
         </div>}
         {onResolve && confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
           <div className="min-w-0 flex-1 basis-64"><strong className="block">{t('session-confirm-title')}</strong>

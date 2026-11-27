@@ -54,7 +54,7 @@ import { AgentsSettings } from './components/AgentsSettings';
 import { demoSettingsDevices, demoSettingsKinds, demoSettingsMachines, demoSettingsNow, demoSettingsTrustedOn } from './fixtures';
 import { ScreenPasswordSettings } from './components/Locks';
 import type { IdleMinutes } from './net/idle';
-import { GALLERY_NOW as MACHINES_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
+import { GALLERY_NOW as MACHINES_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoRemoteStartApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
 import { forgetSkipCapable, markSkipCapable } from './net/skipApproval';
 import { SessionBar } from './components/SessionBar';
 import { demoSource, type TerminalSource } from './terminal/source';
@@ -203,6 +203,8 @@ function Themed({ theme, onStart }: { theme: 'dark' | 'light'; onStart?: () => v
         <ApprovalBanner approval={demoStartApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned />
         <div data-start-narrow className="w-[12.5rem]"><ApprovalBanner approval={demoStartNoAskApproval as ApprovalModel} agent={demoAgents[0]} onResolve={() => {}} pinned /></div>
         <div data-start-full className="max-w-xl"><StartApproval approval={demoStartLongApproval} start={demoStartLongApproval.start} density="full" onResolve={() => {}} /></div>
+        {/* ADR-0119: a start another machine asks for, as Review shows it, with its standing-grant choice. */}
+        <div data-start-remote className="max-w-xl"><StartApproval approval={demoRemoteStartApproval} start={demoRemoteStartApproval.start} density="full" onResolve={() => {}} /></div>
         <div data-skip-full className="max-w-xl"><SkipApproval approval={demoSkipApproval as ApprovalModel} density="full" onResolve={() => {}} /></div>
       </div>
       {/* ADR-0106 (#1140): the same requests in a viewer's window, read-only: a plain request and a start's card with no answers, and
