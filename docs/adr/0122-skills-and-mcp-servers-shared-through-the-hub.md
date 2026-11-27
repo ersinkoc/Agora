@@ -127,8 +127,8 @@ mesh socket> <item> <launch id>` (32 random bytes, single use, spent when the ag
 with the agent tool's standard input and output. The window's Shared section says each refusal in words. Review of b9dfb5fe: a launch id also names the item's version, project and kind, so a version the owner changed or a scope narrowed
 since the agent's launch gets nothing (`unknown_item`); only the id in the agent's current file is live; an item whose environment
 sets a loader's or an interpreter's variable (`LD_PRELOAD`, `DYLD_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PATH`, ...) is refused on every
-machine (`env_not_allowed`: it would make an allowed program run anything). **Single use had a cost**, which ADR-0133 removed (2026-11-27): the id now lasts the agent's run with one server at a time; only a
-held agent that outlives a node restart still needs a restart for its launcher. Not built: the URL bridge, and a `share.launch` audit row (the node logs nothing of the value).
+machine (`env_not_allowed`: it would make an allowed program run anything). **Single use had a cost**, which ADR-0133 removed (2026-11-27): the id now lasts the agent's run with one server at a time; a node restart
+stops a held agent's secret servers, which come back when the agent restarts. Not built: the URL bridge, and a `share.launch` audit row (the node logs nothing of the value).
 
 Accepted with the proposed answers. Open questions (with proposed answers): (1) `share.secrets` empty by default, so every machine opts in by name: yes. (2) URL servers
 with secret headers in this step: no, a later step. (3) A new mesh request needs the schema's approval (`shared.launch` is a node-local

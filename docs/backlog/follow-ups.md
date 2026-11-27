@@ -16,6 +16,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   until the agent's next real start (the restart reuses the first launch's arguments); a secret server's launcher is judged again at each
   instance (ADR-0133), so only servers without a secret and skills keep what they had. ADR-0133's node-restart recovery for a held run and
   the URL bridge are not built.
+- **Shared server launcher, residuals** (review of 36ded6a8): a launcher killed outright leaves its server (its own process group) running
+  until its input closes (`PR_SET_PDEATHSIG` in a `pre_exec` in agora-platform would end it on Linux); the group kill after the server
+  was reaped could in theory hit a reused group id in that instant (signal before reaping, `wait_unreaped`).
 - **Shared skills, smaller gaps** (review of 5c7c1410): a kind with `[skills]` but no `[mcp]` (or no mesh endpoint) gets no skill,
   since the shared items are handed out with the mesh server; every agent's plugin folder is named `shared`, which would clash with a
   person's own plugin of that name in Claude Code.

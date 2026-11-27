@@ -1990,34 +1990,38 @@ mod tests {
         let g = s.launch("agent-1", "db", &id).unwrap().instance;
         s.instance_dropped("agent-1", "db", &id, g);
         assert_eq!(s.launch("agent-1", "db", &id), Err("too_soon"));
-        // A stale grant's notices change nothing about a newer one (review of 905cd3fe): a holder of grant 1 whose "server" died is
-        // replaced by grant 2, and grant 1's end does not free grant 2.
-        let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
-        let old = s.launch("agent-1", "db", &id).unwrap().instance;
-        let mut short = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "shared_items::tests::waits_for_its_input",
-                "--ignored",
-                "--nocapture",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        s.instance_started("agent-1", "db", &id, old, short.id());
-        drop(short.stdin.take());
-        short.wait().unwrap();
-        let new = s.launch("agent-1", "db", &id).unwrap().instance;
-        assert_ne!(old, new);
-        s.instance_ended("agent-1", "db", &id, old, true);
-        s.instance_dropped("agent-1", "db", &id, old);
-        assert_eq!(
-            s.launch("agent-1", "db", &id),
-            Err("instance_live"),
-            "grant 2 still holds it"
-        );
-        s.instance_ended("agent-1", "db", &id, new, true);
+        // A stale grant's notices change nothing about a newer one (review of 905cd3fe), where this platform can tell a process again
+        // (not on Windows, where a server's liveness is its launcher's).
+        if agora_platform::process_identity(std::process::id()).is_ok() {
+            // A stale grant's notices change nothing about a newer one (review of 905cd3fe): a holder of grant 1 whose "server" died is
+            // replaced by grant 2, and grant 1's end does not free grant 2.
+            let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
+            let old = s.launch("agent-1", "db", &id).unwrap().instance;
+            let mut short = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "shared_items::tests::waits_for_its_input",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            s.instance_started("agent-1", "db", &id, old, short.id());
+            drop(short.stdin.take());
+            short.wait().unwrap();
+            let new = s.launch("agent-1", "db", &id).unwrap().instance;
+            assert_ne!(old, new);
+            s.instance_ended("agent-1", "db", &id, old, true);
+            s.instance_dropped("agent-1", "db", &id, old);
+            assert_eq!(
+                s.launch("agent-1", "db", &id),
+                Err("instance_live"),
+                "grant 2 still holds it"
+            );
+            s.instance_ended("agent-1", "db", &id, new, true);
+        }
         // A launcher gone while its server still runs (this test's own process stands for it): still taken.
         let id = s.servers_for("agent-1", "p", "k", sock)[0].args[4].clone();
         let g = s.launch("agent-1", "db", &id).unwrap().instance;
