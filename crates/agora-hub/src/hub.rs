@@ -505,6 +505,24 @@ impl Hub {
                 };
                 // Read before the event is folded in: whether an agent is new, and what a decision was about.
                 let audit = spawn_audit(&g.view, &event);
+                // ADR-0119 (review of step 3, finding 2): a helper with a parent on another machine joins that machine's chain only when
+                // the hub sees it start new here under exactly the parent a carried start named.
+                if let Some(Body::AgentStarted(st)) = &event.body {
+                    if !st.parent_node_id.is_empty() {
+                        let new = !g
+                            .view
+                            .agents
+                            .contains_key(&format!("{}/{}", event.producer_id, st.agent_id));
+                        self.helpers().agent_started(
+                            &event.producer_id,
+                            &st.agent_id,
+                            &st.parent_node_id,
+                            &st.parent_node_agent_id,
+                            new,
+                            event.at_ms,
+                        );
+                    }
+                }
                 Self::publish(g, Delivered { pos, event });
                 if let Some((who, action, node, outcome, at_ms)) = audit {
                     let _ = crate::audit::Audit::new(self.store())

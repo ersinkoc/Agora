@@ -1822,10 +1822,14 @@ fn helper_for_node(
             h.root_node.clone_from(&chain.root_node);
             h.root_agent.clone_from(&chain.root_agent);
             h.root_run_id.clone_from(&chain.root_run);
-            if let Err(_refused) =
-                hub.helpers()
-                    .carry(node_id, &target, &h.start_id, chain, now_ms())
-            {
+            if let Err(_refused) = hub.helpers().carry(
+                node_id,
+                &h.from_agent,
+                &target,
+                &h.start_id,
+                chain,
+                now_ms(),
+            ) {
                 audit("agent.start.remote.asked", &target, "rate_limited");
                 return refuse(Error::new(ErrorCode::MeshRateLimited));
             }
@@ -1836,7 +1840,8 @@ fn helper_for_node(
         Some(command_request::Command::HelperStartResult(mut r)) => {
             r.from_node = node_id.to_string();
             // Only the result of a start this hub carried to this machine goes on; anything else is dropped (and audited).
-            if !hub.helpers().awaits(node_id, &r.start_id) {
+            // The destination is the machine that asked, as the hub recorded it: a result for any other is dropped.
+            if !hub.helpers().awaits(node_id, &r.to_node, &r.start_id) {
                 audit("agent.start.remote.result", &r.to_node, "dropped");
                 let _ = answers.send(v1::CommandResponse {
                     request_id: rid.clone(),
@@ -1846,7 +1851,8 @@ fn helper_for_node(
                 });
                 return;
             }
-            hub.helpers().result(node_id, &r.start_id, &r.agent_id);
+            hub.helpers()
+                .result(node_id, &r.to_node, &r.start_id, &r.agent_id, now_ms());
             audit(
                 "agent.start.remote.result",
                 &r.to_node,
@@ -1878,9 +1884,10 @@ fn helper_for_node(
         }
         _ => return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
     };
+    // A carried start that never reaches its target: its first answer is in and nothing waits for its result.
     let first_answer = |hub: &Hub| {
-        if start_of.is_some() {
-            hub.helpers().first_answer(node_id);
+        if let Some(start_id) = &start_of {
+            hub.helpers().abandon(node_id, &target, start_id);
         }
     };
     if target.is_empty() || target == node_id {

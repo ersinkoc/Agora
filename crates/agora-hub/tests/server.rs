@@ -4731,6 +4731,26 @@ async fn a_helper_start_is_carried_with_the_origin_and_chain_the_hub_vouches_for
         (res.from_node.as_str(), res.agent_id.as_str()),
         ("n2", "agent-7")
     );
+    // The hub sees agent-7 start new on n2 under exactly n1's agent-3 (review of step 3, finding 2): now it is in n1's chain.
+    n2.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event(
+            "n2",
+            2,
+            Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-7".into(),
+                node_id: "n2".into(),
+                kind: "codex".into(),
+                parent_node_id: "n1".into(),
+                parent_node_agent_id: "agent-3".into(),
+                ..Default::default()
+            }),
+        ),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut n2).await;
     // The helper on n2 asks in turn: one level deeper in n1's chain.
     let mut deeper = helper_start("s2", "n1", "");
     if let Ok(mut req) = v1::CommandRequest::decode(deeper.payload.as_slice()) {

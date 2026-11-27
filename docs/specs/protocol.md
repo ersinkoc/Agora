@@ -1635,8 +1635,12 @@ four requests below with `protocol.capability_missing` (`capability = mesh.spawn
   `remote_helpers` on (`agora hub remote-helpers on|off|status`; a solo hub carries them without it).
 - **The hub** carries the four requests only between machines that both agreed on `mesh.spawn.remote`; it writes `origin` (every
   request), the chain's `depth` and root (a start, from its own record of the starts it carried) and `from_node` (a result), forwards a
-  `HelperStartResult` only for a start it carried to that machine, and limits each asking machine to 12 starts a minute and 8 waiting
-  for their first answer (`mesh.rate_limited`). `HelperFollow` and `HelperRelease` name their target in the envelope's `target_node`.
+  `HelperStartResult` only for a start it carried to that machine and only to the machine that asked (its `to_node` must be the
+  recorded origin), and limits each asking machine to 12 starts a minute and 8 waiting for their first answer (`mesh.rate_limited`).
+  A helper joins the asker's chain only when the hub sees its own `AgentStarted` start it new on the target, naming exactly the parent
+  the carried start named, so a target cannot bring its other agents into someone's chain. `HelperFollow` and `HelperRelease` name
+  their target in the envelope's `target_node`. Audit rows: `agent.start.remote.asked` and `.released` (`who` is the asking machine),
+  `agent.start.remote.result` (`who` is the target that answered).
 
 ## Durable cross-node task handoffs (ADR-0109)
 
