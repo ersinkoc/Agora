@@ -37,6 +37,8 @@ pub struct Gate {
     /// When the person's input arrived: the hold ends at the next reading without the dialog, unless a reading still showing it came
     /// after [`RELEASE_GRACE`] (the dialog was drawn again after the input, so the input was not an answer: an arrow key, a filter).
     released: Option<Instant>,
+    /// While blocked: the person's input was taken for an answer; the hold is skipped until the dialog shows again.
+    answered: bool,
 }
 
 /// How long after the person's input a reading may still show the dialog before the input no longer counts as its answer: a check can
@@ -59,6 +61,7 @@ impl Gate {
             // reading only within the grace (a check can land before the agent redraws after Enter); a dialog still shown after it was
             // drawn again after the input, which was then a move within it, not an answer.
             self.hold_since = None;
+            self.answered = false;
             let grace = RELEASE_GRACE.min(t.blocked_hold);
             if self
                 .released
@@ -68,13 +71,29 @@ impl Gate {
             }
             return None;
         }
-        let released = self.released.take().is_some();
+        if self.released.take().is_some() && current == AgentState::Blocked {
+            // The person answered: the hold no longer applies to this stretch without the dialog (until the dialog shows again).
+            self.answered = true;
+        }
+        // The hold is measured from the first reading without the dialog, never from the last check that saw it: a check after a long
+        // back-off must not take one redraw for an answer.
+        if current == AgentState::Blocked && !t.blocked_hold.is_zero() && !self.answered {
+            let since = *self.hold_since.get_or_insert(now);
+            if now.saturating_duration_since(since) < t.blocked_hold {
+                self.holding = true;
+                return None;
+            }
+        }
+        self.holding = false;
+        // A move to rest is confirmed from blocked as from working (agora-ac's read of d64a738a): a frame caught mid-redraw never
+        // lasts the confirm time, so an arrow key in a dialog cannot make the agent look free. Blocked -> working stays at once.
         let at_rest = matches!(reading, AgentState::Idle | AgentState::Done);
-        if current == AgentState::Working && at_rest && !t.idle_confirm.is_zero() {
+        let confirms = matches!(current, AgentState::Working | AgentState::Blocked);
+        if confirms && at_rest && !t.idle_confirm.is_zero() {
             return match self.pending {
                 Some((s, since)) if s == reading => {
                     if now.saturating_duration_since(since) >= t.idle_confirm {
-                        self.pending = None;
+                        self.apply();
                         Some(reading)
                     } else {
                         None
@@ -86,15 +105,6 @@ impl Gate {
                 }
             };
         }
-        // The hold is measured from the first reading without the dialog, never from the last check that saw it: a check after a long
-        // back-off must not take one redraw for an answer.
-        if current == AgentState::Blocked && !t.blocked_hold.is_zero() && !released {
-            let since = *self.hold_since.get_or_insert(now);
-            if now.saturating_duration_since(since) < t.blocked_hold {
-                self.holding = true;
-                return None;
-            }
-        }
         self.apply();
         Some(reading)
     }
@@ -103,6 +113,7 @@ impl Gate {
         self.pending = None;
         self.holding = false;
         self.hold_since = None;
+        self.answered = false;
     }
 
     /// No rule matched this check: a rest state being confirmed is dropped (every check must read it), and nothing waits on this
@@ -221,6 +232,31 @@ mod tests {
         g.input(ms(t0, 2000));
         assert_eq!(g.offer(Blocked, Blocked, ms(t0, 2050), &T), None);
         assert_eq!(g.offer(Blocked, Working, ms(t0, 2100), &T), Some(Working));
+    }
+
+    #[test]
+    fn a_frame_caught_midway_after_a_key_never_makes_a_blocked_agent_idle() {
+        let (mut g, t0) = (Gate::default(), Instant::now());
+        assert_eq!(g.offer(Working, Blocked, t0, &T), Some(Blocked));
+        // A key, then one idle reading inside the grace (a torn frame), then the dialog again: no change.
+        g.input(ms(t0, 1000));
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 1050), &T), None);
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 1100), &T), None);
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 1150), &T), None);
+        // A real answer that leaves the agent at rest: idle readings for the confirm time.
+        g.input(ms(t0, 2000));
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 2050), &T), None);
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 2200), &T), None);
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 2350), &T), Some(Idle));
+        // Once the hold expired with no input, rest is confirmed too.
+        assert_eq!(g.offer(Idle, Blocked, ms(t0, 3000), &T), Some(Blocked));
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 3100), &T), None);
+        assert_eq!(
+            g.offer(Blocked, Idle, ms(t0, 3900), &T),
+            None,
+            "hold over, confirm starts"
+        );
+        assert_eq!(g.offer(Blocked, Idle, ms(t0, 4200), &T), Some(Idle));
     }
 
     #[test]

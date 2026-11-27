@@ -4535,7 +4535,8 @@ impl Supervisor {
         let inputs = term.inputs();
         if inputs != entry.inputs_seen {
             entry.inputs_seen = inputs;
-            entry.gate.input(now);
+            // When the key was pressed, not when this check saw it: the grace of a release means what it says.
+            entry.gate.input(term.last_input().unwrap_or(now).min(now));
         }
         let current = entry.agent.state();
         // While the state is the agent's own report, a screen reading changes nothing (`Agent::observe`): the gate is not asked, so

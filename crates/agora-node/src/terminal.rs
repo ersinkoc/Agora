@@ -430,7 +430,31 @@ pub struct TerminalHandle {
     scoped_at: Option<Instant>,
     /// ADR-0117: how many writes of input reached the process (a person's keys, a paste, a typed prompt), so detection can tell that
     /// someone answered a blocked agent.
-    inputs: Arc<std::sync::atomic::AtomicU64>,
+    inputs: Arc<InputCount>,
+}
+
+/// ADR-0117: how many writes of input reached a terminal's process, and when the last one did (milliseconds since [`input_epoch`], plus
+/// one; 0 before any).
+#[derive(Default)]
+pub struct InputCount {
+    writes: std::sync::atomic::AtomicU64,
+    last_ms: std::sync::atomic::AtomicU64,
+}
+
+/// The instant input times are counted from (the first time it is asked for in this process).
+fn input_epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+impl InputCount {
+    fn note(&self) {
+        let ms = u64::try_from(input_epoch().elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.last_ms
+            .store(ms.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// A handle that writes input without the terminal (see [`TerminalHandle::input_handle`]); every write is counted for detection
@@ -438,15 +462,14 @@ pub struct TerminalHandle {
 #[derive(Clone)]
 pub struct InputHandle {
     control: PtyControl,
-    inputs: Arc<std::sync::atomic::AtomicU64>,
+    inputs: Arc<InputCount>,
 }
 
 impl InputHandle {
     /// Send input to the process (see [`PtyControl::write_input`]), counted once it was written.
     pub fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
         self.control.write_input(bytes)?;
-        self.inputs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inputs.note();
         Ok(())
     }
 
@@ -596,14 +619,27 @@ impl TerminalHandle {
     /// not reading and the terminal's input queue is full.
     pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {
         self.control()?.write_input(&bytes)?;
-        self.inputs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inputs.note();
         Ok(())
     }
 
     /// ADR-0117: how many writes of input reached the process so far.
     pub fn inputs(&self) -> u64 {
-        self.inputs.load(std::sync::atomic::Ordering::Relaxed)
+        self.inputs
+            .writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// ADR-0117: when the last write of input reached the process (`None` before any).
+    pub fn last_input(&self) -> Option<Instant> {
+        match self
+            .inputs
+            .last_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            ms => Some(input_epoch() + std::time::Duration::from_millis(ms - 1)),
+        }
     }
 
     /// Resize the terminal. The PTY and the screen change together, between two output chunks.
