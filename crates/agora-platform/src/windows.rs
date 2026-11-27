@@ -1805,6 +1805,182 @@ pub(crate) fn free_space(path: &Path) -> io::Result<u64> {
     Err(os_error(unsafe { GetLastError() }))
 }
 
+// ----- ADR-0136: the machine's figures -----
+
+/// A `FILETIME` as one number (100 ns units).
+fn filetime_u64(t: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+}
+
+/// The busy and the total CPU time from `GetSystemTimes`' three counters: the kernel time includes the idle time, so the total is
+/// kernel + user and the busy part is that less idle.
+fn cpu_ticks(idle: u64, kernel: u64, user: u64) -> (u64, u64) {
+    let total = kernel.saturating_add(user);
+    (total.saturating_sub(idle), total)
+}
+
+/// See [`crate::machine_stats`]: `GetSystemTimes` (summed over every CPU, in 100 ns units), every processor group's active CPUs, and
+/// `GlobalMemoryStatusEx` (`ullAvailPhys` is what the system can give without swapping).
+pub(crate) fn machine_stats() -> io::Result<crate::MachineStats> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows_sys::Win32::System::Threading::{GetActiveProcessorCount, GetSystemTimes};
+    // SAFETY: all-zero FILETIMEs are valid out-buffers.
+    let (mut idle, mut kernel, mut user): (FILETIME, FILETIME, FILETIME) =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: three valid out pointers.
+    if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    let (busy, total) = cpu_ticks(
+        filetime_u64(&idle),
+        filetime_u64(&kernel),
+        filetime_u64(&user),
+    );
+    // SAFETY: ALL_PROCESSOR_GROUPS; a plain call.
+    let cpu_count = unsafe { GetActiveProcessorCount(0xFFFF) };
+    // SAFETY: an all-zero MEMORYSTATUSEX with its length set, as the call requires.
+    let mut mem: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    mem.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    // SAFETY: a valid, sized out-buffer.
+    if unsafe { GlobalMemoryStatusEx(&mut mem) } == 0 {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    Ok(crate::MachineStats {
+        cpu_count: cpu_count.max(1),
+        cpu_busy_ticks: busy,
+        cpu_total_ticks: total,
+        memory_total_bytes: mem.ullTotalPhys,
+        memory_available_bytes: mem.ullAvailPhys,
+    })
+}
+
+/// The volume (`\\?\Volume{...}\`) mounted at `root` (a drive's root or a folder mount point, with its trailing `\`).
+fn volume_of_root(root: &str) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    let mut name = [0u16; 64];
+    // SAFETY: a NUL-terminated wide string and a buffer of the length given.
+    let ok = unsafe {
+        GetVolumeNameForVolumeMountPointW(wide(root).as_ptr(), name.as_mut_ptr(), name.len() as u32)
+    };
+    (ok != 0).then(|| {
+        let n = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+        String::from_utf16_lossy(&name[..n])
+    })
+}
+
+/// The volume that holds `path` (which need not exist all the way down: the nearest existing folder above it decides).
+fn volume_of_path(path: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+    let absolute = std::path::absolute(path).ok()?;
+    let here = absolute.ancestors().find(|p| p.exists())?;
+    let mut root = [0u16; 1024];
+    // SAFETY: a NUL-terminated wide path and a buffer of the length given.
+    let ok = unsafe {
+        GetVolumePathNameW(
+            here.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+                .as_ptr(),
+            root.as_mut_ptr(),
+            root.len() as u32,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let n = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+    volume_of_root(&String::from_utf16_lossy(&root[..n]))
+}
+
+/// The fixed drives (`C:\`), each with its volume, one per volume (a `subst` letter has none and is left out; a volume under two
+/// letters counts once, under the first).
+fn fixed_drives() -> io::Result<Vec<(String, String)>> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
+    const DRIVE_FIXED: u32 = 3;
+    let mut buf = [0u16; 512];
+    // SAFETY: a buffer of the length given; the answer is NUL-separated roots ending in two NULs.
+    let n = unsafe { GetLogicalDriveStringsW(buf.len() as u32, buf.as_mut_ptr()) } as usize;
+    if n == 0 || n > buf.len() {
+        return Err(os_error(unsafe { GetLastError() }));
+    }
+    let mut drives: Vec<(String, String)> = Vec::new();
+    for root in buf[..n]
+        .split(|&c| c == 0)
+        .filter(|r| !r.is_empty())
+        .map(String::from_utf16_lossy)
+    {
+        // SAFETY: a NUL-terminated wide root.
+        if unsafe { GetDriveTypeW(wide(&root).as_ptr()) } != DRIVE_FIXED {
+            continue;
+        }
+        if let Some(volume) = volume_of_root(&root) {
+            if !drives.iter().any(|(_, v)| *v == volume) {
+                drives.push((root, volume));
+            }
+        }
+    }
+    Ok(drives)
+}
+
+/// [`crate::disks`]' order on Windows: the system drive first, then those holding a mark, then the rest by letter; at most 8. `drives`
+/// are (root, volume); `marks` the volume of each mark (`None` when it has none of these).
+fn order_drives(
+    drives: &[(String, String)],
+    system_root: &str,
+    marks: &[Option<String>],
+) -> Vec<(String, Vec<usize>)> {
+    let mut out: Vec<(String, Vec<usize>)> = drives
+        .iter()
+        .map(|(root, volume)| {
+            let holds = marks
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.as_deref() == Some(volume.as_str()))
+                .map(|(k, _)| k)
+                .collect();
+            (root.clone(), holds)
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        let rank =
+            |d: &(String, Vec<usize>)| (!d.0.eq_ignore_ascii_case(system_root), d.1.is_empty());
+        rank(a).cmp(&rank(b)).then_with(|| a.0.cmp(&b.0))
+    });
+    out.truncate(8);
+    out
+}
+
+/// See [`crate::disks`]: the fixed drives (one per volume), mount `C:\`; a mark lies on the drive whose volume holds it. Space is
+/// `GetDiskFreeSpaceExW`'s (free is what this user may use, its quota included).
+pub(crate) fn disks(marks: &[&Path]) -> io::Result<Vec<crate::DiskSpace>> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let drives = fixed_drives()?;
+    let system_root = format!(
+        r"{}\",
+        std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
+    );
+    let mark_volumes: Vec<Option<String>> = marks.iter().map(|m| volume_of_path(m)).collect();
+    Ok(order_drives(&drives, &system_root, &mark_volumes)
+        .into_iter()
+        .filter_map(|(mount, holds)| {
+            let (mut free, mut total) = (0u64, 0u64);
+            // SAFETY: a NUL-terminated wide root and two out values; the third output is optional.
+            let ok = unsafe {
+                GetDiskFreeSpaceExW(wide(&mount).as_ptr(), &mut free, &mut total, null_mut())
+            };
+            (ok != 0 && total > 0).then_some(crate::DiskSpace {
+                mount,
+                total_bytes: total,
+                free_bytes: free,
+                holds,
+            })
+        })
+        .collect())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -2401,5 +2577,71 @@ mod tests {
         assert!(dirs.iter().all(|d| d.is_absolute()), "{dirs:?}");
         assert_eq!(dirs[0], PathBuf::from(r"C:\abs"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// ADR-0136 on Windows: the CPU split, the order of the drives, and this machine's own figures.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod machine_tests {
+    use super::*;
+
+    #[test]
+    fn busy_cpu_is_kernel_and_user_less_idle() {
+        // Kernel time includes the idle time.
+        assert_eq!(cpu_ticks(800, 900, 100), (200, 1000));
+        assert_eq!(cpu_ticks(0, 0, 0), (0, 0));
+        // A counter read out of step never goes below zero.
+        assert_eq!(cpu_ticks(1000, 900, 50), (0, 950));
+    }
+
+    #[test]
+    fn the_system_drive_comes_first_then_those_holding_marks_then_by_letter() {
+        let v = |s: &str| format!(r"\\?\Volume{{{s}}}\");
+        let drives = vec![
+            (r"D:\".to_string(), v("d")),
+            (r"C:\".to_string(), v("c")),
+            (r"F:\".to_string(), v("f")),
+            (r"E:\".to_string(), v("e")),
+        ];
+        let marks = [Some(v("e")), None, Some(v("c")), Some(v("e"))];
+        assert_eq!(
+            order_drives(&drives, r"C:\", &marks),
+            vec![
+                (r"C:\".to_string(), vec![2]),
+                (r"E:\".to_string(), vec![0, 3]),
+                (r"D:\".to_string(), vec![]),
+                (r"F:\".to_string(), vec![]),
+            ]
+        );
+        // The system drive's letter is compared without case; at most 8 drives.
+        let many: Vec<(String, String)> = (b'C'..=b'L')
+            .map(|c| (format!(r"{}:\", c as char), v(&(c as char).to_string())))
+            .collect();
+        let ordered = order_drives(&many, r"c:\", &[]);
+        assert_eq!(ordered.len(), 8);
+        assert_eq!(ordered[0].0, r"C:\");
+    }
+
+    #[test]
+    fn this_machine_reports_its_figures() {
+        let m = machine_stats().unwrap();
+        assert!(
+            m.cpu_count >= 1 && m.cpu_total_ticks >= m.cpu_busy_ticks && m.memory_total_bytes > 0
+        );
+        assert!(m.memory_available_bytes <= m.memory_total_bytes);
+        let here = std::env::temp_dir();
+        let d = disks(&[here.as_path(), Path::new(r"Z:\no\such\place")]).unwrap();
+        assert!(!d.is_empty() && d.iter().all(|x| x.total_bytes >= x.free_bytes));
+        assert!(d.len() <= 8);
+        // The temp folder is on one of them; a mark on no drive is on none.
+        assert_eq!(d.iter().filter(|x| x.holds.contains(&0)).count(), 1);
+        assert!(d.iter().all(|x| !x.holds.contains(&1)));
+        // The system drive first.
+        let system = format!(
+            r"{}\",
+            std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
+        );
+        assert!(d[0].mount.eq_ignore_ascii_case(&system), "{d:?}");
     }
 }

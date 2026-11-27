@@ -64,8 +64,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Windows (**win**)
 
-- **Machine figures on Windows** (ADR-0136): `agora_platform::machine_stats` and `disks` in `windows.rs` (`GetSystemTimes`,
-  `GlobalMemoryStatusEx`, the fixed drives with `GetDiskFreeSpaceExW`); until then a Windows machine shows "does not report".
 - **Shared skill file names Windows reserves** (ADR-0122 step 5): `valid_skill_path` allows a part like `nul` or `con.md`; on a Windows
   node writing it fails, so that machine's agents start without the scope's skills (said once as `skill_not_written`). Decide whether
   the shared rules refuse such parts (hub, node and window together) so the owner hears it at publish time.

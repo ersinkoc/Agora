@@ -1,1 +1,1 @@
-- Each machine's card shows its CPU, memory and every disk, and a disk running low (under 10 % or 5 GB free, critical under 3 GB) leads Home's "Needs you" and is counted on My machines; Linux machines report them first (ADR-0136).
+- Each machine's card shows its CPU, memory and every disk, and a disk running low (under 10 % or 5 GB free, critical under 3 GB) leads Home's "Needs you" and is counted on My machines; Linux and Windows machines report them, macOS follows (ADR-0136).

@@ -38,6 +38,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_LibraryLoader",
   "Win32_System_Pipes",
   "Win32_System_ProcessStatus",
+  # ADR-0136: the machine's memory (`GlobalMemoryStatusEx`) for its figures.
+  "Win32_System_SystemInformation",
   "Win32_System_Threading",
   # The session-end window and its message loop (shutdown safety: WM_QUERYENDSESSION / WM_ENDSESSION reach only a process with a window).
   "Win32_UI_WindowsAndMessaging",
