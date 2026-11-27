@@ -675,6 +675,7 @@ mod tests {
                 requested_ms: 0,
                 expires_ms: 0,
                 binding: None,
+                remote: None,
                 offer: agora_node::approvals::Offer {
                     once: false,
                     always: Some(agora_node::approvals::AlwaysOption {

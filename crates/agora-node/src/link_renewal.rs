@@ -519,6 +519,7 @@ impl Renewer {
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         };
         let mut pending = read(&self.dir, PENDING).and_then(|t| Pending::decode(&t));
         let mut finishing = false;

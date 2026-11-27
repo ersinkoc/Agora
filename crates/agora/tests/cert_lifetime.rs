@@ -189,6 +189,7 @@ impl Rig {
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         };
         let n = DIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sink = sink(&tmp(&format!("{}-{id}-{n}", self.tag)), id);
@@ -661,6 +662,7 @@ fn a_node_renews_its_own_short_certificate_and_stays_connected_past_the_original
         devices: None,
         state_dir: None,
         certs: Some(Arc::clone(&r) as Arc<dyn CertSource>),
+        spawner: None,
     };
     let m = rig.machines.iter().find(|m| m.id == "m").unwrap();
     let timer = link_renewal::spawn(Arc::clone(&r)).unwrap();

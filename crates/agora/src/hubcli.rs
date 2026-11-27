@@ -3084,6 +3084,7 @@ fn link_files(
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )))
 }

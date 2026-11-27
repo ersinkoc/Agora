@@ -18,6 +18,8 @@ pub const RUNNING_PER_ORIGIN: usize = 6;
 pub const RUNNING_PER_RUN: usize = 3;
 /// Starts a standing grant covers in any hour.
 pub const GRANT_STARTS_PER_HOUR: usize = 30;
+/// The longest one `HelperFollow` waits, so its answer fits in a forwarded command's deadline.
+pub const MAX_FOLLOW_WAIT_MS: u32 = 20_000;
 
 /// Who asked, as the hub carried it: the machine (`origin`, the hub's word), its agent and run, and the chain's root (the hub's word).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -329,6 +331,9 @@ impl Spawner {
             }
         }
         let detail = self.remote_detail(&req, &asker);
+        // As for a local start (#1150): the card enters the approval queue and is filed here under this lock, so a decision or an
+        // expiry that comes at once waits for the filing and always finds it.
+        let mut st = self.st();
         let Some(p) = self.approvals.request_remote_start(
             &detail,
             RemoteBinding {
@@ -337,11 +342,10 @@ impl Spawner {
             },
             now_ms,
         ) else {
-            return Err(Error::new(ErrorCode::Internal));
+            return Err(Error::new(ErrorCode::Internal).with("incident_id", "approval-id"));
         };
         let ttl = p.expires_ms.saturating_sub(now_ms);
-        // Filed before it is announced, so a decision that comes at once finds it.
-        self.st().remote.waiting.insert(
+        st.remote.waiting.insert(
             p.id.clone(),
             Waiting {
                 start_id: h.start_id.clone(),
@@ -349,6 +353,7 @@ impl Spawner {
                 req,
             },
         );
+        drop(st);
         if let Some(ev) = &self.events {
             ev.approval_requested(&p);
         }
@@ -506,6 +511,131 @@ impl Spawner {
     /// The results waiting to be carried back (each is taken once; the caller sends them to the hub).
     pub fn take_remote_results(&self) -> Vec<v1::HelperStartResult> {
         std::mem::take(&mut self.st().remote.outbox)
+    }
+
+    /// ADR-0119 decision 7: `agent_wait` and `agent_output` from the asking machine, for a helper whose record names this origin, asking
+    /// agent and run (anything else is `agent.not_found`). Waits at most 20 s for `wait_state`, so each answer fits in a forward.
+    pub fn remote_follow(&self, f: &v1::HelperFollow) -> Result<v1::HelperFollowResult, Error> {
+        let id = AgentId::new(f.agent_id.clone());
+        let mine = self.st().remote.started.get(&id).is_some_and(|s| {
+            s.asker.origin == f.origin
+                && s.asker.agent == f.from_agent
+                && s.asker.run == f.from_run_id
+        });
+        if !mine || f.origin.is_empty() {
+            return Err(not_found(&f.agent_id));
+        }
+        let state = || {
+            self.sup()
+                .list()
+                .iter()
+                .find(|v| v.id == id)
+                .map_or("exited", state_word)
+                .to_string()
+        };
+        let wanted = f.wait_state.as_str();
+        if !wanted.is_empty() && !["idle", "working", "blocked", "done", "exited"].contains(&wanted)
+        {
+            return Err(invalid("wait_state"));
+        }
+        let until =
+            Instant::now() + Duration::from_millis(u64::from(f.wait_ms.min(MAX_FOLLOW_WAIT_MS)));
+        let mut now = state();
+        while !wanted.is_empty() && now != wanted && now != "exited" && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+            now = state();
+        }
+        let (source, lines) = if f.lines == 0 {
+            (String::new(), Vec::new())
+        } else {
+            let lines = (f.lines as usize).min(200);
+            let screen = {
+                let sup = self.sup();
+                sup.terminal(&id)
+                    .map(|t| t.inspect(|term| term.bottom_non_empty_lines(lines)))
+            };
+            let (source, text) = match screen {
+                Some(text) => ("screen", text),
+                None => (
+                    "transcript",
+                    self.chat
+                        .snapshot(&id)
+                        .into_iter()
+                        .rev()
+                        .take(lines)
+                        .rev()
+                        .flat_map(|e| e.text.lines().map(str::to_string).collect::<Vec<_>>())
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            let start = text.len().saturating_sub(lines);
+            (
+                source.to_string(),
+                tail_within(text[start..].to_vec(), MAX_OUTPUT_BYTES),
+            )
+        };
+        Ok(v1::HelperFollowResult {
+            state: now,
+            lines,
+            source,
+        })
+    }
+
+    /// ADR-0119 decision 8: the asking machine says its agent's call ended (`start_id`: that card is withdrawn) or the agent is gone
+    /// (no `start_id`: its cards are withdrawn, its right to follow ends and the grants rooted in that run end; with `stop_helpers`, a
+    /// person stopped it with its helpers, so its helpers here stop too). Only for this origin's records. Returns the helpers to stop;
+    /// the caller stops each as `AgentStop { stop_helpers: true }` does, through the node's own stop path.
+    pub fn remote_release(&self, r: &v1::HelperRelease) -> Result<Vec<String>, Error> {
+        if r.origin.is_empty() {
+            return Err(invalid("origin"));
+        }
+        let run =
+            |a: &Asker| a.origin == r.origin && a.agent == r.from_agent && a.run == r.from_run_id;
+        let (withdrawn, stop): (Vec<String>, Vec<AgentId>) = {
+            let mut st = self.st();
+            let ids: Vec<String> = st
+                .remote
+                .waiting
+                .iter()
+                .filter(|(_, w)| {
+                    run(&w.asker) && (r.start_id.is_empty() || w.start_id == r.start_id)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                st.remote.waiting.remove(id);
+            }
+            let mut stop = Vec::new();
+            if r.start_id.is_empty() {
+                st.remote.grants.retain(|g| {
+                    !(g.asker.root_node == r.origin
+                        && g.asker.root_agent == r.from_agent
+                        && g.asker.root_run == r.from_run_id)
+                        && !run(&g.asker)
+                });
+                let mine: Vec<AgentId> = st
+                    .remote
+                    .started
+                    .iter()
+                    .filter(|(_, s)| run(&s.asker))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in mine {
+                    st.remote.started.remove(&id);
+                    if r.stop_helpers {
+                        stop.push(id);
+                    }
+                }
+            }
+            (ids, stop)
+        };
+        for id in withdrawn {
+            self.approvals.withdraw(&id);
+            if let Some(ev) = &self.events {
+                ev.approval_resolved(&id, false, "");
+            }
+        }
+        Ok(stop.into_iter().map(|id| id.as_str().to_string()).collect())
     }
 
     /// The live standing grants, for `GrantList`.

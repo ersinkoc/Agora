@@ -203,6 +203,7 @@ fn through_hub(n: &Node, e: &Env, cmds: Vec<Cmd>) -> Vec<CommandResponse> {
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();
@@ -841,6 +842,7 @@ fn hub_link(
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();

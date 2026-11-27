@@ -184,6 +184,7 @@ fn hub_test(
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();

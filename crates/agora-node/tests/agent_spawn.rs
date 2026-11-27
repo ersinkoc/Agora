@@ -1655,6 +1655,8 @@ fn a_start_from_another_machine_asks_once_and_a_grant_covers_the_next() {
     }
     let e = Env::new("remote");
     let sp = &e.node().spawner;
+    // The owner's policy decides (`mesh.remote_helpers`, on by default with `mesh.remote`).
+    sp.set_remote_helpers(false);
     let refused = sp
         .remote_start(&remote_ask(&e, 1, 9), wall_ms())
         .unwrap_err();
@@ -1769,4 +1771,56 @@ fn a_start_from_another_machine_asks_once_and_a_grant_covers_the_next() {
         .unwrap_err();
     assert_eq!(over.code.as_str(), "mesh.helper_limit");
     assert!(e.running(&helper));
+    // Following: only the asking run on the asking machine may.
+    let follow = |origin: &str, run: u8| v1::HelperFollow {
+        agent_id: helper.clone(),
+        from_agent: "agent-3".into(),
+        from_run_id: vec![run; 16],
+        origin: origin.into(),
+        wait_state: String::new(),
+        wait_ms: 0,
+        lines: 5,
+    };
+    let seen = sp.remote_follow(&follow("mac", 9)).unwrap();
+    assert!(
+        ["working", "idle", "blocked", "unknown"].contains(&seen.state.as_str()),
+        "{seen:?}"
+    );
+    for (origin, run) in [("win", 9), ("mac", 8)] {
+        assert_eq!(
+            sp.remote_follow(&follow(origin, run))
+                .unwrap_err()
+                .code
+                .as_str(),
+            "agent.not_found"
+        );
+    }
+    // The asker's call ended: that card is withdrawn; the other run's card stays.
+    let waiting = |id: &str| e.node().approvals.waiting().iter().any(|p| p.id == id);
+    assert!(waiting(&after.approval_id) && waiting(&other_run.approval_id));
+    let release = |start: Vec<u8>, run: u8, stop: bool| v1::HelperRelease {
+        from_agent: "agent-3".into(),
+        from_run_id: vec![run; 16],
+        start_id: start,
+        stop_helpers: stop,
+        origin: "mac".into(),
+    };
+    assert!(sp
+        .remote_release(&release(vec![4; 16], 9, false))
+        .unwrap()
+        .is_empty());
+    assert!(!waiting(&after.approval_id) && waiting(&other_run.approval_id));
+    // A person stopped the asker with its helpers: both of that run's helpers here are named for stopping, and its follow rights end.
+    let mut stop = sp.remote_release(&release(Vec::new(), 9, true)).unwrap();
+    stop.sort();
+    let mut expected = vec![helper.clone(), r2[0].agent_id.clone()];
+    expected.sort();
+    assert_eq!(stop, expected);
+    assert_eq!(
+        sp.remote_follow(&follow("mac", 9))
+            .unwrap_err()
+            .code
+            .as_str(),
+        "agent.not_found"
+    );
 }

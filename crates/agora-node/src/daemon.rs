@@ -1528,6 +1528,9 @@ pub const POLICY_FILE: &str = "policy";
 pub struct Policy {
     /// Messages may cross to and from agents on other nodes (`mesh.remote`, default true; ADR-0031).
     pub mesh_remote: bool,
+    /// Agents on other machines may ask this node to start helpers (`mesh.remote_helpers`, default true; ADR-0119), only while
+    /// `mesh.remote` is on too. Each start still needs a person's signed decision here, or a standing grant one created.
+    pub remote_helpers: bool,
     /// Agents may see every machine and agent of the hub (`mesh.fleet`, default true; ADR-0112): the node offers `machines_list` and
     /// `agents_list {scope: "hub"}` and asks the hub for its view only when this allows it.
     pub mesh_fleet: bool,
@@ -1613,6 +1616,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             mesh_remote: true,
+            remote_helpers: true,
             mesh_fleet: true,
             signed_commands: crate::grants::SignedCommands::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
@@ -1718,6 +1722,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
         {
             match k.trim() {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
+                "mesh.remote_helpers" => p.remote_helpers = v.trim() == "true",
                 "mesh.fleet" => p.mesh_fleet = v.trim() == "true",
                 "files.show_secret" => p.show_secret = v.trim() == "true",
                 // ADR-0064: a value it does not understand keeps the default (and `workspaces.clean` off) and is a line not understood.
@@ -2303,6 +2308,8 @@ impl Node {
             .with_git_wake(Arc::clone(&git_wake))
             .with_stopping(Arc::clone(&stop)),
         );
+        // ADR-0119: starts other machines ask for, as the owner's policy allows.
+        spawner.set_remote_helpers(policy.remote_helpers && policy.mesh_remote);
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,
         // `<home>/link/panel-port`, home being the data folder's parent).

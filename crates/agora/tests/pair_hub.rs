@@ -537,6 +537,7 @@ async fn a_machine_is_paired_end_to_end_and_can_then_connect_with_its_certificat
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();

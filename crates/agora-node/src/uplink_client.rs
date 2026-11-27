@@ -178,6 +178,9 @@ pub struct HubLink {
     /// Where the certificate and key for each new dial come from, so a renewed certificate is used by the next connection. `None`: the
     /// ones above are used for ever.
     pub certs: Option<Arc<dyn CertSource>>,
+    /// ADR-0119: the node's spawner, which answers the hub's `HelperStart`, `HelperFollow` and `HelperRelease` (only ever on this link,
+    /// never from a local client). `None`: they are refused as a missing capability.
+    pub spawner: Option<Arc<crate::spawn::Spawner>>,
 }
 
 type Done = Box<dyn FnOnce(Result<Option<crate::mesh_server::BoardReply>, String>) + Send>;
@@ -521,6 +524,7 @@ async fn run_once_noting(
                 link.mesh_out.as_deref(),
                 link.grants.clone(),
                 link.mesh.clone(),
+                link.spawner.clone(),
                 Liveness::DEFAULT,
                 link.devices.clone(),
                 accepted,
@@ -616,6 +620,7 @@ async fn converse<S>(
     mesh_out: Option<&MeshOut>,
     grants: Option<Arc<crate::grants::Grants>>,
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
+    spawner: Option<Arc<crate::spawn::Spawner>>,
     live: Liveness,
     devices: Option<Arc<crate::device_trust::DeviceTrust>>,
     accepted: &AtomicBool,
@@ -933,8 +938,14 @@ where
                         let _ = ordered.send((socket, req, tx));
                     } else {
                         let grants = grants.clone();
+                        let spawner = spawner.clone();
                         tokio::task::spawn_blocking(move || {
-                            let _ = tx.send(run_local(socket.as_deref(), req, grants.as_deref()));
+                            let _ = tx.send(run_routed(
+                                socket.as_deref(),
+                                req,
+                                grants.as_deref(),
+                                spawner.as_deref(),
+                            ));
                         });
                     }
                 }
@@ -1512,6 +1523,93 @@ fn device_answer(
             Err(e) => command_response::Result::Err(e.to_info()),
         }),
     }
+}
+
+/// A command the hub routed here: ADR-0119's requests are answered by the spawner (only ever on this path), a grant listing gets the
+/// remote grants too, and everything else runs as [`run_local`].
+fn run_routed(
+    socket: Option<&std::path::Path>,
+    req: CommandRequest,
+    grants: Option<&crate::grants::Grants>,
+    spawner: Option<&crate::spawn::Spawner>,
+) -> CommandResponse {
+    use agora_protocol::v1::command_ok::Result as Ok_;
+    use agora_protocol::{Error, ErrorCode};
+    let answer = |r: Result<Ok_, Error>| CommandResponse {
+        request_id: req.request_id.clone(),
+        result: Some(match r {
+            Ok(ok) => {
+                command_response::Result::Ok(agora_protocol::v1::CommandOk { result: Some(ok) })
+            }
+            Err(e) => command_response::Result::Err(e.to_info()),
+        }),
+    };
+    let missing = || {
+        Error::new(ErrorCode::ProtocolCapabilityMissing)
+            .with("capability", agora_protocol::handshake::MESH_SPAWN_REMOTE)
+    };
+    match &req.command {
+        Some(command_request::Command::HelperStart(h)) => {
+            return answer(spawner.map_or_else(
+                || Err(missing()),
+                |s| {
+                    s.remote_start(h, crate::grants::now_ms())
+                        .map(Ok_::HelperStartAccepted)
+                },
+            ));
+        }
+        Some(command_request::Command::HelperFollow(f)) => {
+            return answer(spawner.map_or_else(
+                || Err(missing()),
+                |s| s.remote_follow(f).map(Ok_::HelperFollowResult),
+            ));
+        }
+        Some(command_request::Command::HelperRelease(r)) => {
+            let Some(s) = spawner else {
+                return answer(Err(missing()));
+            };
+            let stop = match s.remote_release(r) {
+                Ok(stop) => stop,
+                Err(e) => return answer(Err(e)),
+            };
+            // Each through the node's own stop path, as a person's `AgentStop { stop_helpers: true }`.
+            for agent_id in stop {
+                let _ = run_local(
+                    socket,
+                    CommandRequest {
+                        request_id: req.request_id.clone(),
+                        command: Some(command_request::Command::AgentStop(
+                            agora_protocol::v1::AgentStop {
+                                agent_id,
+                                stop_helpers: true,
+                            },
+                        )),
+                        ..Default::default()
+                    },
+                    None,
+                );
+            }
+            return answer(Ok(Ok_::Empty(agora_protocol::v1::Empty {})));
+        }
+        _ => {}
+    }
+    // A standing grant for another machine's starts is revoked here; any other id goes to the local grants.
+    if let (Some(command_request::Command::GrantRevoke(r)), Some(s)) = (&req.command, spawner) {
+        if s.revoke_remote_grant(&r.grant_id) {
+            return answer(Ok(Ok_::Empty(agora_protocol::v1::Empty {})));
+        }
+    }
+    let listing = matches!(req.command, Some(command_request::Command::GrantList(_)));
+    let mut resp = run_local(socket, req, grants);
+    if let (true, Some(s)) = (listing, spawner) {
+        if let Some(command_response::Result::Ok(agora_protocol::v1::CommandOk {
+            result: Some(Ok_::GrantList(l)),
+        })) = &mut resp.result
+        {
+            l.remote_grants = s.remote_grants(crate::grants::now_ms());
+        }
+    }
+    resp
 }
 
 /// Runs a routed command on this node's control socket and returns its answer (an error answer when it cannot).
@@ -2264,6 +2362,7 @@ mod tests {
                 mesh_out.as_deref(),
                 None,
                 None,
+                None,
                 live,
                 None,
                 &AtomicBool::new(false),
@@ -2706,7 +2805,7 @@ mod tests {
             let stop = AtomicBool::new(false);
             let none = AtomicBool::new(false);
             let talk = converse(
-                conn, &sink, &stop, None, None, None, None, live, None, &none, None,
+                conn, &sink, &stop, None, None, None, None, None, live, None, &none, None,
             );
             let r = tokio::time::timeout(live.deadline * 10, talk).await;
             hub.abort();
@@ -2873,7 +2972,7 @@ mod tests {
             let stop = AtomicBool::new(false);
             let none = AtomicBool::new(false);
             let talk = converse(
-                conn, &sink, &stop, None, None, None, None, SLOW_LIVE, None, &none, None,
+                conn, &sink, &stop, None, None, None, None, None, SLOW_LIVE, None, &none, None,
             );
             let stopper = async {
                 if seen_rx.await.is_ok() {

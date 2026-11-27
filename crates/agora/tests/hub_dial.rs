@@ -132,6 +132,7 @@ impl Hubside {
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         }
     }
 

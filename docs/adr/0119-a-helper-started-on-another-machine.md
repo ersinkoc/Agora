@@ -299,7 +299,18 @@ New threat-model rows (numbers are the next free ones when built):
    new fields on `AgentStarted`, `AgentInterrupted` and `AgentSnapshot`, `RemoteGrantInfo` in `GrantListResult.remote_grants`, the capability constant (offered by no one), the
    error code `mesh.remote_helpers_off`, the v4 vectors with their test, golden fixtures, `protocol.md` ("Helpers on another machine")
    and threat-model row T73. Node and hub refuse the four requests with `protocol.capability_missing` until steps 2 and 3.
-2. The target node: not started.
+2. The target node: built, except that its results are only queued (step 3's hub carries them, and the link sends them then) and an
+   interrupted helper's `AgentInterrupted` does not yet carry its parent's machine (the ledger keeps only a local parent).
+   `crates/agora-node/src/spawn/remote.rs`: `HelperStart`, `HelperFollow` and `HelperRelease` are answered only on the hub link
+   (`uplink_client::run_routed`), never from a local client; the policy key `mesh.remote_helpers` (default true, only with
+   `mesh.remote`); the checks (a full folder path, the kind's manifest, settings and options, the prompt rules, depth below 3, 2
+   cards and 6 running per asking machine and 3 per asking run without a grant); the card `agent.start.remote` decided over v4
+   (`approvals.rs`); standing grants (who: the run, or the chain by its hub-written root; what; where; N running; 30 an hour; the end
+   by this node's clock), listed in `GrantListResult.remote_grants` and revoked with `GrantRevoke`; the helper's `AgentStarted` with
+   `parent_node_id`, `parent_node_agent_id` and `grant_id`; an expired card answered `approval.expired`; follow limited to the asking
+   run (20 s waits, 200 lines); release withdraws that run's cards, ends its follow rights and the grants rooted in it, and stops its
+   helpers here through the node's own stop path when a person stopped it with its helpers. The node still does not offer
+   `mesh.spawn.remote`. Tests: `crates/agora-node/tests/agent_spawn.rs` (the whole flow) and `approvals.rs` (v4 and the grant rules).
 3. The hub: not started.
 4. The asking node: not started.
 5. The window and the terminal client: not started.

@@ -264,6 +264,7 @@ fn pending(r: &v1::ApprovalRequested) -> Pending {
         requested_ms: 0,
         expires_ms: r.expires_at_ms,
         binding: None,
+        remote: None,
         offer: agora_node::approvals::Offer {
             once: r.scopes.contains(&(ApprovalScope::Once as i32)),
             always: (!r.always_option_id.is_empty()).then(|| agora_node::approvals::AlwaysOption {

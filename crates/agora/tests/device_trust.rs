@@ -415,6 +415,7 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
         devices: None,
         state_dir: None,
         certs: None,
+        spawner: None,
     };
     link.devices = Some(Arc::clone(&node.devices));
     let _uplink = spawn(Arc::clone(&node.events), link).unwrap();

@@ -346,6 +346,7 @@ async fn a_machine_pairs_with_the_number_the_owner_sees_and_then_connects_with_w
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();
@@ -950,6 +951,7 @@ async fn a_default_hub_is_paired_by_its_real_lan_address_and_the_node_then_conne
             devices: None,
             state_dir: None,
             certs: None,
+            spawner: None,
         },
     )
     .unwrap();
