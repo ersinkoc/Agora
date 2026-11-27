@@ -875,21 +875,18 @@ mod tests {
             colors,
             t: &t,
         };
-        // The list: no theme, the six built-in themes, the broken file, and both schemes of Harbour; the one in use is marked.
+        // The first screen shows the built-in choices and the beginning of the starter themes.
         let (lines, _) = screen(&view(0, ColorMode::Full));
         let all = lines.join("\n");
         for want in [
             "Your terminal's colours",
             "High contrast",
             "\u{2022} Slate",
-            "broken.json · can't be used",
-            "Harbour · dark",
-            "Harbour · light",
             "~/.agora/themes",
+            "Abyss",
             "Catppuccin Mocha",
             "Gruvbox · dark",
             "Gruvbox · light",
-            "Rosé Pine",
         ] {
             assert!(all.contains(want), "{want} in\n{all}");
         }
@@ -928,6 +925,9 @@ mod tests {
         });
         let all = screen(&view(harbour, ColorMode::Full)).0.join("\n");
         for want in [
+            "Ultraviolet",
+            "broken.json · can't be used",
+            "Harbour · dark",
             "corners",
             "fonts and text style",
             "colours of your",
@@ -940,6 +940,15 @@ mod tests {
             !all.contains("density") && !all.contains("Space between"),
             "{all}"
         );
+        let harbour_light = at(&|e| {
+            e.choice()
+                == Some(Choice::File {
+                    name: "harbour.json".into(),
+                    scheme: Scheme::Light,
+                })
+        });
+        let all = screen(&view(harbour_light, ColorMode::Full)).0.join("\n");
+        assert!(all.contains("Harbour · light"), "{all}");
         // The broken file: every reason, in words.
         let broken = at(&|e| {
             e.choice().is_none() && !matches!(e.source, Source::Terminal | Source::BuiltIn(_))

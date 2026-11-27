@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Bonsai",
+  "dark": {
+    "tokens": {
+      "surface-0": "#0f150a",
+      "surface-1": "#151c0e",
+      "surface-2": "#222b16",
+      "border": "#374727",
+      "text": "#f3f8e9",
+      "text-muted": "#b4c1a0",
+      "accent": "#bada83",
+      "on-accent": "#17230b",
+      "state-working": "#8bc9fa",
+      "state-needs-you": "#f2c574",
+      "state-finished": "#78dfaa",
+      "state-idle": "#a4b398",
+      "state-unknown": "#94a18b"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Parchment",
+  "light": {
+    "tokens": {
+      "surface-0": "#f9f4e5",
+      "surface-1": "#fffcf2",
+      "surface-2": "#f1e8d1",
+      "border": "#ded2b5",
+      "text": "#2a251b",
+      "text-muted": "#5e5545",
+      "accent": "#254274",
+      "on-accent": "#ffffff",
+      "state-working": "#22598e",
+      "state-needs-you": "#874900",
+      "state-finished": "#2d642e",
+      "state-idle": "#605848",
+      "state-unknown": "#6f6554"
+    }
+  }
+}

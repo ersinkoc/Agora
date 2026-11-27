@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Lagoon",
+  "light": {
+    "tokens": {
+      "surface-0": "#eef8fa",
+      "surface-1": "#f8fdfd",
+      "surface-2": "#deeff2",
+      "border": "#c0dfe3",
+      "text": "#142a32",
+      "text-muted": "#425e66",
+      "accent": "#096179",
+      "on-accent": "#ffffff",
+      "state-working": "#174e99",
+      "state-needs-you": "#8a4a00",
+      "state-finished": "#1a653c",
+      "state-idle": "#47626a",
+      "state-unknown": "#566e75"
+    }
+  }
+}

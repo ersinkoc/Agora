@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Meadow",
+  "light": {
+    "tokens": {
+      "surface-0": "#f5f7e7",
+      "surface-1": "#fcfdf4",
+      "surface-2": "#eaf0d7",
+      "border": "#d2dfb8",
+      "text": "#242c19",
+      "text-muted": "#4c5a41",
+      "accent": "#426321",
+      "on-accent": "#ffffff",
+      "state-working": "#24538b",
+      "state-needs-you": "#8b4b00",
+      "state-finished": "#16633e",
+      "state-idle": "#505d46",
+      "state-unknown": "#606b53"
+    }
+  }
+}

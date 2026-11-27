@@ -36,7 +36,7 @@ describe('the starter theme files', () => {
       expect(r.ok && r.warnings, f.id).toBeFalsy();
     }
     expect(STARTER).toHaveLength(STARTER_FILES.length);
-    expect(BUILT_IN.length + STARTER.length).toBeGreaterThanOrEqual(20);
+    expect(BUILT_IN.length + STARTER.length).toBeGreaterThanOrEqual(30);
   });
 
   it('are format 2, name their palette, set only colours, and read back the same when exported', () => {
@@ -111,11 +111,11 @@ describe('the picker', () => {
       {
         "dark": [
           "Built-in: Dark, High contrast, Large text, Slate",
-          "Starter themes: Aurora, Catppuccin Mocha, Cobalt, Dracula, Ember, Gruvbox, Lavender, Rosé Pine, Tokyo Night",
+          "Starter themes: Abyss, Aurora, Bonsai, Catppuccin Mocha, Cobalt, Dracula, Ember, Graphite, Gruvbox, Lavender, Mulberry, Rosé Pine, Tokyo Night, Ultraviolet",
         ],
         "light": [
           "Built-in: Light, Sand",
-          "Starter themes: Arctic, Blossom, Gruvbox, Lilac, Mint, Sepia",
+          "Starter themes: Arctic, Blossom, Dawn, Gruvbox, Lagoon, Lilac, Meadow, Mint, Parchment, Porcelain, Sepia",
         ],
       }
     `);

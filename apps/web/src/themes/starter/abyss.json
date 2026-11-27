@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Abyss",
+  "dark": {
+    "tokens": {
+      "surface-0": "#060c19",
+      "surface-1": "#0b1526",
+      "surface-2": "#12223a",
+      "border": "#263c58",
+      "text": "#e9f6ff",
+      "text-muted": "#a3bad1",
+      "accent": "#62e6ff",
+      "on-accent": "#071523",
+      "state-working": "#83b6ff",
+      "state-needs-you": "#ffce71",
+      "state-finished": "#63e6ad",
+      "state-idle": "#9fb3c7",
+      "state-unknown": "#859cb3"
+    }
+  }
+}

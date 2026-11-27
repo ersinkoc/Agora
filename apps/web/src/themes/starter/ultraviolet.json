@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Ultraviolet",
+  "dark": {
+    "tokens": {
+      "surface-0": "#100b24",
+      "surface-1": "#181032",
+      "surface-2": "#251849",
+      "border": "#3d2b67",
+      "text": "#f5efff",
+      "text-muted": "#bdb1dd",
+      "accent": "#ad98ff",
+      "on-accent": "#180d31",
+      "state-working": "#80c5ff",
+      "state-needs-you": "#ffcc7e",
+      "state-finished": "#6aebae",
+      "state-idle": "#a79bc4",
+      "state-unknown": "#9c90b7"
+    }
+  }
+}

@@ -513,21 +513,31 @@ mod tests {
                 .map(|r| r.choice().unwrap().line())
                 .collect::<Vec<_>>(),
             [
+                "starter dark abyss\n",
                 "starter light arctic\n",
                 "starter dark aurora\n",
                 "starter light blossom\n",
+                "starter dark bonsai\n",
                 "starter dark catppuccin-mocha\n",
                 "starter dark cobalt\n",
+                "starter light dawn\n",
                 "starter dark dracula\n",
                 "starter dark ember\n",
+                "starter dark graphite\n",
                 "starter dark gruvbox\n",
                 "starter light gruvbox\n",
+                "starter light lagoon\n",
                 "starter dark lavender\n",
                 "starter light lilac\n",
+                "starter light meadow\n",
                 "starter light mint\n",
+                "starter dark mulberry\n",
+                "starter light parchment\n",
+                "starter light porcelain\n",
                 "starter dark rose-pine\n",
                 "starter light sepia\n",
                 "starter dark tokyo-night\n",
+                "starter dark ultraviolet\n",
             ]
         );
         assert!(

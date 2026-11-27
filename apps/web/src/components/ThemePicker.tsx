@@ -37,10 +37,10 @@ export function ThemePicker() {
       </Dialog.Trigger>
       <Dialog.Portal>
         <Dialog.Overlay className="kit-overlay" />
-        <Dialog.Content className="kit-dialog max-h-[min(48rem,calc(100vh-2rem))] w-[min(52rem,calc(100vw-2rem))]" aria-describedby={hint} data-theme-chooser>
+        <Dialog.Content className="kit-dialog w-[min(58rem,calc(100vw-2rem))] max-h-[min(48rem,calc(100dvh-2rem))] [@media(min-height:30rem)]:grid-rows-[auto_minmax(0,1fr)_auto]" aria-describedby={hint} data-theme-chooser>
           <span aria-hidden className="kit-chip kit-tone-accent"><Icon name="palette" /></span>
           <Dialog.Title className="kit-dialog__title">{t('theme-chooser-title')}</Dialog.Title>
-          <div className="kit-dialog__body grid min-w-0 gap-4 text-sm">
+          <div className="kit-dialog__body flex min-h-0 min-w-0 flex-col gap-4 self-stretch text-sm">
             <p id={hint} className="m-0">{t('theme-chooser-hint')}</p>
             <div className="grid gap-3 sm:grid-cols-2">
               <SegmentedControl label={t('theme-label')} value={state.mode} onChange={setMode}
@@ -52,7 +52,8 @@ export function ThemePicker() {
               <span className="font-semibold text-ink">{t(`theme-for-${tab}`)}</span>
               {shown && <span className="truncate text-xs">{t('theme-chooser-current', { name: themeName(shown) })}</span>}
             </div>
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(9rem,1fr))] gap-3" role="group" aria-label={t(`theme-for-${tab}`)}>
+            <div key={tab} className="-m-1 grid grid-cols-[repeat(auto-fill,minmax(min(100%,9rem),1fr))] content-start gap-3 p-1 [@media(min-height:30rem)]:overflow-y-auto [@media(min-height:30rem)]:overscroll-contain"
+              role="group" aria-label={t(`theme-for-${tab}`)}>
               {themeStore.themes().filter((theme) => hasScheme(theme, tab)).map((theme) => (
                 <ThemeChoice key={theme.id} theme={theme} scheme={tab} selected={state.choice[tab] === theme.id}
                   onChoose={() => themeStore.choose(theme.id)} />

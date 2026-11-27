@@ -16,7 +16,13 @@ pub struct StarterFile {
 }
 
 /// The files, in the web's order (`apps/web/src/themes/starter.ts` `STARTER_FILES`).
-pub const FILES: [StarterFile; 14] = [
+pub const FILES: [StarterFile; 24] = [
+    StarterFile {
+        id: "abyss",
+        project: "Abyss",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/abyss.json"),
+    },
     StarterFile {
         id: "arctic",
         project: "Arctic",
@@ -36,6 +42,12 @@ pub const FILES: [StarterFile; 14] = [
         text: include_str!("../../../../apps/web/src/themes/starter/blossom.json"),
     },
     StarterFile {
+        id: "bonsai",
+        project: "Bonsai",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/bonsai.json"),
+    },
+    StarterFile {
         id: "catppuccin-mocha",
         project: "Catppuccin",
         licence: "MIT",
@@ -46,6 +58,12 @@ pub const FILES: [StarterFile; 14] = [
         project: "Cobalt",
         licence: "Apache-2.0",
         text: include_str!("../../../../apps/web/src/themes/starter/cobalt.json"),
+    },
+    StarterFile {
+        id: "dawn",
+        project: "Dawn",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/dawn.json"),
     },
     StarterFile {
         id: "dracula",
@@ -60,10 +78,22 @@ pub const FILES: [StarterFile; 14] = [
         text: include_str!("../../../../apps/web/src/themes/starter/ember.json"),
     },
     StarterFile {
+        id: "graphite",
+        project: "Graphite",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/graphite.json"),
+    },
+    StarterFile {
         id: "gruvbox",
         project: "Gruvbox",
         licence: "MIT",
         text: include_str!("../../../../apps/web/src/themes/starter/gruvbox.json"),
+    },
+    StarterFile {
+        id: "lagoon",
+        project: "Lagoon",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/lagoon.json"),
     },
     StarterFile {
         id: "lavender",
@@ -78,10 +108,34 @@ pub const FILES: [StarterFile; 14] = [
         text: include_str!("../../../../apps/web/src/themes/starter/lilac.json"),
     },
     StarterFile {
+        id: "meadow",
+        project: "Meadow",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/meadow.json"),
+    },
+    StarterFile {
         id: "mint",
         project: "Mint",
         licence: "Apache-2.0",
         text: include_str!("../../../../apps/web/src/themes/starter/mint.json"),
+    },
+    StarterFile {
+        id: "mulberry",
+        project: "Mulberry",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/mulberry.json"),
+    },
+    StarterFile {
+        id: "parchment",
+        project: "Parchment",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/parchment.json"),
+    },
+    StarterFile {
+        id: "porcelain",
+        project: "Porcelain",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/porcelain.json"),
     },
     StarterFile {
         id: "rose-pine",
@@ -100,6 +154,12 @@ pub const FILES: [StarterFile; 14] = [
         project: "Tokyo Night",
         licence: "Apache-2.0",
         text: include_str!("../../../../apps/web/src/themes/starter/tokyo-night.json"),
+    },
+    StarterFile {
+        id: "ultraviolet",
+        project: "Ultraviolet",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/ultraviolet.json"),
     },
 ];
 

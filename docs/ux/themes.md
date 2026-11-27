@@ -304,7 +304,8 @@ Built-in themes cannot be changed; a test keeps Dark and Light equal to `tokens.
 ![Mint](../screenshots/starter-theme-mint-light.png)
 ![Sepia](../screenshots/starter-theme-sepia-light.png)
 
-Nine project-original palettes and five well-known palettes (roadmap M5.2) make 20 shipped themes together with the six built-ins.
+The six built-in themes and 24 starter themes bring the collection to 30 themes. The starter themes include 19 project-original
+palettes and five well-known palettes (roadmap M5.2).
 Each starter theme is an ordinary format-2 file in `apps/web/src/themes/starter/` (no other field, no
 `inherits`), read by the same function as an imported file (`themes/starter.ts`), so the floor and every readability rule hold as
 for any theme; a test asks each file for **no problem and no warning** in the web window's reader and in the terminal client's. They
@@ -313,22 +314,32 @@ are listed in the picker under **Starter themes** and in the command palette (**
 
 | Theme | Schemes | Colours from (licence) |
 | --- | --- | --- |
+| **Abyss** | dark | project-original (Apache-2.0) |
 | **Arctic** | light | project-original (Apache-2.0) |
 | **Aurora** | dark | project-original (Apache-2.0) |
 | **Blossom** | light | project-original (Apache-2.0) |
+| **Bonsai** | dark | project-original (Apache-2.0) |
 | **Catppuccin Mocha** | dark | `catppuccin/palette` (MIT) |
 | **Cobalt** | dark | project-original (Apache-2.0) |
+| **Dawn** | light | project-original (Apache-2.0) |
 | **Dracula** | dark | `dracula/dracula-theme`'s palette, its terminal colours from `dracula/alacritty` (MIT) |
 | **Ember** | dark | project-original (Apache-2.0) |
+| **Graphite** | dark | project-original (Apache-2.0) |
 | **Gruvbox** | dark, light | `morhetz/gruvbox` (MIT/X11; `gruvbox-community/gruvbox`'s LICENSE, MIT) |
+| **Lagoon** | light | project-original (Apache-2.0) |
 | **Lavender** | dark | project-original (Apache-2.0) |
 | **Lilac** | light | project-original (Apache-2.0) |
+| **Meadow** | light | project-original (Apache-2.0) |
 | **Mint** | light | project-original (Apache-2.0) |
+| **Mulberry** | dark | project-original (Apache-2.0) |
+| **Parchment** | light | project-original (Apache-2.0) |
+| **Porcelain** | light | project-original (Apache-2.0) |
 | **Rosé Pine** | dark (main) | `rose-pine/rose-pine-palette` (MIT) |
 | **Sepia** | light | project-original (Apache-2.0) |
 | **Tokyo Night** | dark (Night) | `folke/tokyonight.nvim`, its generated `extras/lua/tokyonight_night.lua` (Apache-2.0) |
+| **Ultraviolet** | dark | project-original (Apache-2.0) |
 
-The nine original palettes use the project's Apache-2.0 licence and were designed directly against the readability floor. For the
+The original palettes use the project's Apache-2.0 licence and were designed directly against the readability floor. For the
 five third-party palettes:
 
 - **Only the palette's published colour values** (hex) are used, never a theme file of the project, and no colour is mixed, lightened
@@ -362,7 +373,7 @@ five third-party palettes:
     text, 4.9:1 on Base3 but 4.3:1 on Base2); with Agora's standing in, "needs you" on its own background is 4.2:1.
 
   So Gruvbox remains the only light variant among the third-party palettes: the other light variants are lower in contrast than the
-  rules allow. The project-original Arctic, Blossom, Lilac, Mint and Sepia palettes add five light choices without relaxing the floor.
+  rules allow. The project-original palettes add ten light choices.
 
 `scripts/screenshots-starter-themes.mjs` takes the shots above from the demo window (the picker's list is shown in the page by giving
 the select a size for the shot: a browser cannot capture the list the system draws).
@@ -371,7 +382,8 @@ the select a size for the shot: a browser cannot capture the list the system dra
 
 - The title bar has one **Choose theme** palette button in the web window and desktop shell. It opens a modal gallery with a miniature
   preview of every theme, Dark and Light tabs, the current choice, and **Follow the system**, **Dark** and **Light** mode controls.
-  Choosing a card applies it immediately and keeps the gallery open for comparison; **Done** closes it.
+  Choosing a card applies it immediately and keeps the gallery open for comparison. Scroll the cards to see more and select
+  **Done** to close the gallery.
 - Each scheme has **its theme**: "Light theme" and "Dark theme" in the editor. Following the system switches between the two
   by itself (Sand by day, Slate by night); Dark or Light shows that scheme's theme. Choosing a theme of the other scheme while
   one is forced moves to that scheme, so the choice shows. A format-2 theme with both schemes is listed under both, and choosing

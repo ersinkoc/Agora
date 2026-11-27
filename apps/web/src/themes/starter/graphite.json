@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Graphite",
+  "dark": {
+    "tokens": {
+      "surface-0": "#111111",
+      "surface-1": "#191919",
+      "surface-2": "#232323",
+      "border": "#363636",
+      "text": "#f7f7f7",
+      "text-muted": "#b7b7b7",
+      "accent": "#e3e3e3",
+      "on-accent": "#141414",
+      "state-working": "#8cc6ff",
+      "state-needs-you": "#ffca72",
+      "state-finished": "#67dc98",
+      "state-idle": "#ababab",
+      "state-unknown": "#949494"
+    }
+  }
+}

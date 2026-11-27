@@ -7,7 +7,7 @@
 // A <select>'s open list is drawn by the operating system, not the page, so a browser cannot shoot it. For the picker shot the
 // select is given a `size` for the moment of the shot, which draws the very same options and groups inside the page.
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { extname, join } from 'node:path';
 const dist = process.argv[2] ?? new URL('../apps/web/dist/', import.meta.url).pathname;
@@ -68,16 +68,15 @@ for (const scheme of ['dark', 'light']) {
   await ctx.close();
 }
 // Every starter theme on the window, in every scheme its file has.
-for (const [name, scheme, file] of [
-  ['Arctic', 'light', 'arctic'], ['Aurora', 'dark', 'aurora'], ['Blossom', 'light', 'blossom'],
-  ['Catppuccin Mocha', 'dark', 'catppuccin-mocha'], ['Cobalt', 'dark', 'cobalt'], ['Dracula', 'dark', 'dracula'],
-  ['Ember', 'dark', 'ember'], ['Gruvbox', 'dark', 'gruvbox'], ['Gruvbox', 'light', 'gruvbox'],
-  ['Lavender', 'dark', 'lavender'], ['Lilac', 'light', 'lilac'], ['Mint', 'light', 'mint'],
-  ['Rosé Pine', 'dark', 'rose-pine'], ['Sepia', 'light', 'sepia'], ['Tokyo Night', 'dark', 'tokyo-night'],
-]) {
-  const { page, ctx } = await open(scheme, pick(name));
-  await shot(page, `starter-theme-${file}-${scheme}`);
-  await ctx.close();
+const starter = new URL('../apps/web/src/themes/starter/', import.meta.url);
+for (const file of readdirSync(starter).filter((file) => file.endsWith('.json')).sort()) {
+  const theme = JSON.parse(readFileSync(new URL(file, starter), 'utf8'));
+  for (const scheme of ['dark', 'light']) {
+    if (!theme[scheme]) continue;
+    const { page, ctx } = await open(scheme, pick(theme.name));
+    await shot(page, `starter-theme-${file.slice(0, -5)}-${scheme}`);
+    await ctx.close();
+  }
 }
 await browser.close();
 server.close();

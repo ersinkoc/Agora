@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Mulberry",
+  "dark": {
+    "tokens": {
+      "surface-0": "#190d17",
+      "surface-1": "#21111f",
+      "surface-2": "#32192d",
+      "border": "#4e2b46",
+      "text": "#fff0fa",
+      "text-muted": "#c8adbf",
+      "accent": "#f0a3d6",
+      "on-accent": "#250b20",
+      "state-working": "#91c8ff",
+      "state-needs-you": "#facb79",
+      "state-finished": "#83dda0",
+      "state-idle": "#ad97a7",
+      "state-unknown": "#a38a9e"
+    }
+  }
+}

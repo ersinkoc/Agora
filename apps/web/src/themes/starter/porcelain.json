@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Porcelain",
+  "light": {
+    "tokens": {
+      "surface-0": "#f6f7f8",
+      "surface-1": "#ffffff",
+      "surface-2": "#eceef0",
+      "border": "#d7dade",
+      "text": "#1b1d20",
+      "text-muted": "#51575d",
+      "accent": "#303842",
+      "on-accent": "#ffffff",
+      "state-working": "#1b5695",
+      "state-needs-you": "#8d4e05",
+      "state-finished": "#23643c",
+      "state-idle": "#555c63",
+      "state-unknown": "#656b72"
+    }
+  }
+}

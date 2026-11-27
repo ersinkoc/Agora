@@ -15,9 +15,6 @@ Rust dependencies are checked by `cargo deny` (`deny.toml` lists the licenses al
 palette's project, placed in Agora's own theme format; no theme file of those projects is copied. The licences above allow this with
 the notice kept: each project's copyright line is in the table, and the MIT licence text is:
 
-Arctic, Aurora, Blossom, Cobalt, Ember, Lavender, Lilac, Mint and Sepia are original palettes in this repository under the project's
-Apache-2.0 licence, not third-party material.
-
 > Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
 > (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge,
 > publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do
@@ -28,3 +25,5 @@ Apache-2.0 licence, not third-party material.
 > OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Tokyo Night's Apache-2.0 is the project's own licence (`LICENSE`); the repository has no `NOTICE` file to carry.
+
+The other palettes listed as project-original in [Starter themes](docs/ux/themes.md#starter-themes) use this repository's Apache-2.0 licence.

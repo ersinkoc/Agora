@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Dawn",
+  "light": {
+    "tokens": {
+      "surface-0": "#fdf2e9",
+      "surface-1": "#fff9f4",
+      "surface-2": "#f8e6db",
+      "border": "#edcfc3",
+      "text": "#30201e",
+      "text-muted": "#6a524d",
+      "accent": "#782e64",
+      "on-accent": "#ffffff",
+      "state-working": "#16578e",
+      "state-needs-you": "#8b4a00",
+      "state-finished": "#286133",
+      "state-idle": "#65554f",
+      "state-unknown": "#735d58"
+    }
+  }
+}

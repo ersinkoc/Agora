@@ -1,0 +1,1 @@
+- Pick from 30 included themes across the web, desktop and terminal clients. Ten new starter themes add five light and five dark palettes (ADR-0113).

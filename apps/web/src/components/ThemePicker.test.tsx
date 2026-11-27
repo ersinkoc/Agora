@@ -33,18 +33,18 @@ describe('the visual theme chooser', () => {
   it('opens from one labelled icon and previews every theme in its scheme', () => {
     click(host.querySelector(`button[aria-label="${t('theme-chooser-open')}"]`));
     expect(chooser().textContent).toContain(t('theme-chooser-title'));
-    expect(chooser().querySelectorAll('[data-theme-choice]').length).toBe(13);
-    expect(chooser().querySelector('[data-theme-choice="starter-aurora"] [aria-hidden]')).not.toBeNull();
+    expect(chooser().querySelectorAll('[data-theme-choice]')).toHaveLength(18);
+    expect(chooser().querySelector('[data-theme-choice="starter-ultraviolet"] [aria-hidden]')).not.toBeNull();
     click([...chooser().querySelectorAll('[role="radio"]')].find((x) => x.textContent === t('theme-light')) ?? null);
-    expect(chooser().querySelectorAll('[data-theme-choice]').length).toBe(8);
-    expect(chooser().querySelector('[data-theme-choice="starter-arctic"]')).not.toBeNull();
+    expect(chooser().querySelectorAll('[data-theme-choice]')).toHaveLength(13);
+    expect(chooser().querySelector('[data-theme-choice="starter-porcelain"]')).not.toBeNull();
   });
 
   it('chooses a preview card and keeps the mode controls in the same dialog', () => {
     click(host.querySelector('button'));
-    click(chooser().querySelector('[data-theme-choice="starter-aurora"]'));
-    expect(themeStore.state().choice.dark).toBe('starter-aurora');
-    expect(chooser().querySelector('[data-theme-choice="starter-aurora"]')?.getAttribute('aria-pressed')).toBe('true');
+    click(chooser().querySelector('[data-theme-choice="starter-ultraviolet"]'));
+    expect(themeStore.state().choice.dark).toBe('starter-ultraviolet');
+    expect(chooser().querySelector('[data-theme-choice="starter-ultraviolet"]')?.getAttribute('aria-pressed')).toBe('true');
     click([...chooser().querySelectorAll('[role="radio"]')].find((x) => x.textContent === t('theme-system-short')) ?? null);
     expect(themeStore.state().mode).toBe('system');
   });
