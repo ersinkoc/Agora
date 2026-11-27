@@ -106,8 +106,8 @@ tool calls, diffs, and approvals. See the [integration guide](docs/architecture.
   can use the installed executable. Installation and updates from the web app are planned.
   [Agent package decision](docs/adr/0087-install-and-update-coding-agents-from-the-window.md)
 - **Session tools.** A structured agent's transcript is kept on the node (30 days), and an agent taken up from
-  the holder or resumed shows its earlier turns. Paging through that history in the window, and a preview of
-  an agent's local web server, are planned.
+  the holder or resumed shows its earlier turns. An agent's local web server opens in a Preview pane through
+  the hub, on an origin of its own per forward. Paging through that history in the window is planned.
   [Chat history decision](docs/adr/0089-the-chat-history-survives-the-node-and-is-read-in-pages.md) ·
   [Web preview decision](docs/adr/0088-preview-an-agents-local-web-server-in-the-window.md)
 - **Remote operations.** Signed binary updates and automatic certificate renewal are implemented. Live node
