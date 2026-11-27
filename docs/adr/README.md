@@ -139,4 +139,4 @@ Date: YYYY-MM-DD
 | 0121 | Show task handoff delivery on the project board | Accepted |
 | 0122 | Skills and MCP servers shared through the hub | Accepted |
 | 0123 | Every agent shows its provider, model and effort | Accepted |
-| 0124 | Preserve a task claim when its receiver reattaches | Proposed |
+| 0124 | Preserve a task claim when its receiver reattaches | Accepted |

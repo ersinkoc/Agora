@@ -1,5 +1,5 @@
 # 0124. Preserve a task claim when its receiver reattaches
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
 
 ## Context
@@ -13,7 +13,7 @@ The hub's test entry points reproduce this with a pending handoff to `receiver/a
 `AgentStarted` for the same agent and run ID with `same_process = true`. The reannounced agent is running with the expected
 run ID and the task's owner is empty.
 
-## Proposal
+## Decision
 
 1. Add a bounded, optional list to `NodeOnline` through the append-only schema. Each entry names a node-local agent ID and its
    16-byte run ID. Populate it with holder processes the node actually took up before it records that event. An announcement
