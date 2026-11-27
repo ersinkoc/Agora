@@ -24,6 +24,12 @@ pub trait HeldControl: Send + Sync {
     /// How the agent ended: `Ok(None)` while it runs; the status once it ended, taken from the holder (which forgets the agent then).
     /// `Err` when the holder cannot be asked (it ended): the agent's own end is then unknown.
     fn exit_status(&self) -> std::io::Result<Option<crate::ExitStatus>>;
+    /// Resizes the agent's terminal through the holder (M2.6: on Windows the pseudo-console stays in the holder, so the node's copy of
+    /// the pipe ends cannot resize it). On Unix the node resizes its own copy of the master and never asks this.
+    fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        let _ = (cols, rows);
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
 }
 
 // ----- the bounded buffer -----

@@ -258,7 +258,6 @@ pub(crate) fn spawn_detached(
 /// ADR-0079 decision 2: [`spawn_detached`] without its fallback. A process that must outlive this one's job (the terminal holder) is
 /// never started inside it: when the job forbids leaving it (a Task Scheduler task's own job), nothing starts and the error is
 /// `PermissionDenied` (`ERROR_ACCESS_DENIED`).
-#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
 pub(crate) fn spawn_detached_strict(
     cmd: &std::process::Command,
     log: &std::fs::File,

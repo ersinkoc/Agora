@@ -393,3 +393,33 @@ A reader names a holder as older only when the note says version 1 **and** that 
 comes from the holder's own `run/hold.pid`. `agora doctor` then prints a warning (exit status unchanged) and `agora status` a line under the
 node; there is nothing to print without a holder, with a version 2 holder, or on Windows. The node logs `holder.link_v1: ...` once, the first
 time it starts a structured agent itself for this reason. Nothing here stops, restarts or signals the holder or reads an agent.
+
+## Terminals inside the frame (Windows, M2.6)
+
+Windows has no `SCM_RIGHTS`, so a held terminal cannot travel beside a frame. There it travels **inside** it as a reference to handles the
+holder duplicated into the node (ADR-0079 decision 3: `DuplicateHandle`). `agora_platform::TERMINAL_IN_BAND` says which way a build goes:
+true on Windows, false on Unix. The link version does not change: no older Windows holder exists, and a Unix holder never sends these frames.
+
+### Frames
+Holder to node: `StartedRef`(73: agent, pid, `terminal: bytes`) and `TerminalRef`(74: agent, pid, state, buffer-dropped flag, buffer,
+`terminal: bytes`). They are `Started` and `Terminal` with the terminal reference as one more field.
+- On Windows a frame that hands a terminal over is always one of these. `Started`(67) is never sent there, and `Terminal`(69) only for an
+  ended agent, whose frame carries no terminal (as on Unix).
+- A node whose terminals travel beside the frame (Unix) refuses 73 and 74 as `Malformed`, as it would an unknown tag, and closes the link.
+- `terminal` is opaque to the link: 1 to `TERMINAL_REF_MAX` (64) bytes, refused as `Malformed` before anything reads it when empty or
+  longer. Its layout is the platform's own. On Windows it is a version byte (1) and the two handle values in the node (the input's write
+  end, then the output's read end), each a `u64` big-endian: 17 bytes.
+- Golden fixtures: `started-ref`, `terminal-ref`.
+
+### Handles on every path
+- **The holder** duplicates both ends into the node through the handle it opened and checked by start time when it admitted that node
+  (decision 5; `TerminalHandle::export_to`). If the frame does not go out (a send fails, the link drops first), it closes both duplicates
+  in the node again (`DUPLICATE_CLOSE_SOURCE`), so nothing of an undelivered frame stays there. Once the frame went out, they are the node's.
+- **The node** imports a reference only after checking it: the exact length and version, two nonzero and different values, both of them
+  pipes (`TerminalHandle::import`). A reference that fails is `Malformed` and closes the link. Nothing of it is closed, since its values
+  may name handles the node holds for something else; a wrong reference is a holder fault, and the holder was admitted by pid and start
+  time.
+- **What can still be lost:** a frame that went out but that the node never reads, from a node that keeps running (it closed the link
+  first). Then the two handles stay in the node until it exits: two per terminal and per attach, never more. A node that ends takes its
+  handles with it.
+- **Resize** never reaches the pseudoconsole through the node's copy (an `HPCON` stays in the holder). The node sends `Resize`(4) instead.

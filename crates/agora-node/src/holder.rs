@@ -398,6 +398,12 @@ impl HeldControl for AgentLink {
             .map_err(to_io)
     }
 
+    fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.session
+            .call(|c| c.resize(&self.agent, cols, rows))
+            .map_err(to_io)
+    }
+
     fn exit_status(&self) -> io::Result<Option<ExitStatus>> {
         let list = self.session.call(|c| c.list()).map_err(to_io)?;
         match list.into_iter().find(|a| a.agent == self.agent) {
@@ -481,13 +487,14 @@ fn open(setup: &HolderSetup, lose_reply: &Arc<AtomicBool>) -> Result<Opened, Why
 }
 
 /// Starts `agora hold` detached, in a session of its own: never bound to its starter (a holder that died with the node would defeat
-/// it). `Err` when it cannot be started that way (`setsid` refused), which is "no holder here".
+/// it). `Err` when it cannot be started that way (`setsid` refused; on Windows a job that refuses the breakaway: never a holder inside
+/// the supervisor's kill-on-close job, ADR-0079 decision 2), which is "no holder here".
 fn start_holder(setup: &HolderSetup) -> io::Result<u32> {
     let run = setup.home.join("run");
     agora_platform::ensure_private_dir(&run)?;
     let mut cmd = std::process::Command::new(&setup.exe);
     cmd.arg("hold").arg("--home").arg(&setup.home);
-    Ok(agora_platform::spawn_detached(&mut cmd, &run.join("hold.log"))?.pid)
+    Ok(agora_platform::spawn_detached_unbound(&mut cmd, &run.join("hold.log"))?.pid)
 }
 
 #[derive(Default)]

@@ -275,6 +275,19 @@ pub enum Reply {
     },
     /// ADR-0093: a pipe agent's output.
     PipeData(PipeData),
+    /// M2.6 (Windows, [`agora_platform::TERMINAL_IN_BAND`]): `Started` with the agent's terminal as a reference inside the frame
+    /// ([`agora_platform::TerminalHandle::export_to`]). Never sent where a terminal travels beside the frame; there it is refused as
+    /// an unknown tag would be.
+    StartedRef {
+        agent: String,
+        pid: u32,
+        terminal: Vec<u8>,
+    },
+    /// M2.6 (Windows): `Terminal` with a running agent's terminal as a reference inside the frame, as [`Self::StartedRef`].
+    TerminalRef {
+        info: TerminalInfo,
+        terminal: Vec<u8>,
+    },
 }
 
 // ----- encoding -----
@@ -298,6 +311,8 @@ const T_STARTED: u8 = 67;
 const T_AGENTS: u8 = 68;
 const T_TERMINAL: u8 = 69;
 const T_ATTACH_DONE: u8 = 70;
+const T_STARTED_REF: u8 = 73;
+const T_TERMINAL_REF: u8 = 74;
 const T_PIPE_STARTED: u8 = 71;
 const T_PIPE_DATA: u8 = 72;
 
@@ -725,6 +740,23 @@ impl Reply {
                 e.lines(&p.seen);
                 e.lines(&p.fresh);
             }
+            Self::StartedRef {
+                agent,
+                pid,
+                terminal,
+            } => {
+                e.u8(T_STARTED_REF);
+                e.str(agent);
+                e.u32(*pid);
+                e.bytes(terminal);
+            }
+            Self::TerminalRef { info, terminal } => {
+                e.u8(T_TERMINAL_REF);
+                e.info(&info.info);
+                e.bool(info.buffer_dropped);
+                e.bytes(&info.buffer);
+                e.bytes(terminal);
+            }
         }
         e.0
     }
@@ -770,11 +802,35 @@ impl Reply {
                 seen: d.lines()?,
                 fresh: d.lines()?,
             }),
+            // Where a terminal travels beside the frame, these are refused as an unknown tag is (spec: "Terminals inside the frame").
+            T_STARTED_REF if agora_platform::TERMINAL_IN_BAND => Self::StartedRef {
+                agent: d.str()?,
+                pid: d.u32()?,
+                terminal: terminal_ref(&mut d)?,
+            },
+            T_TERMINAL_REF if agora_platform::TERMINAL_IN_BAND => Self::TerminalRef {
+                info: TerminalInfo {
+                    info: d.info()?,
+                    buffer_dropped: d.bool()?,
+                    buffer: d.bytes()?.to_vec(),
+                },
+                terminal: terminal_ref(&mut d)?,
+            },
             _ => return Err(LinkError::Malformed("reply (unknown tag)")),
         };
         d.done()?;
         Ok(r)
     }
+}
+
+/// A terminal reference (M2.6): opaque bytes, at most [`agora_platform::TERMINAL_REF_MAX`], refused before anything reads them when
+/// longer.
+fn terminal_ref(d: &mut Dec<'_>) -> Result<Vec<u8>, LinkError> {
+    let t = d.bytes()?;
+    if t.is_empty() || t.len() > agora_platform::TERMINAL_REF_MAX {
+        return Err(LinkError::Malformed("terminal reference (size)"));
+    }
+    Ok(t.to_vec())
 }
 
 // ----- frames -----
@@ -1026,6 +1082,29 @@ fn past_deadline(began: Instant, now: Instant) -> Result<(), LinkError> {
     Ok(())
 }
 
+/// M2.6: a reply whose terminal came inside the frame becomes the reply it stands for and the terminal, imported into this process,
+/// so the rest of the node sees what a terminal sent beside the frame gives. A reference that does not import closes the link
+/// (`Malformed`); nothing of it is closed (`TerminalHandle::import`).
+fn in_band(
+    reply: Reply,
+    beside: Option<TerminalHandle>,
+) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
+    let import = |t: &[u8]| {
+        TerminalHandle::import(t).map_err(|_| LinkError::Malformed("terminal reference"))
+    };
+    match reply {
+        Reply::StartedRef {
+            agent,
+            pid,
+            terminal,
+        } => Ok((Reply::Started { agent, pid }, Some(import(&terminal)?))),
+        Reply::TerminalRef { info, terminal } => {
+            Ok((Reply::Terminal(info), Some(import(&terminal)?)))
+        }
+        other => Ok((other, beside)),
+    }
+}
+
 // ----- the node's client -----
 
 /// One terminal `Attach` handed over: what it is, what was buffered, and (for a running agent) the terminal itself.
@@ -1088,7 +1167,7 @@ impl Client {
     fn read_reply(stream: &mut LocalStream) -> Result<(Reply, Option<TerminalHandle>), LinkError> {
         // Nothing read within the wait is the holder not answering.
         match read_frame(stream, REPLY_WAIT)? {
-            Some((payload, t)) => Ok((Reply::decode(&payload)?, t)),
+            Some((payload, t)) => in_band(Reply::decode(&payload)?, t),
             None => Err(LinkError::Io(io::Error::from(io::ErrorKind::TimedOut))),
         }
     }

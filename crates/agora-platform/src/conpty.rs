@@ -1049,6 +1049,255 @@ impl Drop for ConPty {
     }
 }
 
+// ----- M2.6: a held agent's terminal in the node -----
+
+/// Writes all of `bytes` to a synchronous pipe handle.
+fn write_all_to(handle: HANDLE, bytes: &[u8]) -> io::Result<()> {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let mut n = 0u32;
+        let len = u32::try_from(rest.len()).unwrap_or(u32::MAX);
+        // SAFETY: `rest` is valid for `len` bytes; a synchronous pipe handle, so no OVERLAPPED.
+        if unsafe { WriteFile(handle, rest.as_ptr().cast(), len, &mut n, null_mut()) } == 0 {
+            return Err(last_error());
+        }
+        rest = &rest[n as usize..];
+    }
+    Ok(())
+}
+
+/// How many chunks of a held agent's output wait for the node's terminal actor (as on Unix).
+const HELD_QUEUE: usize = 64;
+
+/// The end of an agent whose holder is gone: nothing is known of how it ended.
+const LOST: ExitStatus = ExitStatus {
+    code: None,
+    signal: None,
+};
+
+/// What a held agent's terminal in the node and its controls share.
+struct HeldPtyShared {
+    /// The node is stopping and leaves the agent running: nothing ends it from here on, and the output is not read any more.
+    detached: AtomicBool,
+    /// The reader is asked to stop.
+    stop: AtomicBool,
+    /// The reader has ended.
+    done: AtomicBool,
+    /// The node's read end of the agent's output.
+    output: Handle,
+}
+
+impl HeldPtyShared {
+    /// Stops the read and waits (at most 2 s) for the reader to end, so no read of this node's copy outlives it: a copy that kept
+    /// reading would take output meant for the next node.
+    fn stop_reading(&self) {
+        self.stop.store(true, Ordering::Release);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !self.done.load(Ordering::Acquire) && std::time::Instant::now() < end {
+            // SAFETY: a live pipe handle (owned by `self`); cancels the read in flight on it, from any thread.
+            unsafe { CancelIoEx(self.output.0, null()) };
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn detach(&self) {
+        self.detached.store(true, Ordering::Release);
+        self.stop_reading();
+    }
+
+    fn detached(&self) -> bool {
+        self.detached.load(Ordering::Acquire)
+    }
+}
+
+/// M2.6: a held agent's terminal as the node's terminal actor uses it, over the two pipe ends the holder handed over
+/// ([`TerminalHandle::import`]). Input and output go through the node's own copies; the pseudo-console stays in the holder, so a resize
+/// and every end of the agent go through it ([`crate::HeldControl`]: `Resize` and `Signal` on the link). Detaching or dropping it
+/// ends the read first.
+pub fn held_pty(
+    terminal: TerminalHandle,
+    pid: u32,
+    control: Arc<dyn crate::HeldControl>,
+) -> io::Result<Box<dyn Pty>> {
+    let TerminalHandle { input, output } = terminal;
+    let shared = Arc::new(HeldPtyShared {
+        detached: AtomicBool::new(false),
+        stop: AtomicBool::new(false),
+        done: AtomicBool::new(false),
+        output,
+    });
+    let (tx, rx) = sync_channel::<Vec<u8>>(HELD_QUEUE);
+    let reading = Arc::clone(&shared);
+    let reader = std::thread::Builder::new()
+        .name("agora-held-pty-reader".into())
+        .spawn(move || {
+            let mut buf = vec![0u8; CHUNK];
+            while !reading.stop.load(Ordering::Acquire) {
+                let mut n = 0u32;
+                // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle the Arc keeps open.
+                let ok = unsafe {
+                    ReadFile(
+                        reading.output.0,
+                        buf.as_mut_ptr().cast(),
+                        CHUNK as u32,
+                        &mut n,
+                        null_mut(),
+                    )
+                };
+                if ok == 0 || n == 0 || tx.send(buf[..n as usize].to_vec()).is_err() {
+                    break;
+                }
+            }
+            reading.done.store(true, Ordering::Release);
+        })?;
+    Ok(Box::new(HeldPty {
+        input: Arc::new(Mutex::new(input)),
+        pid,
+        control,
+        output: rx,
+        shared,
+        reader: Some(reader),
+        status: None,
+    }))
+}
+
+struct HeldPty {
+    input: Arc<Mutex<Handle>>,
+    pid: u32,
+    control: Arc<dyn crate::HeldControl>,
+    output: Receiver<Vec<u8>>,
+    shared: Arc<HeldPtyShared>,
+    reader: Option<std::thread::JoinHandle<()>>,
+    status: Option<ExitStatus>,
+}
+
+fn kill_through_holder(shared: &HeldPtyShared, control: &dyn crate::HeldControl) -> io::Result<()> {
+    if shared.detached() {
+        return Ok(());
+    }
+    control.signal(crate::held::HeldSignal::Kill)
+}
+
+impl Pty for HeldPty {
+    fn output(&self) -> &Receiver<Vec<u8>> {
+        &self.output
+    }
+
+    fn write_input(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let input = self
+            .input
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))?;
+        write_all_to(input.0, bytes)
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        self.control.resize(cols, rows)
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        if self.status.is_some() {
+            return Ok(());
+        }
+        kill_through_holder(&self.shared, self.control.as_ref())
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.status.is_none() {
+            if self.shared.detached() {
+                // The node lets go: this ends the actor, and is not an end of the agent (nothing is reported of it).
+                return Ok(Some(LOST));
+            }
+            self.status = match self.control.exit_status() {
+                Ok(s) => s,
+                // The holder is gone: the agent's own end cannot be known.
+                Err(_) => Some(LOST),
+            };
+        }
+        Ok(self.status)
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        loop {
+            if let Some(s) = self.try_wait()? {
+                return Ok(s);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        crate::winproc::foreground(self.pid)
+    }
+
+    fn control(&self) -> io::Result<PtyControl> {
+        Ok(PtyControl {
+            inner: Arc::new(HeldPtyControl {
+                input: Arc::clone(&self.input),
+                pid: self.pid,
+                control: Arc::clone(&self.control),
+                shared: Arc::clone(&self.shared),
+            }),
+        })
+    }
+}
+
+impl Drop for HeldPty {
+    fn drop(&mut self) {
+        // Ends the read first, so that no read of the node's copy outlives this value. Does not end the agent: that is `kill`, which the
+        // terminal's own drop calls first and which does nothing once detached.
+        self.output = sync_channel(1).1;
+        self.shared.detach();
+        if let Some(r) = self.reader.take() {
+            if r.is_finished() {
+                let _ = r.join();
+            }
+        }
+    }
+}
+
+/// [`PtyControl`] of a held agent in the node: input on the node's own copy, a resize and a kill through the holder.
+struct HeldPtyControl {
+    input: Arc<Mutex<Handle>>,
+    pid: u32,
+    control: Arc<dyn crate::HeldControl>,
+    shared: Arc<HeldPtyShared>,
+}
+
+impl PtyControlOps for HeldPtyControl {
+    fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        let input = self
+            .input
+            .lock()
+            .map_err(|_| io::Error::other("poisoned"))?;
+        write_all_to(input.0, bytes)
+    }
+
+    fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.control.resize(cols, rows)
+    }
+
+    fn kill(&self) -> io::Result<()> {
+        kill_through_holder(&self.shared, self.control.as_ref())
+    }
+
+    fn foreground_pid(&self) -> io::Result<u32> {
+        crate::winproc::foreground(self.pid)
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn detach(&self) {
+        self.shared.detach();
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -1585,5 +1834,109 @@ mod reference_tests {
         assert!(file.metadata().is_ok());
         // SAFETY: only reads the type of a handle this test owns.
         assert_eq!(unsafe { GetFileType(handle.output_raw()) }, FILE_TYPE_PIPE);
+    }
+}
+
+/// M2.6: a held agent's terminal in the node, over the pipe ends a holder handed over; its resize, kill and end go to the holder (here
+/// a recording [`crate::HeldControl`]).
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod held_pty_tests {
+    use super::*;
+    use crate::held::HeldSignal;
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Recorder {
+        resized: Mutex<Vec<(u16, u16)>>,
+        signals: Mutex<Vec<HeldSignal>>,
+        ended: Mutex<Option<ExitStatus>>,
+    }
+
+    impl crate::HeldControl for Recorder {
+        fn signal(&self, signal: HeldSignal) -> io::Result<()> {
+            self.signals.lock().unwrap().push(signal);
+            Ok(())
+        }
+        fn exit_status(&self) -> io::Result<Option<ExitStatus>> {
+            Ok(*self.ended.lock().unwrap())
+        }
+        fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+            self.resized.lock().unwrap().push((cols, rows));
+            Ok(())
+        }
+    }
+
+    fn read_until(pty: &dyn Pty, needle: &str) -> String {
+        let mut seen = String::new();
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end && !seen.contains(needle) {
+            if let Ok(chunk) = pty.output().recv_timeout(Duration::from_millis(100)) {
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn the_node_reads_and_types_through_its_copy_and_asks_the_holder_for_the_rest() {
+        let mut term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let mut pty = held_pty(term.handle().unwrap(), term.pid(), recorder.clone()).unwrap();
+        pty.write_input(b"echo pty-%OS%\r\n").unwrap();
+        let seen = read_until(pty.as_ref(), "pty-Windows_NT");
+        assert!(seen.contains("pty-Windows_NT"), "{seen:?}");
+        assert_eq!(pty.pid(), term.pid());
+        // The pseudo-console stays in the holder: a resize and a kill are asked of it.
+        pty.resize(120, 40).unwrap();
+        pty.control().unwrap().resize(100, 30).unwrap();
+        assert_eq!(
+            *recorder.resized.lock().unwrap(),
+            vec![(120, 40), (100, 30)]
+        );
+        pty.kill().unwrap();
+        assert_eq!(*recorder.signals.lock().unwrap(), vec![HeldSignal::Kill]);
+        // Its end comes from the holder too.
+        assert!(pty.try_wait().unwrap().is_none());
+        *recorder.ended.lock().unwrap() = Some(ExitStatus {
+            code: Some(0),
+            signal: None,
+        });
+        assert_eq!(pty.try_wait().unwrap().unwrap().code, Some(0));
+        drop(pty);
+        term.kill_and_reap();
+    }
+
+    #[test]
+    fn a_node_that_lets_go_stops_reading_and_ends_nothing() {
+        let mut term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let mut pty = held_pty(term.handle().unwrap(), term.pid(), recorder.clone()).unwrap();
+        pty.write_input(b"echo before-%OS%\r\n").unwrap();
+        assert!(read_until(pty.as_ref(), "before-Windows_NT").contains("before-Windows_NT"));
+        let control = pty.control().unwrap();
+        control.detach();
+        // Detached: a kill is nothing, and the end is not the agent's.
+        pty.kill().unwrap();
+        control.kill().unwrap();
+        assert!(recorder.signals.lock().unwrap().is_empty());
+        assert_eq!(pty.try_wait().unwrap(), Some(LOST));
+        drop(control);
+        drop(pty);
+        // The node's copy reads no more: what the agent writes now is the holder's to read.
+        let reader = term.start_reader().unwrap();
+        term.write_input(b"echo after-%OS%\r\n").unwrap();
+        let mut seen = String::new();
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut reader = Some(reader);
+        while Instant::now() < end && !seen.contains("after-Windows_NT") {
+            std::thread::sleep(Duration::from_millis(100));
+            seen.push_str(&String::from_utf8_lossy(
+                &reader.take().unwrap().end().buffer.into_vec(),
+            ));
+            reader = Some(term.start_reader().unwrap());
+        }
+        assert!(seen.contains("after-Windows_NT"), "{seen:?}");
+        term.kill_and_reap();
     }
 }

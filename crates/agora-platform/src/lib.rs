@@ -1294,10 +1294,14 @@ impl LocalStream {
                 terminal.map(|t| t.fd.as_raw_fd()),
             )
         }
+        // Windows (M2.6): a terminal travels inside the frame ([`TERMINAL_IN_BAND`]), so the bytes go plainly and one beside them
+        // is refused.
         #[cfg(not(unix))]
         {
-            let _ = (bytes, terminal);
-            Err(unsupported_io("passing a terminal"))
+            match terminal {
+                None => std::io::Write::write(self, bytes),
+                Some(_) => Err(unsupported_io("passing a terminal")),
+            }
         }
     }
 
@@ -1313,10 +1317,10 @@ impl LocalStream {
             let (n, fd) = unixhold::recv_with_fd(self.inner.as_raw_fd(), buf)?;
             Ok((n, fd.map(|fd| TerminalHandle { fd })))
         }
+        // Windows (M2.6): nothing comes beside the bytes; a terminal is a reference inside the frame ([`TERMINAL_IN_BAND`]).
         #[cfg(not(unix))]
         {
-            let _ = buf;
-            Err(unsupported_io("receiving a terminal"))
+            std::io::Read::read(self, buf).map(|n| (n, None))
         }
     }
 
@@ -2387,6 +2391,26 @@ pub fn spawn_detached(
                 let _ = child.wait();
             });
         Ok(Detached { pid, in_job: false })
+    }
+}
+
+/// [`spawn_detached`] for the terminal holder (ADR-0079 decision 2): never started inside a kill-on-close job it could not leave, where it
+/// would die with its starter (the supervisor), which is what it exists to survive. On Windows, when this process's job refuses the
+/// breakaway, nothing is started and the error is `PermissionDenied` (the node then runs its agents itself). A breakaway from the
+/// supervisor's job into Task Scheduler's (which neither kills on close nor is ended by a stop of the task) is fine (ADR-0079, clarified
+/// 2026-11-27). Unix: the same as [`spawn_detached`].
+pub fn spawn_detached_unbound(
+    cmd: &mut std::process::Command,
+    log: &std::path::Path,
+) -> io::Result<Detached> {
+    #[cfg(windows)]
+    {
+        let out = open_append_private(log)?;
+        winproc::spawn_detached_strict(cmd, &out)
+    }
+    #[cfg(not(windows))]
+    {
+        spawn_detached(cmd, log)
     }
 }
 

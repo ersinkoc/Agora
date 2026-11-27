@@ -16,7 +16,8 @@ fn unsupported() -> io::Error {
     io::Error::from(io::ErrorKind::Unsupported)
 }
 
-/// A held agent's terminal as a [`crate::Pty`] (Unix only for now).
+/// A held agent's terminal as a [`crate::Pty`] (not built on this system).
+#[cfg(not(windows))]
 pub fn held_pty(
     _master: TerminalHandle,
     _pid: u32,
@@ -27,7 +28,7 @@ pub fn held_pty(
 
 /// M2.6: on Windows the holder's terminal, its reader and its passable pipe ends are `conpty`'s.
 #[cfg(windows)]
-pub use crate::conpty::{ExportedTerminal, HeldTerminal, TerminalHandle, TerminalReader};
+pub use crate::conpty::{held_pty, ExportedTerminal, HeldTerminal, TerminalHandle, TerminalReader};
 
 /// A terminal's master as one passable thing (Unix only for now).
 #[cfg(not(windows))]

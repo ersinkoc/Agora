@@ -40,6 +40,22 @@ const HELLO_WAIT: Duration = Duration::from_secs(1);
 /// once) slows the node by at most this many checks and can never starve it, a reap or a watch.
 const MAX_ACCEPTS: usize = 16;
 
+/// M2.6: the frame that carries a terminal inside it in place of `reply` (`Started`, `Terminal`); any other reply carries none.
+fn with_terminal(reply: &Reply, terminal: &[u8]) -> Reply {
+    match reply {
+        Reply::Started { agent, pid } => Reply::StartedRef {
+            agent: agent.clone(),
+            pid: *pid,
+            terminal: terminal.to_vec(),
+        },
+        Reply::Terminal(info) => Reply::TerminalRef {
+            info: info.clone(),
+            terminal: terminal.to_vec(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// `agora hold`.
 pub(crate) fn hold(say: &Say, opts: &Opts) -> ExitCode {
     // First of all: what the starter handed this process (its pipes, its logs) is nobody's business here, and an agent must never get it.
@@ -503,7 +519,23 @@ impl Holder {
         let Some(n) = self.node.as_mut() else {
             return false;
         };
-        if write_frame(&mut n.stream, &reply.encode(), terminal).is_err() {
+        let sent = match terminal {
+            // M2.6 (Windows): the terminal goes inside the frame, duplicated into the node this holder admitted and watches. The
+            // duplicates are the node's only once the frame went out; a frame that did not go closes them there again.
+            Some(t) if agora_platform::TERMINAL_IN_BAND => match t.export_to(&n.watch) {
+                Ok(export) => {
+                    let framed = with_terminal(reply, export.bytes());
+                    let ok = write_frame(&mut n.stream, &framed.encode(), None).is_ok();
+                    if ok {
+                        export.delivered();
+                    }
+                    ok
+                }
+                Err(_) => false,
+            },
+            _ => write_frame(&mut n.stream, &reply.encode(), terminal).is_ok(),
+        };
+        if !sent {
             self.detach();
             return false;
         }
