@@ -25,8 +25,8 @@ pub struct Timing {
 pub struct Gate {
     /// A rest state read while working, and since when every reading read it.
     pending: Option<(AgentState, Instant)>,
-    /// While blocked: the last time a reading was blocked (or the state became blocked).
-    blocked_seen: Option<Instant>,
+    /// While blocked: since when every reading was something else (no blocked rule matched); `None` while the dialog shows.
+    hold_since: Option<Instant>,
     /// While blocked: a reading other than blocked is waiting for the hold to end.
     holding: bool,
     /// The person's input since the last reading: the hold ends at the next one.
@@ -42,15 +42,15 @@ impl Gate {
         now: Instant,
         t: &Timing,
     ) -> Option<AgentState> {
-        let released = std::mem::take(&mut self.released);
         if reading == current {
             self.pending = None;
             self.holding = false;
-            if current == AgentState::Blocked {
-                self.blocked_seen = Some(now);
-            }
+            // The dialog still shows: the hold starts again from the next reading without it. The person's input is kept for that
+            // reading (a check can land before the agent redraws after an answer).
+            self.hold_since = None;
             return None;
         }
+        let released = std::mem::take(&mut self.released);
         let at_rest = matches!(reading, AgentState::Idle | AgentState::Done);
         if current == AgentState::Working && at_rest && !t.idle_confirm.is_zero() {
             return match self.pending {
@@ -68,21 +68,30 @@ impl Gate {
                 }
             };
         }
+        // The hold is measured from the first reading without the dialog, never from the last check that saw it: a check after a long
+        // back-off must not take one redraw for an answer.
         if current == AgentState::Blocked && !t.blocked_hold.is_zero() && !released {
-            let seen = *self.blocked_seen.get_or_insert(now);
-            if now.saturating_duration_since(seen) < t.blocked_hold {
+            let since = *self.hold_since.get_or_insert(now);
+            if now.saturating_duration_since(since) < t.blocked_hold {
                 self.holding = true;
                 return None;
             }
         }
-        self.apply(reading, now);
+        self.apply();
         Some(reading)
     }
 
-    fn apply(&mut self, state: AgentState, now: Instant) {
+    fn apply(&mut self) {
         self.pending = None;
         self.holding = false;
-        self.blocked_seen = (state == AgentState::Blocked).then_some(now);
+        self.hold_since = None;
+    }
+
+    /// No rule matched this check: a rest state being confirmed is dropped (every check must read it), and nothing waits on this
+    /// reading; a hold's clock keeps running.
+    pub fn no_opinion(&mut self) {
+        self.pending = None;
+        self.holding = false;
     }
 
     /// Whether a change waits (an idle being confirmed, or a hold): the next check is due at the visible floor.
@@ -96,9 +105,9 @@ impl Gate {
     }
 
     /// The state was set some other way (a node fact, the agent's own report): nothing pending stays.
-    pub fn clear(&mut self, state: AgentState, now: Instant) {
+    pub fn clear(&mut self) {
         self.released = false;
-        self.apply(state, now);
+        self.apply();
     }
 }
 
@@ -158,13 +167,37 @@ mod tests {
         assert_eq!(
             g.offer(Blocked, Working, ms(t0, 900), &T),
             None,
-            "blocked seen at 200"
+            "the hold starts at 900"
         );
-        assert_eq!(g.offer(Blocked, Working, ms(t0, 1000), &T), Some(Working));
-        // Answered by the person: shown at once.
+        assert_eq!(g.offer(Blocked, Working, ms(t0, 1600), &T), None);
+        assert_eq!(g.offer(Blocked, Working, ms(t0, 1700), &T), Some(Working));
+        // After a long back-off with the dialog showing, one redraw that hides it is not an answer.
         assert_eq!(g.offer(Working, Blocked, ms(t0, 2000), &T), Some(Blocked));
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 2100), &T), None);
+        assert_eq!(
+            g.offer(Blocked, Idle, ms(t0, 4100), &T),
+            None,
+            "the first reading without it"
+        );
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 4200), &T), None);
+        // Answered by the person: shown at once, also when a check lands before the agent redraws.
         g.input();
-        assert_eq!(g.offer(Blocked, Working, ms(t0, 2050), &T), Some(Working));
+        assert_eq!(g.offer(Blocked, Blocked, ms(t0, 4250), &T), None);
+        assert_eq!(g.offer(Blocked, Working, ms(t0, 4300), &T), Some(Working));
+    }
+
+    #[test]
+    fn a_check_with_no_opinion_drops_an_idle_being_confirmed() {
+        let (mut g, t0) = (Gate::default(), Instant::now());
+        assert_eq!(g.offer(Working, Idle, t0, &T), None);
+        g.no_opinion();
+        assert!(!g.waiting());
+        assert_eq!(
+            g.offer(Working, Idle, ms(t0, 5000), &T),
+            None,
+            "starts again"
+        );
+        assert_eq!(g.offer(Working, Idle, ms(t0, 5300), &T), Some(Idle));
     }
 
     #[test]
@@ -174,7 +207,7 @@ mod tests {
         assert_eq!(g.offer(Working, Idle, t0, &none), Some(Idle));
         assert_eq!(g.offer(Blocked, Working, t0, &none), Some(Working));
         assert_eq!(g.offer(Working, Idle, t0, &T), None);
-        g.clear(Done, ms(t0, 10));
+        g.clear();
         assert!(!g.waiting());
         assert_eq!(
             g.offer(Done, Idle, ms(t0, 20), &T),

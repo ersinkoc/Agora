@@ -1,6 +1,6 @@
-//! ADR-0117 decision 1: a real node and a scripted fake agent whose screen flickers between a working line and an empty input box every
-//! 150 ms. Under a kind with `idle_confirm_ms = 300` the agent is said idle once, when the box stays; under the same kind without the
-//! gate the flicker reads as idle again and again.
+//! ADR-0117 decision 1: a real node and a scripted fake agent whose screen shows an empty input box for 150 ms between working lines
+//! of 400 ms (longer than a check's worst gap on a busy machine). Under a kind with `idle_confirm_ms = 600` the agent is said idle once,
+//! when the box stays; under the same kind without the gate each glimpse of the box reads as idle.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use agora_node::{
     control::Client,
@@ -59,13 +59,13 @@ fn a_flickering_screen_is_said_idle_once_under_the_gate() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("manifests")).unwrap();
     std::fs::create_dir_all(root.join("data")).unwrap();
-    // Seven flickers of 150 ms each way, then the box stays.
+    // Seven glimpses of the box between working lines, then the box stays.
     let mut script = String::new();
     for _ in 0..7 {
-        script.push_str("[[frame]]\ntext = \"FLICKER-WORKING\"\ndelay_ms = 150\n");
+        script.push_str("[[frame]]\ntext = \"FLICKER-WORKING\"\ndelay_ms = 400\n");
         script.push_str("[[frame]]\ntext = \"FLICKER-BOX\"\ndelay_ms = 150\n");
     }
-    script.push_str("[[frame]]\ntext = \"FLICKER-WORKING\"\ndelay_ms = 150\n[[frame]]\ntext = \"FLICKER-BOX\"\ndelay_ms = 120000\n");
+    script.push_str("[[frame]]\ntext = \"FLICKER-WORKING\"\ndelay_ms = 400\n[[frame]]\ntext = \"FLICKER-BOX\"\ndelay_ms = 120000\n");
     std::fs::write(root.join("flicker.toml"), script).unwrap();
     let launch = serde_json::to_string(&vec![
         fake(),
@@ -75,7 +75,7 @@ fn a_flickering_screen_is_said_idle_once_under_the_gate() {
     .unwrap();
     let rules = "[[rules]]\nid = \"working\"\nstate = \"working\"\npriority = 800\nregion = \"bottom_non_empty_lines(3)\"\ncontains = \"FLICKER-WORKING\"\n[[rules]]\nid = \"idle\"\nstate = \"idle\"\npriority = 100\nregion = \"bottom_non_empty_lines(3)\"\ncontains = \"FLICKER-BOX\"\n";
     for (kind, detection) in [
-        ("gated", "[detection]\nidle_confirm_ms = 300\n"),
+        ("gated", "[detection]\nidle_confirm_ms = 600\n"),
         ("raw", ""),
     ] {
         std::fs::write(
@@ -128,10 +128,10 @@ fn a_flickering_screen_is_said_idle_once_under_the_gate() {
     let gated = start("gated");
     let raw = start("raw");
     let idle = v1::AgentState::Idle as i32;
-    // The script runs about 2.4 s, then the box stays: the gated agent is idle once that settled.
-    let until = Instant::now() + Duration::from_secs(20);
-    while !(states(&node, &gated).last() == Some(&idle)
-        && Instant::now() > until - Duration::from_secs(16))
+    // The script runs about 4.5 s; the gated agent is said idle only once the box stays (600 ms after it).
+    let started = Instant::now();
+    let until = started + Duration::from_secs(30);
+    while states(&node, &gated).last() != Some(&idle) || started.elapsed() < Duration::from_secs(6)
     {
         assert!(
             Instant::now() < until,

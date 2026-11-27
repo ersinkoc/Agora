@@ -262,8 +262,11 @@ The maintainer resolved these questions on 2026-11-27.
    tests on an injected clock) and the `[detection]` table (`DetectionSpec`, bounds 2000 and 5000 ms); the supervisor offers each
    paced reading to the agent's gate, checks at the visible floor while a change waits, ends a blocked hold when the terminal's input
    count moved (`TerminalHandle::inputs`, every write through `InputHandle` counted), and clears the gate on every state that is not
-   the screen's. `crates/agora-node/tests/detection_gate.rs`: a screen flickering every 150 ms is said idle once under
-   `idle_confirm_ms = 300`, many times without. Detection benchmark after it: tick p50 905 µs, one terminal p50 20.1 µs (baseline
+   the screen's. Review of e1b6b760: the hold is measured from the first reading without the dialog (never from the last check that saw it, so a check
+   after a back-off cannot take one redraw for an answer); a check with no opinion drops an idle being confirmed; the person's input is kept
+   until a reading without the dialog; the gate is not asked while the state is the agent's own report; a new process starts its input
+   count and the gate afresh; every write of input goes through `InputHandle` (no way to write past the count). `crates/agora-node/tests/detection_gate.rs`:
+   glimpses of the input box between working lines are said idle once under `idle_confirm_ms = 600`, each time without. Detection benchmark after it: tick p50 905 µs, one terminal p50 20.1 µs (baseline
    886 µs and 19.6 µs; the gate is in the supervisor, not in `detect`). Left: timed captures of the real Claude Code and Codex, then
    300 and 800 ms in their manifests (the maintainer's starting values, to be confirmed by the captures). **Engine note:** the engine
    was already at 7 (ADR-0122's `shared_flag`); `[detection]` needs no `min_engine` (an older engine ignores it), and hold rules

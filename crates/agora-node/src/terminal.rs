@@ -434,7 +434,7 @@ pub struct TerminalHandle {
 }
 
 /// A handle that writes input without the terminal (see [`TerminalHandle::input_handle`]); every write is counted for detection
-/// (ADR-0117). Everything else is the platform's [`PtyControl`].
+/// (ADR-0117). It gives no way to write past the count.
 #[derive(Clone)]
 pub struct InputHandle {
     control: PtyControl,
@@ -449,12 +449,10 @@ impl InputHandle {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
-}
 
-impl std::ops::Deref for InputHandle {
-    type Target = PtyControl;
-    fn deref(&self) -> &PtyControl {
-        &self.control
+    /// Resize the process's terminal (see [`PtyControl::resize`]); not input.
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.control.resize(cols, rows)
     }
 }
 
@@ -597,7 +595,10 @@ impl TerminalHandle {
     /// Send input to the process, immediately and on the caller's thread. Blocks only while the process is
     /// not reading and the terminal's input queue is full.
     pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {
-        self.input_handle()?.write_input(&bytes)
+        self.control()?.write_input(&bytes)?;
+        self.inputs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// ADR-0117: how many writes of input reached the process so far.

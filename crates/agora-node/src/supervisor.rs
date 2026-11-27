@@ -1704,6 +1704,9 @@ impl Supervisor {
             e.run_id = run_id;
             e.terminal = Some(terminal);
             e.pacer = Pacer::default();
+            // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
+            e.inputs_seen = 0;
+            e.gate.clear();
             e.next_check = now;
             // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
             e.inside = None;
@@ -4535,7 +4538,16 @@ impl Supervisor {
             entry.gate.input();
         }
         let current = entry.agent.state();
-        let applied = detected.and_then(|r| entry.gate.offer(current, r, now, &kind.timing));
+        // While the state is the agent's own report, a screen reading changes nothing (`Agent::observe`): the gate is not asked, so
+        // nothing waits and the pacer backs off as before.
+        let applied = match detected {
+            _ if entry.state_reported => detected,
+            Some(r) => entry.gate.offer(current, r, now, &kind.timing),
+            None => {
+                entry.gate.no_opinion();
+                None
+            }
+        };
         let changed = applied.is_some_and(|state| set_state(entry, state, Origin::Screen, events));
         entry.pacer.record(changed);
         // While a change waits, the next check is due at the visible floor, visible or not, without the back-off.
@@ -4582,6 +4594,12 @@ impl Supervisor {
                 entry.terminal = Some(t);
                 entry.native_since = (native && !from_nothing).then_some(now);
                 entry.pacer = Pacer::default();
+                // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
+                entry.inputs_seen = 0;
+                entry.gate.clear();
+                // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
+                entry.inputs_seen = 0;
+                entry.gate.clear();
                 entry.next_check = now;
                 // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
                 entry.inside = None;
@@ -6412,7 +6430,7 @@ fn set_state(
 ) -> bool {
     // ADR-0117: a node fact or the agent's own report leaves nothing of the screen's timing gate waiting.
     if origin != Origin::Screen {
-        entry.gate.clear(state, Instant::now());
+        entry.gate.clear();
     }
     apply_state(
         &mut entry.agent,
