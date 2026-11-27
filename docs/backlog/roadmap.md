@@ -45,7 +45,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   open task it is allowed (an automation rule: **decision**, ADR first)
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
-- [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**, ADR first): the owner publishes a skill or an MCP server
+- [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**: ADR-0122 Proposed): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
   cannot widen it); secrets stay on the node (ADR-0084)
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub

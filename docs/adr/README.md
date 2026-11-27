@@ -137,3 +137,4 @@ Date: YYYY-MM-DD
 | 0119 | A helper started on another machine | Accepted |
 | 0120 | A gallery for the community catalogs: dates, popularity and plugin screenshots | Accepted |
 | 0121 | Show task handoff delivery on the project board | Accepted |
+| 0122 | Skills and MCP servers shared through the hub | Proposed |
