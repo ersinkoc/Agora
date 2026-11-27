@@ -51,6 +51,13 @@ flag = ["--mcp-config", "{config_file}"]
 # Claude Code 2.1.332: `--mcp-config <configs...>` "Load MCP servers from JSON files or strings", and the option can be given again).
 shared_flag = ["--mcp-config", "{shared_config_file}"]
 
+[skills]
+# ADR-0122 step 5: the owner's shared skills, as a plugin folder the node keeps outside the worktree (checked on Claude Code 2.1.332:
+# `--plugin-dir <path>` "Load a plugin from a directory ... for this session only", repeatable; `claude plugin validate` on the
+# folder the node writes reports `skills: shared:<name>`). Older engines ignore this section.
+layout = "claude_plugin"
+flag = ["--plugin-dir", "{skills_dir}"]
+
 [resume]
 argv = ["claude", "--resume", "{session_id}"]
 # ADR-0060 Amendment A: the node's own resume of an agent that was working carries this sentence as the first message (checked on Claude Code

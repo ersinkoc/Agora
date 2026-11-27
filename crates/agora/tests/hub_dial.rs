@@ -5041,16 +5041,9 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
             )
             .unwrap();
     }
-    let publish = |d: &agora_tui::device::Device, name: &str| -> String {
-        let item = v1::ShareItem {
-            name: name.into(),
-            kind: v1::ShareItemKind::McpServer as i32,
-            mcp: Some(v1::McpServerDef {
-                command: "npx".into(),
-                ..Default::default()
-            }),
-            skill: None,
-        };
+    let publish_item = |d: &agora_tui::device::Device, item: v1::ShareItem| -> String {
+        let name = item.name.clone();
+        let name = name.as_str();
         let hash = agora_hub::shares::item_hash(&item);
         let scope = v1::ShareScope::default();
         let at = server::now_ms();
@@ -5070,7 +5063,37 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
             .unwrap();
         hash
     };
+    let publish = |d: &agora_tui::device::Device, name: &str| -> String {
+        publish_item(
+            d,
+            v1::ShareItem {
+                name: name.into(),
+                kind: v1::ShareItemKind::McpServer as i32,
+                mcp: Some(v1::McpServerDef {
+                    command: "npx".into(),
+                    ..Default::default()
+                }),
+                skill: None,
+            },
+        )
+    };
     publish(&trusted, "db-tools");
+    // ADR-0122 step 5: a skill too, for a kind that loads a folder of them.
+    publish_item(
+        &trusted,
+        v1::ShareItem {
+            name: "review-rules".into(),
+            kind: v1::ShareItemKind::Skill as i32,
+            mcp: None,
+            skill: Some(v1::SkillDef {
+                description: "how we review".into(),
+                files: vec![v1::SkillFile {
+                    path: "SKILL.md".into(),
+                    content: b"cite the file".to_vec(),
+                }],
+            }),
+        },
+    );
     let refused_hash = publish(&stranger, "other-tools");
 
     let dir = tmp("shared-items");
@@ -5100,7 +5123,7 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
     .unwrap();
     std::fs::write(
         manifests.join("probe.toml"),
-        format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 7\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\nshared_flag = [\"--mcp-config\", \"{{shared_config_file}}\"]\n"),
+        format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 7\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\nshared_flag = [\"--mcp-config\", \"{{shared_config_file}}\"]\n[skills]\nlayout = \"claude_plugin\"\nflag = [\"--plugin-dir\", \"{{skills_dir}}\"]\n"),
     )
     .unwrap();
     let repo = dir.join("proj");
@@ -5134,7 +5157,7 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
     let _up = spawn(Arc::clone(&node.events), link).unwrap();
     wait(
         "the machine to use the item a trusted device signed",
-        || !node.shared.for_launch("p", "claude-code").is_empty(),
+        || node.shared.for_launch("p", "claude-code").len() == 2,
     );
     let used: Vec<String> = node
         .shared
@@ -5142,7 +5165,7 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
         .into_iter()
         .map(|w| w.name)
         .collect();
-    assert_eq!(used, ["db-tools"]);
+    assert_eq!(used, ["db-tools", "review-rules"]);
     wait("the hub to hear why the other was refused", || {
         agora_hub::shares::Shares::new(hub.state.hub.store())
             .list(false)
@@ -5228,7 +5251,23 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
         .unwrap();
     assert_eq!(
         given.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
-        ["db-tools"]
+        ["db-tools", "review-rules"]
+    );
+    // Its skills are a plugin folder of the node's own, outside the worktree, named by the kind's flag.
+    let skills_dir = node.shared.skills_dir(&a.agent_id);
+    let at = args
+        .iter()
+        .position(|x| x == "--plugin-dir")
+        .expect("the skills flag");
+    assert_eq!(args[at + 1], skills_dir.to_string_lossy());
+    assert_eq!(
+        std::fs::read_to_string(skills_dir.join("skills/review-rules/SKILL.md")).unwrap(),
+        "cite the file"
+    );
+    assert!(skills_dir.join(".claude-plugin/plugin.json").is_file());
+    assert!(
+        !skills_dir.starts_with(dir.join("wt")),
+        "outside the worktree"
     );
     local
         .call(v1::command_request::Command::AgentStop(v1::AgentStop {
@@ -5237,7 +5276,8 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
         }))
         .unwrap()
         .unwrap();
-    wait("its file of shared servers to go with it", || {
-        !shared_file.exists()
-    });
+    wait(
+        "its file of shared servers and its skills to go with it",
+        || !shared_file.exists() && !skills_dir.exists(),
+    );
 }

@@ -146,6 +146,15 @@ pub fn shared_args(spec: &McpSpec, file: &Path) -> Result<Vec<String>, InjectErr
     spec.shared_flag.iter().map(|a| expand(a, &vars)).collect()
 }
 
+/// ADR-0122: the arguments that give an agent the folder of its shared skills (`[skills] flag` with `{skills_dir}`).
+pub fn skills_args(
+    spec: &crate::manifest::SkillsSpec,
+    dir: &Path,
+) -> Result<Vec<String>, InjectError> {
+    let vars = [("skills_dir", dir.to_string_lossy().into_owned())];
+    spec.flag.iter().map(|a| expand(a, &vars)).collect()
+}
+
 /// `s` as a TOML basic string, quotes included.
 fn toml_string(s: &str) -> String {
     let mut out = String::from("\"");

@@ -215,6 +215,44 @@ struct Launch {
 /// Reads a secret by name from the node's store.
 pub type SecretReader = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// ADR-0122 step 5: writes `skills` into `dir` laid out as `layout` says, replacing what was there. The names and paths were checked
+/// with the item (`agora_protocol::share`) and are checked again here, so nothing lands outside `dir`.
+pub fn write_skills(
+    dir: &Path,
+    layout: agora_adapters::manifest::SkillsLayout,
+    skills: &[(String, v1::SkillDef)],
+) -> std::io::Result<()> {
+    let bad = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    match layout {
+        agora_adapters::manifest::SkillsLayout::ClaudePlugin => {
+            let meta = dir.join(".claude-plugin");
+            std::fs::create_dir_all(&meta)?;
+            agora_platform::write_private(&meta.join("plugin.json"), br#"{"name":"shared"}"#)?;
+            for (name, skill) in skills {
+                if !agora_protocol::share::valid_name(name, agora_protocol::share::MAX_NAME) {
+                    return Err(bad());
+                }
+                let home = dir.join("skills").join(name);
+                for f in &skill.files {
+                    if !agora_protocol::share::valid_skill_path(&f.path) {
+                        return Err(bad());
+                    }
+                    let path = home.join(&f.path);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    agora_platform::write_private(&path, &f.content)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The names of the secrets a value refers to (`{secret:NAME}`), in order, each once.
 pub fn secret_names(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -549,6 +587,49 @@ impl SharedItems {
         servers
     }
 
+    /// ADR-0122 step 5: the shared skills an agent of `kind` in `project` gets at its launch, judged again first, by name. Added to
+    /// what it was given (call after [`Self::servers_for`], or after [`Self::forget_given`] for a kind that takes no server).
+    pub fn skills_for(
+        &self,
+        agent: &str,
+        project: &str,
+        kind: &str,
+    ) -> Vec<(String, v1::SkillDef)> {
+        self.rejudge();
+        let mut skills = Vec::new();
+        let mut given = Vec::new();
+        for w in self.for_launch(project, kind) {
+            let Some(sk) = w.item.as_ref().and_then(|i| i.skill.clone()) else {
+                continue;
+            };
+            given.push(v1::SharedItemRef {
+                name: w.name.clone(),
+                item_hash: w.item_hash.clone(),
+            });
+            skills.push((w.name.clone(), sk));
+        }
+        self.given
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(agent.to_string())
+            .or_default()
+            .extend(given);
+        skills
+    }
+
+    /// What `agent` was given is forgotten, before a launch that gives it no server.
+    pub fn forget_given(&self, agent: &str) {
+        self.given
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(agent);
+    }
+
+    /// The folder of the shared skills an agent was given (outside its worktree; the node's own).
+    pub fn skills_dir(&self, agent: &str) -> PathBuf {
+        self.dir.join("skills").join(agent)
+    }
+
     /// What `agent` was given at its launch (`AgentStarted.shared_items`); nothing for an agent started without shared items.
     pub fn given(&self, agent: &str) -> Vec<v1::SharedItemRef> {
         self.given
@@ -642,6 +723,7 @@ impl SharedItems {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, l| l.agent != agent);
         let _ = std::fs::remove_file(self.agent_file(agent));
+        let _ = std::fs::remove_dir_all(self.skills_dir(agent));
         self.given
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1214,6 +1296,87 @@ mod tests {
         );
         s.agent_ended("agent-1");
         assert!(s.given("agent-1").is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0122 step 5: a launch gets the skills in its scope beside its servers, both named in what it was given; they are written as
+    /// a plugin folder of the node's own, a path that would leave it is refused, and the folder goes when the agent ends.
+    #[test]
+    fn a_launch_gets_its_skills_written_as_the_kind_loads_them() {
+        let d = temp("skills");
+        let s = open(&d, SharePolicy::default());
+        let skill = |files: &[(&str, &str)]| ShareItem {
+            name: "review".into(),
+            kind: ShareItemKind::Skill as i32,
+            mcp: None,
+            skill: Some(v1::SkillDef {
+                description: "the review rules".into(),
+                files: files
+                    .iter()
+                    .map(|(p, c)| v1::SkillFile {
+                        path: (*p).into(),
+                        content: c.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            }),
+        };
+        s.take(word(
+            "review",
+            Some(skill(&[
+                ("SKILL.md", "cite the file"),
+                ("refs/style.md", "short"),
+            ])),
+            1,
+            ShareScope::default(),
+        ));
+        s.take(word(
+            "db",
+            Some(item("db", "npx", "")),
+            1,
+            ShareScope::default(),
+        ));
+        let servers = s.servers_for("agent-1", "p", "claude-code", Path::new("/run/m/a.sock"));
+        let skills = s.skills_for("agent-1", "p", "claude-code");
+        assert_eq!(servers.len(), 1);
+        assert_eq!(skills.len(), 1);
+        let names = |agent: &str| {
+            let mut n: Vec<String> = s.given(agent).into_iter().map(|r| r.name).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names("agent-1"), ["db", "review"]);
+        // A kind that takes no server still says the skills it got, and nothing of an earlier launch.
+        s.forget_given("agent-1");
+        s.skills_for("agent-1", "p", "claude-code");
+        assert_eq!(names("agent-1"), ["review"]);
+
+        let dir = s.skills_dir("agent-1");
+        let layout = agora_adapters::manifest::SkillsLayout::ClaudePlugin;
+        std::fs::create_dir_all(dir.join("stale")).unwrap();
+        write_skills(&dir, layout, &skills).unwrap();
+        assert!(!dir.join("stale").exists(), "what was there is replaced");
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap(),
+            r#"{"name":"shared"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("skills/review/SKILL.md")).unwrap(),
+            "cite the file"
+        );
+        assert!(dir.join("skills/review/refs/style.md").is_file());
+        for (name, path) in [
+            ("review", "../out.md"),
+            ("review", "/etc/x"),
+            ("../x", "SKILL.md"),
+        ] {
+            let mut bad = skills.clone();
+            bad[0].0 = name.into();
+            bad[0].1.files[0].path = path.into();
+            assert!(write_skills(&dir, layout, &bad).is_err(), "{name} {path}");
+        }
+        assert!(!d.join("out.md").exists());
+        s.agent_ended("agent-1");
+        assert!(!dir.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 

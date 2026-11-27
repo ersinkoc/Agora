@@ -2452,10 +2452,26 @@ impl Node {
                 .unwrap_or_else(|e| e.into_inner())
                 // Called under the supervisor's lock; it takes the approvals' trust lock under it (re-judging), and nothing in
                 // approvals ever calls back into the supervisor, so the order holds.
-                .set_shared_hook(Box::new(move |id, project, kind| {
+                .set_shared_hook(Box::new(move |id, project, kind, servers, skills| {
                     let socket = mesh_for_hook.upgrade()?.socket_path(id);
-                    let servers = for_hook.servers_for(id.as_str(), project, kind, &socket);
-                    Some((for_hook.agent_file(id.as_str()), servers))
+                    let agent = id.as_str();
+                    let servers = if servers {
+                        for_hook.servers_for(agent, project, kind, &socket)
+                    } else {
+                        for_hook.forget_given(agent);
+                        Vec::new()
+                    };
+                    let skills = if skills {
+                        for_hook.skills_for(agent, project, kind)
+                    } else {
+                        Vec::new()
+                    };
+                    Some(crate::supervisor::SharedGiven {
+                        servers_file: for_hook.agent_file(agent),
+                        servers,
+                        skills_dir: for_hook.skills_dir(agent),
+                        skills,
+                    })
                 }));
             events.set_shared(Arc::clone(&shared));
             // ADR-0088: an agent's `preview_suggest` becomes `PreviewSuggested`, bounded per agent.

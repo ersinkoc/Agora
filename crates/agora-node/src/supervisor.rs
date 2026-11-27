@@ -93,12 +93,19 @@ pub struct Launching {
 /// to start it without one (the mesh is an addition; an agent never fails to start because of it).
 pub type LaunchHook = Box<dyn Fn(&Launching) -> Option<agora_adapters::inject::Endpoint> + Send>;
 
-/// ADR-0122 step 3b: the owner's shared MCP servers an agent gets at its launch `(agent, project, kind)`, and the file (outside its
-/// worktree, readable by this user only) the node writes them to.
-pub type SharedHook = Box<
-    dyn Fn(&AgentId, &str, &str) -> Option<(PathBuf, Vec<agora_adapters::inject::SharedServer>)>
-        + Send,
->;
+/// ADR-0122: what of the owner's shared items an agent gets at its launch, and where the node writes them (outside its worktree).
+#[derive(Default)]
+pub struct SharedGiven {
+    /// Step 3b: the MCP servers, and their file (readable by this user only).
+    pub servers_file: PathBuf,
+    pub servers: Vec<agora_adapters::inject::SharedServer>,
+    /// Step 5: the skills, and their folder.
+    pub skills_dir: PathBuf,
+    pub skills: Vec<(String, agora_protocol::v1::SkillDef)>,
+}
+
+/// ADR-0122: the shared items an agent gets at its launch `(agent, project, kind, takes servers, takes skills)`.
+pub type SharedHook = Box<dyn Fn(&AgentId, &str, &str, bool, bool) -> Option<SharedGiven> + Send>;
 
 /// Undoes the launch hook for an agent whose start then failed (its mesh endpoint would otherwise stay registered).
 pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
@@ -2859,19 +2866,25 @@ impl Supervisor {
             .collect();
         let mut argv = plan.argv_extra;
         // ADR-0122 step 3b: the owner's shared MCP servers, in a file of the node's own outside the worktree (they may hold secrets),
-        // only for a kind that says how it takes a second file.
-        if !spec.shared_flag.is_empty() {
-            if let Some((file, servers)) =
-                self.shared_hook.as_ref().and_then(|h| h(id, project, kind))
+        // only for a kind that says how it takes a second file. Step 5: the shared skills, in a folder of the node's own laid out as
+        // the kind's `[skills]` says, only for a kind that says how it loads one.
+        let skills_spec = self.kinds.get(kind).and_then(|k| k.manifest.skills.clone());
+        let takes_servers = !spec.shared_flag.is_empty();
+        if takes_servers || skills_spec.is_some() {
+            if let Some(given) = self
+                .shared_hook
+                .as_ref()
+                .and_then(|h| h(id, project, kind, takes_servers, skills_spec.is_some()))
             {
-                if !servers.is_empty() {
+                if !given.servers.is_empty() {
+                    let file = given.servers_file;
                     if let Some(dir) = file.parent() {
                         std::fs::create_dir_all(dir)
                             .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
                     }
                     agora_platform::write_private(
                         &file,
-                        agora_adapters::inject::shared_json(&servers).as_bytes(),
+                        agora_adapters::inject::shared_json(&given.servers).as_bytes(),
                     )
                     .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
                     argv.extend(
@@ -2879,6 +2892,15 @@ impl Supervisor {
                             .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?,
                     );
                     read.push(file);
+                }
+                if let (Some(sk), false) = (&skills_spec, given.skills.is_empty()) {
+                    crate::shared_items::write_skills(&given.skills_dir, sk.layout, &given.skills)
+                        .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+                    argv.extend(
+                        agora_adapters::inject::skills_args(sk, &given.skills_dir)
+                            .map_err(|e| SupervisorError::Spawn(format!("skills: {e}")))?,
+                    );
+                    read.push(given.skills_dir);
                 }
             }
         }

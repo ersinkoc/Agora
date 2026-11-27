@@ -99,6 +99,13 @@ format = "json"                         # only json for now
 # [mcp.env]                                  # env: variables set for the agent
 # AGORA_MCP_SOCKET = "{socket}"
 
+[skills]
+# ADR-0122 step 5 (optional; older engines ignore it): how the kind loads a folder of the owner's shared skills. The node writes the
+# folder under its own data folder (outside the worktree), appends `flag` only when the agent gets a skill, and removes the folder
+# when the agent ends. A kind without it gets no shared skill. Placeholder: {skills_dir}.
+# layout = "claude_plugin"                   # `.claude-plugin/plugin.json` ({"name":"shared"}) and `skills/<name>/<files>`
+# flag = ["--plugin-dir", "{skills_dir}"]
+
 [hooks]
 # Optional hook installation for session identity and state reports.
 install = "builtin:example"             # or a script path from the package

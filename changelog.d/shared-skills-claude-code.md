@@ -1,0 +1,1 @@
+- Skills the owner shares with agents reach Claude Code agents at their next start, as a plugin folder the machine writes outside the project (ADR-0122).

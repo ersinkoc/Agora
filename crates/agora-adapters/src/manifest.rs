@@ -548,6 +548,27 @@ pub struct Manifest {
     pub accounts: Option<Accounts>,
     /// ADR-0091: the plan limits the tool reports in its usage file (`min_engine` 5).
     pub quota: Option<QuotaSpec>,
+    /// ADR-0122 decision 5: how the kind loads a folder of the owner's shared skills. Older engines ignore it, and a kind without it
+    /// gets no shared skill.
+    pub skills: Option<SkillsSpec>,
+}
+
+/// `[skills]`: how a kind loads a folder of shared skills the node writes under its own data folder, outside the worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSpec {
+    /// How the folder is laid out for this kind.
+    pub layout: SkillsLayout,
+    /// Arguments appended at launch when the agent gets any skill; `{skills_dir}` names the folder.
+    pub flag: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillsLayout {
+    /// A plugin folder: `.claude-plugin/plugin.json` and `skills/<name>/<the skill's files>` (Claude Code's `--plugin-dir`, checked
+    /// with `claude plugin validate` on 2.1.332).
+    ClaudePlugin,
 }
 
 /// Folders an agent asks to read or write when confined; `~/` stands for the home folder.
@@ -718,6 +739,11 @@ impl Manifest {
         }
         if self.min_engine == 0 {
             return Err(invalid("min_engine"));
+        }
+        if let Some(sk) = &self.skills {
+            if !sk.flag.iter().any(|a| a.contains("{skills_dir}")) {
+                return Err(invalid("skills.flag"));
+            }
         }
         if self.provider.len() > 32
             || !self
@@ -1046,6 +1072,30 @@ mod launch_tests {
 
     fn plain(tail: &str) -> String {
         format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{tail}")
+    }
+
+    /// ADR-0122 step 5: `[skills]` says how a kind loads a folder of shared skills; its flag must name the folder, and a layout this
+    /// engine does not know refuses the manifest. A manifest without it gives no skill.
+    #[test]
+    fn skills_name_their_folder_in_a_known_layout() {
+        assert!(Manifest::parse(&with("")).unwrap().skills.is_none());
+        let m = Manifest::parse(&with(
+            "[skills]\nlayout = \"claude_plugin\"\nflag = [\"--plugin-dir\", \"{skills_dir}\"]\n",
+        ))
+        .unwrap();
+        let sk = m.skills.unwrap();
+        assert_eq!(sk.layout, SkillsLayout::ClaudePlugin);
+        assert_eq!(
+            crate::inject::skills_args(&sk, std::path::Path::new("/d/s")).unwrap(),
+            ["--plugin-dir", "/d/s"]
+        );
+        for bad in [
+            "[skills]\nlayout = \"claude_plugin\"\nflag = [\"--plugin-dir\"]\n",
+            "[skills]\nlayout = \"zip\"\nflag = [\"{skills_dir}\"]\n",
+            "[skills]\nlayout = \"claude_plugin\"\nflag = [\"{skills_dir}\"]\nextra = 1\n",
+        ] {
+            assert!(Manifest::parse(&with(bad)).is_err(), "{bad}");
+        }
     }
 
     /// ADR-0123: a manifest may say who serves its models; a provider in the wrong form refuses the manifest.

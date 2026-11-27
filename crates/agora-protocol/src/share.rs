@@ -12,7 +12,8 @@ pub const MAX_SKILL_BYTES: usize = 1024 * 1024;
 /// The most shared items given to one agent at its start.
 pub const MAX_PER_AGENT: usize = 32;
 
-const MAX_NAME: usize = 64;
+/// The longest item name (`[a-z0-9-]`).
+pub const MAX_NAME: usize = 64;
 const MAX_COMMAND: usize = 256;
 const MAX_ARGS: usize = 32;
 const MAX_ARG: usize = 1024;
