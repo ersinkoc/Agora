@@ -50,7 +50,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   cannot widen it); secrets stay on the node (ADR-0084)
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
   hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
-- [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (**schema**); plan limits
+- [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (**schema**: ADR-0123 Proposed); plan limits
   for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
   sizes and free disk in the window (M3.7's schema part)
 - [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
