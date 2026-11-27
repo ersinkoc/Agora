@@ -2392,6 +2392,7 @@ fn answer_always(
         requested_ms: 0,
         expires_ms: r.expires_at_ms,
         binding: None,
+        remote: None,
         offer: Offer {
             once: r.scopes.contains(&(v1::ApprovalScope::Once as i32)),
             always: (!r.always_option_id.is_empty()).then(|| AlwaysOption {

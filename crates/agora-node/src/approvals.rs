@@ -412,6 +412,85 @@ pub struct SkipBinding {
     pub value: String,
 }
 
+/// ADR-0119: the asking machine and agent an `agent.start.remote` decision is signed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBinding {
+    pub origin_node: String,
+    pub origin_agent: String,
+}
+
+/// ADR-0119: a start another machine asks this node for. Only the node raises it (the whole `agent.` namespace is reserved).
+pub const REMOTE_START_ACTION: &str = "agent.start.remote";
+/// ADR-0119 decision 12: the most helpers a standing grant lets run at once, and the longest it lasts after the decision.
+pub const REMOTE_GRANT_MAX_RUNNING: u32 = 20;
+pub const REMOTE_GRANT_MAX_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// ADR-0119 decision 4: what a device signs to decide an `agent.start.remote` request: the domain `agora-approval-start-v4`, one NUL,
+/// then `F(node_id) F(origin_node) F(origin_agent) F(approval_id) F(verdict) F(settings) F(launch_options) F(grant_max_running)
+/// F(grant_any_kind) F(grant_below_folder) F(grant_chain) F(grant_until_ms) F(sha256(detail))`, the settings and options written as in
+/// v3, the verdict and flags `0`/`1`, numbers in decimal (every grant field `0` without a grant). Shared vectors:
+/// `schema/fixtures/signing/approval-start-v4.json`.
+#[allow(clippy::too_many_arguments)]
+pub fn start_signed_message_v4(
+    node_id: &str,
+    remote: &RemoteBinding,
+    approval_id: &str,
+    approved: bool,
+    settings: &[(String, String)],
+    options: &[String],
+    grant: &agora_protocol::v1::RemoteGrant,
+    detail: &str,
+) -> Vec<u8> {
+    let digest = ring::digest::digest(&ring::digest::SHA256, detail.as_bytes());
+    let hash: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let flag = |b: bool| if b { "1" } else { "0" };
+    let mut m = b"agora-approval-start-v4\0".to_vec();
+    for part in [
+        node_id,
+        &remote.origin_node,
+        &remote.origin_agent,
+        approval_id,
+        flag(approved),
+        &crate::directory::signed_pairs(settings),
+        &crate::directory::signed_list(options),
+        &grant.max_running.to_string(),
+        flag(grant.any_kind),
+        flag(grant.below_folder),
+        flag(grant.chain),
+        &grant.until_ms.to_string(),
+        &hash,
+    ] {
+        framed(&mut m, part);
+    }
+    m
+}
+
+/// A standing grant that cannot be ([`remote_grant_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidGrant;
+
+/// ADR-0119 decision 12: when a standing grant signed now ends, judged by this node's clock: `None` for no grant (every field zero),
+/// `Err` for a grant that cannot be (more than [`REMOTE_GRANT_MAX_RUNNING`], an end already past, or grant fields without a number). An
+/// end a little more than 24 hours away (clock skew between the device and this node) is clamped, not refused.
+pub fn remote_grant_end(
+    grant: &agora_protocol::v1::RemoteGrant,
+    now_ms: u64,
+) -> Result<Option<u64>, InvalidGrant> {
+    if grant.max_running == 0 {
+        let empty = !grant.any_kind && !grant.below_folder && !grant.chain && grant.until_ms == 0;
+        return if empty { Ok(None) } else { Err(InvalidGrant) };
+    }
+    if grant.max_running > REMOTE_GRANT_MAX_RUNNING {
+        return Err(InvalidGrant);
+    }
+    let longest = now_ms.saturating_add(REMOTE_GRANT_MAX_MS);
+    match grant.until_ms {
+        0 => Ok(Some(longest)),
+        u if u <= now_ms => Err(InvalidGrant),
+        u => Ok(Some(u.min(longest))),
+    }
+}
+
 /// Which actions need a person. Patterns are exact action names, or a prefix ending in `*`; `*` alone is everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
@@ -441,6 +520,9 @@ pub struct Pending {
     pub binding: Option<SkipBinding>,
     /// ADR-0101: the answers announced (after the policy); a decision is checked against this, never against anything it carries.
     pub offer: Offer,
+    /// Only for [`REMOTE_START_ACTION`] (ADR-0119): the asking machine and agent the decision is signed over, from the node's own record
+    /// of the forwarded request, never from the detail.
+    pub remote: Option<RemoteBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -576,8 +658,26 @@ impl<V: Verifier> Approvals<V> {
             expires_ms: now_ms.saturating_add(ttl),
             binding,
             offer: Offer::once_only(),
+            remote: None,
         };
         self.pending.insert(id, p.clone());
+        Some(p)
+    }
+
+    /// ADR-0119: registers an `agent.start.remote` card for a start another machine asked for, bound to the asking machine (the
+    /// hub-written origin) and agent. `ttl_ms` of 0 uses the default.
+    pub fn request_remote(
+        &mut self,
+        detail: &str,
+        remote: RemoteBinding,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<Pending> {
+        let mut p = self.request_bound("", REMOTE_START_ACTION, detail, now_ms, ttl_ms, None)?;
+        p.remote = Some(remote);
+        if let Some(stored) = self.pending.get_mut(&p.id) {
+            stored.remote = p.remote.clone();
+        }
         Some(p)
     }
 
@@ -614,6 +714,13 @@ impl<V: Verifier> Approvals<V> {
         let Some(p) = self.pending.get(&r.approval_id) else {
             return Err(ApprovalError::Unknown);
         };
+        // ADR-0119: a standing remote grant means something only on an `agent.start.remote` card; anywhere else it is refused.
+        let remote_grant = r.remote_grant.unwrap_or_default();
+        if p.action != REMOTE_START_ACTION
+            && remote_grant != agora_protocol::v1::RemoteGrant::default()
+        {
+            return Err(ApprovalError::BadSignature);
+        }
         // S1: a request put back after its answer did not reach the adapter takes a new answer, never one already given (compared
         // in a form a relay cannot change without the key: [`replay_form`]).
         let form = replay_form(&r.signature);
@@ -651,7 +758,7 @@ impl<V: Verifier> Approvals<V> {
         }
         // Verify before anything changes, and before saying whether the request expired: a peer without a trusted
         // key cannot learn the state of a request it can name (ids are 128 random bits, so it cannot guess one).
-        let (settings, options) = if p.action == START_ACTION {
+        let (settings, options) = if p.action == START_ACTION || p.action == REMOTE_START_ACTION {
             (detail_settings(&p.detail), detail_launch_options(&p.detail))
         } else {
             (Vec::new(), Vec::new())
@@ -670,6 +777,32 @@ impl<V: Verifier> Approvals<V> {
                 &r.approval_id,
                 r.approved,
                 binding,
+                &p.detail,
+            )
+        } else if p.action == REMOTE_START_ACTION {
+            // ADR-0119: only v4 decides it. The published local grant fields mean nothing here; a denial or a start that skips
+            // permissions carries no grant; a grant must be one that can be (`remote_grant_end`).
+            let Some(remote) = &p.remote else {
+                return Err(ApprovalError::BadSignature);
+            };
+            if r.helper_grant != 0 || r.helpers_may_start {
+                return Err(ApprovalError::BadSignature);
+            }
+            let granted = remote_grant.max_running != 0;
+            if granted && (!r.approved || !options.is_empty()) {
+                return Err(ApprovalError::BadSignature);
+            }
+            if remote_grant_end(&remote_grant, now_ms).is_err() {
+                return Err(ApprovalError::BadSignature);
+            }
+            start_signed_message_v4(
+                &self.node_id,
+                remote,
+                &r.approval_id,
+                r.approved,
+                &settings,
+                &options,
+                &remote_grant,
                 &p.detail,
             )
         } else if p.action == START_ACTION && !options.is_empty() {
@@ -2329,6 +2462,208 @@ mod tests {
         once: true,
     };
 
+    /// ADR-0119: the v4 vectors every client signs by (`schema/fixtures/signing/approval-start-v4.json`, also checked by agora-protocol),
+    /// with the settings and options read out of the detail the way the node reads them.
+    #[test]
+    fn the_shared_start_v4_vectors_match() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../schema/fixtures/signing/approval-start-v4.json");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for c in v["cases"].as_array().unwrap() {
+            let s = |k: &str| c[k].as_str().unwrap().to_string();
+            let detail = s("detail");
+            let g = &c["grant"];
+            let grant = agora_protocol::v1::RemoteGrant {
+                max_running: u32::try_from(g["max_running"].as_u64().unwrap()).unwrap(),
+                any_kind: g["any_kind"].as_bool().unwrap(),
+                below_folder: g["below_folder"].as_bool().unwrap(),
+                chain: g["chain"].as_bool().unwrap(),
+                until_ms: g["until_ms"].as_u64().unwrap(),
+            };
+            let remote = RemoteBinding {
+                origin_node: s("origin_node"),
+                origin_agent: s("origin_agent"),
+            };
+            let m = start_signed_message_v4(
+                &s("node"),
+                &remote,
+                &s("approval_id"),
+                c["approved"].as_bool().unwrap(),
+                &detail_settings(&detail),
+                &detail_launch_options(&detail),
+                &grant,
+                &detail,
+            );
+            let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex, s("hex"), "{}", c["name"]);
+        }
+    }
+
+    fn remote_card(a: &mut Approvals<Fake>, detail: &str) -> Pending {
+        a.request_remote(
+            detail,
+            RemoteBinding {
+                origin_node: "mac".into(),
+                origin_agent: "agent-3".into(),
+            },
+            1_000,
+            0,
+        )
+        .unwrap()
+    }
+
+    fn remote_decision(
+        p: &Pending,
+        approved: bool,
+        grant: agora_protocol::v1::RemoteGrant,
+        signed_grant: &agora_protocol::v1::RemoteGrant,
+    ) -> ApprovalResolve {
+        let msg = start_signed_message_v4(
+            "node-1",
+            p.remote.as_ref().unwrap(),
+            &p.id,
+            approved,
+            &detail_settings(&p.detail),
+            &detail_launch_options(&p.detail),
+            signed_grant,
+            &p.detail,
+        );
+        ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved,
+            signer_device_id: "phone".into(),
+            signature: sign("s3cret", &msg),
+            remote_grant: Some(grant),
+            ..Default::default()
+        }
+    }
+
+    /// ADR-0119 decisions 4 and 12: an `agent.start.remote` card is decided only over v4, a grant is exactly what was signed, and it
+    /// is refused on a denial, with an option that skips permissions, past its end, over 20, or on any other card.
+    #[test]
+    fn a_remote_start_is_decided_over_v4_and_its_grant_is_bounded() {
+        use agora_protocol::v1::RemoteGrant;
+        let fresh = || Approvals::new("node-1", Fake(vec![("phone", "s3cret")]));
+        let six = RemoteGrant {
+            max_running: 6,
+            chain: true,
+            ..Default::default()
+        };
+        // Allowed with a grant.
+        let mut a = fresh();
+        let p = remote_card(&mut a, r#"{"kind":"codex"}"#);
+        assert_eq!(p.action, REMOTE_START_ACTION);
+        let (got, verdict) = a
+            .resolve(&remote_decision(&p, true, six, &six), 2_000)
+            .unwrap();
+        assert_eq!(
+            (got.id.as_str(), verdict),
+            (p.id.as_str(), Verdict::Approved)
+        );
+        // A grant the signature does not name (a hub that widened it) fails the signature.
+        let mut a = fresh();
+        let p = remote_card(&mut a, r#"{"kind":"codex"}"#);
+        let wider = RemoteGrant {
+            max_running: 20,
+            ..six
+        };
+        assert_eq!(
+            a.resolve(&remote_decision(&p, true, wider, &six), 2_000),
+            Err(ApprovalError::BadSignature)
+        );
+        // Refused shapes, each signed correctly, and the card stays waiting after each.
+        let past = RemoteGrant {
+            max_running: 2,
+            until_ms: 1_500,
+            ..Default::default()
+        };
+        let over = RemoteGrant {
+            max_running: 21,
+            ..Default::default()
+        };
+        let flags_only = RemoteGrant {
+            any_kind: true,
+            ..Default::default()
+        };
+        let mut a = fresh();
+        let p = remote_card(&mut a, r#"{"kind":"codex"}"#);
+        for (approved, g) in [
+            (false, six),
+            (true, past),
+            (true, over),
+            (true, flags_only),
+        ] {
+            assert_eq!(
+                a.resolve(&remote_decision(&p, approved, g, &g), 2_000),
+                Err(ApprovalError::BadSignature),
+                "{approved} {g:?}"
+            );
+        }
+        // The local grant fields mean nothing here.
+        let mut r = remote_decision(&p, true, RemoteGrant::default(), &RemoteGrant::default());
+        r.helper_grant = 2;
+        assert_eq!(a.resolve(&r, 2_000), Err(ApprovalError::BadSignature));
+        // A start that skips permissions is never granted.
+        let options = r#"{"kind":"codex","launch_options":[{"id":"skip-permissions","label":"x","skips_permissions":true}]}"#;
+        let q = remote_card(&mut a, options);
+        assert_eq!(
+            a.resolve(&remote_decision(&q, true, six, &six), 2_000),
+            Err(ApprovalError::BadSignature)
+        );
+        assert!(a
+            .resolve(
+                &remote_decision(&q, true, RemoteGrant::default(), &RemoteGrant::default()),
+                2_000
+            )
+            .is_ok());
+        // A plain denial without a grant is taken.
+        let (_, verdict) = a
+            .resolve(
+                &remote_decision(&p, false, RemoteGrant::default(), &RemoteGrant::default()),
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(verdict, Verdict::Denied);
+        // A remote grant on any other card is refused.
+        let mut a = fresh();
+        let local = a.request("agent-1", START_ACTION, "{}", 1_000, 0).unwrap();
+        let msg = start_signed_message("node-1", &local.id, true, 0, false, &local.detail);
+        let r = ApprovalResolve {
+            approval_id: local.id.clone(),
+            approved: true,
+            signer_device_id: "phone".into(),
+            signature: sign("s3cret", &msg),
+            remote_grant: Some(six),
+            ..Default::default()
+        };
+        assert_eq!(a.resolve(&r, 2_000), Err(ApprovalError::BadSignature));
+    }
+
+    #[test]
+    fn a_remote_grant_ends_within_24_hours_by_this_nodes_clock() {
+        use agora_protocol::v1::RemoteGrant;
+        let day = REMOTE_GRANT_MAX_MS;
+        let g = |max_running, until_ms| RemoteGrant {
+            max_running,
+            until_ms,
+            ..Default::default()
+        };
+        assert_eq!(remote_grant_end(&g(0, 0), 10), Ok(None));
+        assert_eq!(remote_grant_end(&g(1, 0), 10), Ok(Some(10 + day)));
+        assert_eq!(remote_grant_end(&g(1, 500), 10), Ok(Some(500)));
+        // A little over a day (clock skew) is clamped, not refused.
+        assert_eq!(
+            remote_grant_end(&g(1, 10 + day + 5_000), 10),
+            Ok(Some(10 + day))
+        );
+        assert_eq!(remote_grant_end(&g(1, 10), 10), Err(InvalidGrant));
+        assert_eq!(remote_grant_end(&g(0, 7), 10), Err(InvalidGrant));
+        assert_eq!(
+            remote_grant_end(&g(REMOTE_GRANT_MAX_RUNNING + 1, 0), 10),
+            Err(InvalidGrant)
+        );
+    }
+
     /// The vectors every client signs by (`schema/fixtures/signing/approval-always-v1.json`, also checked by agora-protocol).
     #[test]
     fn the_shared_always_vectors_match() {
@@ -2352,6 +2687,7 @@ mod tests {
                         option_id: s("always_option_id"),
                     }),
                 },
+                remote: None,
             };
             let m = always_signed_message(&s("node"), &s("approval_id"), &p);
             let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
