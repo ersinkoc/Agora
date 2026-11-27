@@ -126,6 +126,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Flaky tests (fix with a proof)
 
+- `panelcmd::tests::closing_the_panel_closes_the_port_and_the_next_run_gets_the_same_one` (panelcmd.rs:421): once on CI ubuntu
+  (job 140634782042, d8b51d03), never alone; likely another test takes the freed port, as the exclusive-bind one below.
+
 - `preview::a_connection_carries_bytes_both_ways_unchanged_and_reaches_only_its_port` (tests/preview.rs:570, `accepted == probed + 1`):
   failed once in CI on ubuntu-latest at a7cb134f (reported by the Windows session, 2026-11-27); later runs on main passed. The count of
   connections the echo server accepted likely races the node's port probe (a probe that lands after `probed` was read). The same run's

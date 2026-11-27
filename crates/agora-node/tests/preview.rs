@@ -482,6 +482,25 @@ fn echo() -> (u32, Arc<AtomicUsize>) {
     (port, accepted)
 }
 
+/// The connections the program has seen once the open's own look at the port was counted: its accept can come a moment after the
+/// open answered, and counting before it would take that look for a relayed connection later.
+fn settled(accepted: &AtomicUsize) -> usize {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = accepted.load(Ordering::SeqCst);
+    let mut quiet_since = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+        let now = accepted.load(Ordering::SeqCst);
+        if now != last {
+            last = now;
+            quiet_since = std::time::Instant::now();
+        } else if last > 0 && quiet_since.elapsed() >= Duration::from_millis(200) {
+            break;
+        }
+    }
+    last
+}
+
 fn opened(e: &Env, port: u32) -> String {
     forward(&local(e, open(port, 0))).forward_id
 }
@@ -546,7 +565,7 @@ fn a_connection_carries_bytes_both_ways_unchanged_and_reaches_only_its_port() {
     let (other, others) = echo();
     let id = opened(&e, port);
     // The open looked once whether the port answers; that connection is not the relayed one.
-    let probed = accepted.load(Ordering::SeqCst);
+    let probed = settled(&accepted);
     let mut c = client(&e);
     let r = connect(&mut c, 3, &id);
     match &r.result {
@@ -670,7 +689,7 @@ fn one_connection_over_the_cap_is_answered_then_ended_with_budget() {
     let _n = node(&e);
     let (port, accepted) = echo();
     let id = opened(&e, port);
-    let probed = accepted.load(Ordering::SeqCst);
+    let probed = settled(&accepted);
     let mut c = client(&e);
     let cap = agora_node::preview::MAX_CONNECTIONS_PER_FORWARD as u32;
     for i in 0..cap {

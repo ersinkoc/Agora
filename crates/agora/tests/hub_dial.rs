@@ -2063,7 +2063,11 @@ command = [{:?}, "--adapter"]
         let launched = Client::connect(&cfg.socket)
             .unwrap()
             .call(command_request::Command::AgentLaunch(v1::AgentLaunch {
-                path: folder.to_string_lossy().into_owned(),
+                // The folder as the node names it (macOS's `/private/var/...`, Windows' long form): a launch must name it so.
+                path: agora_node::directory::inspect(&folder.to_string_lossy(), name, false)
+                    .unwrap()
+                    .0
+                    .path,
                 project_id: project.to_string(),
                 kind: "adapted".into(),
                 ..Default::default()

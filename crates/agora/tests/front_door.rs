@@ -1536,10 +1536,15 @@ fn a_power_loss_takes_hub_node_and_agents_at_once_and_all_come_back_by_themselve
             })
         },
     );
-    assert_ne!(
-        pid_of(&terminal),
-        old_terminal,
-        "a new process, the same agent"
+    // The ledger names the new process once the node wrote it (an entry can still hold the old one for a moment after "running").
+    wait_for(
+        "a new process, the same agent",
+        Duration::from_secs(30),
+        || {
+            ledger_entry(&home, &terminal)
+                .and_then(|e| e["pid"].as_u64())
+                .is_some_and(|p| p > 0 && p != u64::from(old_terminal))
+        },
     );
     assert!(
         written_answer(&home, &structured, "first"),
