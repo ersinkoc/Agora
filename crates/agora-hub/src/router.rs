@@ -787,6 +787,15 @@ impl Router {
             return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
                 .with("capability", agora_protocol::handshake::TASK_HANDOFF_V1));
         }
+        let notice_capability = agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1;
+        if matches!(
+            request.command,
+            Some(command_request::Command::DeliverTaskAcceptanceNotice(_))
+        ) && !link.capabilities.iter().any(|c| c == notice_capability)
+        {
+            return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                .with("capability", notice_capability));
+        }
         // Counted before it is queued, so the connection's loop never takes one off before it was counted; refused, without
         // queueing it, when the node already has NODE_QUEUE_MAX waiting (R5).
         if link
@@ -845,6 +854,7 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::BoardJoin(_)
             // ADR-0109: the hub's own durable handoff delivery; a client forwarding one would place work in an agent's inbox.
             | command_request::Command::DeliverTaskHandoff(_)
+            | command_request::Command::DeliverTaskAcceptanceNotice(_)
             | command_request::Command::AcknowledgeTaskHandoff(_)
             // ADR-0061: answered or carried by the hub itself, never forwarded as a client's command.
             | command_request::Command::DeviceRegister(_)

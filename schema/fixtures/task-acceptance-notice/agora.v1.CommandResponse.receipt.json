@@ -1,0 +1,9 @@
+{
+  "requestId": "notice",
+  "ok": {
+    "taskAcceptanceNoticeReceipt": {
+      "deliveryId": "AQEBAQEBAQEBAQEBAQEBAQ==",
+      "receiverRunId": "AgICAgICAgICAgICAgICAg=="
+    }
+  }
+}

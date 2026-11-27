@@ -48,8 +48,8 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   Manual dispatch to a second node and the existing Done transition were verified in a browser on Blackview.
   Shared-board Review is implemented under [ADR-0125](../adr/0125-review-a-task-before-accepting-it.md).
   The owner's web window shows recently accepted tasks ([ADR-0127](../adr/0127-show-accepted-task-notices.md)).
-  [ADR-0128](../adr/0128-notify-the-parent-agent-on-task-acceptance.md) specifies durable notices to a cross-machine
-  helper's parent agent. Notices to the dispatcher and project channel remain open.
+  [ADR-0128](../adr/0128-notify-the-parent-agent-on-task-acceptance.md) delivers durable opt-in acceptance notices to a
+  cross-machine helper's verified parent agent. Notices to the dispatcher and project channel remain open.
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (ADR-0122 Accepted 2026-11-27): the owner publishes a skill or an MCP server

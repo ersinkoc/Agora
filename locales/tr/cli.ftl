@@ -28,6 +28,7 @@ cli-usage =
       agora hub fleet on|off|status [--hub-dir DIR]
       agora hub remote-helpers on|off|status [--hub-dir DIR]
       agora hub task-review enable PROJECT_ID [--hub-dir DIR]
+      agora hub task-review notify-parent PROJECT_ID [--hub-dir DIR]
       agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
@@ -959,4 +960,5 @@ cli-workspaces-kept = { $path } çalışma alanı tutuldu: { $reason ->
 cli-workspaces-clean-summary = { $removed } silindi, { $kept } bırakıldı (her birinin nedeni yukarıda).
 cli-workspaces-clean-dry-summary = { $removed } silinecekti, { $kept } bırakılacaktı. Hiçbir şey değiştirilmedi.
 
+cli-hub-task-parent-notices-enabled = { $project } ortak panosunda üst ajanlara görev kabul bildirimi gönderilecek.
 cli-hub-task-review-enabled = { $project } projesinin ortak panosunda İnceleme kullanılacak.

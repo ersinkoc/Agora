@@ -1793,3 +1793,21 @@ to this event and the snapshot field. `TaskSnapshot.parent_task_id` (7) is optio
 follow with the other task metadata at the snapshot position. The initial ping reply follows this metadata
 and lets the window resume at the snapshot position. Hub database version 22 prevents an older hub from
 rewriting a board whose persisted parent links it cannot restore.
+
+
+### Parent agent task acceptance notices (ADR-0128)
+
+On a Review-enabled shared board, the hub operator enables parent notices with
+`agora hub task-review notify-parent PROJECT_ID`. The hub matches a carried cross-machine helper's start result
+and start event and verifies both runs are in the same project. When a helper submits a report, only a relation
+already verified for that run can be bound to the report. The binding and report commit together.
+Acceptance commits one pending notice with the board and its events. A full notice queue skips delivery and
+records a diagnostic. Approval of the report follows its normal transaction.
+
+The hub sends `DeliverTaskAcceptanceNotice` (request arm 133) only on a link that negotiated
+`board.task_acceptance_notice.v1`. It carries the opaque delivery ID, recipient agent and run, project, task,
+report revision, acceptance time and a deadline 24 hours later. The node verifies its mesh policy and signed
+command restrictions and checks the addressed project and run. Its `TaskAcceptanceNoticeReceipt` (result arm 46)
+identifies the delivery ID and run after the durable inbox write. Identical retries return the receipt and keep
+the original inbox number. Older peers receive no fallback message. The hub database version is 23 to protect
+the stored report binding during downgrade.

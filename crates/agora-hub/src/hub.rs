@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::TaskHandoffDeliveryState as DeliveryState;
-use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
+use agora_protocol::v1::{self, Event, NodeLink, NodeLinkReason, NodeOffline};
 use prost::Message;
 
 use crate::ca::RESERVED_HUB_ID;
@@ -87,6 +87,7 @@ struct Inner {
     pos: u64,
     hub_seq: u64,
     handoffs: crate::handoff::Queue,
+    task_notices: crate::task_notice::Queue,
     /// A board restart transaction that must be retried before another board operation.
     board_restarts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     subs: Vec<SyncSender<Delivered>>,
@@ -260,6 +261,7 @@ impl Hub {
         let (view, pos) = View::rebuild(&store)?;
         let hub_seq = store.acked(RESERVED_HUB_ID)?;
         let handoffs = crate::handoff::load(&store)?;
+        let task_notices = crate::task_notice::load(&store)?;
         let store = Arc::new(store);
         let hub = Self {
             metrics: crate::metrics::Metrics::default(),
@@ -287,6 +289,7 @@ impl Hub {
                 pos,
                 hub_seq,
                 handoffs,
+                task_notices,
                 board_restarts: Default::default(),
                 subs: Vec::new(),
                 subs_dropped: 0,
@@ -591,14 +594,15 @@ impl Hub {
                             .view
                             .agents
                             .contains_key(&format!("{}/{}", event.producer_id, st.agent_id));
-                        self.helpers().agent_started(
+                        let verified = self.helpers().agent_started(
                             &event.producer_id,
                             &st.agent_id,
                             &st.parent_node_id,
                             &st.parent_node_agent_id,
-                            new,
-                            event.at_ms,
+                            (new, &st.run_id, &st.project_id),
+                            crate::server::now_ms(),
                         );
+                        self.remember_task_notice_parent(verified);
                     }
                 }
                 Self::publish(g, Delivered { pos, event });
@@ -1141,6 +1145,17 @@ impl Hub {
             return a;
         }
         let mut events = std::mem::take(&mut a.events);
+        if self
+            .bind_parent_for_report(&g, node, call, &events)
+            .is_err()
+        {
+            if let Some(board) = before {
+                self.boards.restore(project, board);
+            }
+            let mut answer = refused();
+            answer.notices = a.notices;
+            return answer;
+        }
         let pending = match self.prepare_handoff(&g, a.handoff.as_ref(), &events, now_ms) {
             Ok(pending) => pending,
             Err(error) => {
@@ -1184,6 +1199,132 @@ impl Hub {
                 r
             }
         }
+    }
+
+    pub(crate) fn helper_notice_parent(
+        &self,
+        node: &str,
+        agent: &str,
+        run: &[u8],
+    ) -> Option<agora_mesh::broker::ReviewParent> {
+        let g = self.lock();
+        let parent = g
+            .view
+            .agents
+            .get(&crate::projection::qualified(node, agent))?;
+        let run_id = parent.run_id?;
+        if !parent.running || parent.forgotten || run_id.as_slice() != run {
+            return None;
+        }
+        Some(agora_mesh::broker::ReviewParent {
+            node_id: node.into(),
+            agent_id: agent.into(),
+            run_id,
+            project_id: parent.project_id.clone(),
+        })
+    }
+
+    pub(crate) fn remember_task_notice_parent(
+        &self,
+        verified: Option<crate::helpers::VerifiedParent>,
+    ) {
+        if let Some(parent) = verified {
+            if let Err(error) = crate::task_notice::remember(self.store(), &parent) {
+                crate::log_line!("task notice parent binding: {error}");
+            }
+        }
+    }
+
+    fn bind_parent_for_report(
+        &self,
+        g: &Inner,
+        node: &str,
+        call: &v1::BoardCall,
+        events: &[Body],
+    ) -> Result<(), StoreError> {
+        if call.tool != "task_complete" {
+            return Ok(());
+        }
+        let Some(change) = events.iter().find_map(|body| match body {
+            Body::TaskReviewChanged(change) => Some(change),
+            _ => None,
+        }) else {
+            return Ok(());
+        };
+        let Some(revision) = change
+            .review
+            .as_ref()
+            .filter(|report| {
+                report.state() == v1::TaskReviewState::Pending
+                    && report.reporting_agent_id
+                        == crate::projection::qualified(node, &call.from_agent)
+            })
+            .map(|report| report.report_revision)
+        else {
+            return Ok(());
+        };
+        let agent_key = crate::projection::qualified(node, &call.from_agent);
+        let Some(run) = g
+            .view
+            .agents
+            .get(&agent_key)
+            .filter(|agent| agent.running && agent.project_id == change.project_id)
+            .and_then(|agent| agent.run_id)
+        else {
+            return Ok(());
+        };
+        if let Some(parent) =
+            crate::task_notice::verified_parent(self.store(), node, &call.from_agent, run)?
+                .filter(|parent| parent.project_id == change.project_id && parent.node_id != node)
+        {
+            self.boards
+                .bind_review_parent(&change.project_id, &change.task_id, revision, parent);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn task_notice_pending(&self, id: &[u8]) -> bool {
+        self.lock().task_notices.contains_key(id)
+    }
+
+    pub(crate) fn task_notice_batch(
+        &self,
+        now: u64,
+        receipts: &std::collections::BTreeSet<Vec<u8>>,
+        retry: &std::collections::BTreeMap<Vec<u8>, (u64, u64)>,
+    ) -> Result<Vec<crate::task_notice::Pending>, StoreError> {
+        let mut g = self.lock();
+        let expired: Vec<_> = g
+            .task_notices
+            .values()
+            .filter(|p| {
+                p.notice.valid_until_ms <= now
+                    || receipts.contains(&p.notice.delivery_id)
+                    || p.receiver(&g.view) == Some(false)
+            })
+            .map(|p| (p.notice.delivery_id.clone(), p.key()))
+            .collect();
+        for (id, key) in expired {
+            self.store.remove_setting(&key)?;
+            g.task_notices.remove(&id);
+        }
+        let mut nodes = std::collections::BTreeSet::new();
+        Ok(g.task_notices
+            .values()
+            .filter(|p| {
+                p.ready(&g.view)
+                    && retry
+                        .get(&p.notice.delivery_id)
+                        .is_none_or(|(at, _)| now >= *at)
+                    && self.router.has_capability(
+                        &p.node,
+                        agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1,
+                    )
+                    && nodes.insert(p.node.clone())
+            })
+            .take(16)
+            .cloned()
+            .collect())
     }
 
     fn prepare_handoff(
@@ -1621,6 +1762,8 @@ impl Hub {
         }
         self.reconcile_board_runs(&mut g, &project, &key, now_ms)
             .map_err(|_| internal())?;
+        let notify = accept
+            && crate::task_notice::enabled(self.store(), &project).map_err(|_| internal())?;
         let before = self.boards.checkpoint(&project);
         let events = self.boards.review_decide(
             &project,
@@ -1630,13 +1773,53 @@ impl Hub {
             accept,
             now_ms,
         )?;
-        if !events.is_empty()
-            && self
-                .store_board(&mut g, &project, &key, events, (&[], None), now_ms)
-                .is_err()
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut pending = notify
+            .then(|| {
+                let parent = self.boards.review_parent(
+                    &project,
+                    &decision.task_id,
+                    decision.report_revision,
+                )?;
+                let pending = crate::task_notice::Pending::new(
+                    &parent,
+                    &decision.task_id,
+                    decision.report_revision,
+                    now_ms,
+                );
+                (parent.project_id == project && pending.receiver(&g.view) == Some(true))
+                    .then_some(pending)
+            })
+            .flatten();
+        if pending
+            .as_ref()
+            .is_some_and(|notice| !crate::task_notice::room_for(&g.task_notices, notice))
+        {
+            crate::log_line!("task acceptance notice skipped: queue full");
+            pending = None;
+        }
+        let settings = pending
+            .as_ref()
+            .map(|queued| (queued.key(), queued.encode_to_vec()));
+        if self
+            .store_board(
+                &mut g,
+                &project,
+                &key,
+                events,
+                (settings.as_slice(), None),
+                now_ms,
+            )
+            .is_err()
         {
             self.boards.restore(&project, before);
             return Err(internal());
+        }
+        if let Some(pending) = pending {
+            g.task_notices
+                .insert(pending.notice.delivery_id.clone(), pending);
         }
         Ok(())
     }
@@ -1898,6 +2081,7 @@ impl Hub {
             Some(C::TaskDispatch(c)) => &mut c.project_id,
             Some(C::BoardJoin(c)) => &mut c.project_id,
             Some(C::DeliverTaskHandoff(c)) => &mut c.project_id,
+            Some(C::DeliverTaskAcceptanceNotice(c)) => &mut c.project_id,
             _ => return req,
         };
         let g = self.lock();
@@ -4117,6 +4301,119 @@ mod tests {
                 .as_deref(),
             Some(root.as_str())
         );
+        drop(hub);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn accepted_report_notices_commit_once_and_survive_a_hub_restart() {
+        use agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1;
+        use serde_json::json;
+        use v1::{TaskReviewDecide, TaskReviewDecision};
+        let (hub, path) = hub_on_file("parent-review-notice");
+        let caps = vec![TASK_ACCEPTANCE_NOTICE_V1.into()];
+        let (_task, _links) = stage_handoff(&hub, caps.clone());
+        hub.store().enable_task_review("p").unwrap();
+        hub.store().enable_task_parent_notices("p").unwrap();
+        hub.refresh_task_review_projects(20).unwrap();
+        let helper = "receiver";
+        let task = board_result(call_task_board(
+            &hub,
+            helper,
+            "task_create",
+            json!({"title":"test notice"}),
+        ))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let parent = hub.helper_notice_parent("giver", "a", &[1; 16]).unwrap();
+        hub.remember_task_notice_parent(Some(crate::helpers::VerifiedParent {
+            helper_node: helper.into(),
+            helper_agent: "a".into(),
+            helper_run: [2; 16],
+            parent: parent.clone(),
+        }));
+        let submit = |hub: &Hub| {
+            board_result(call_task_board(
+                hub,
+                helper,
+                "task_claim",
+                json!({"task_id": task}),
+            ));
+            board_result(call_task_board(
+                hub,
+                helper,
+                "task_complete",
+                json!({"task_id": task, "summary": "fixture"}),
+            ));
+        };
+        let decide = |revision, decision: TaskReviewDecision| TaskReviewDecide {
+            project_id: "p".into(),
+            task_id: task.clone(),
+            report_revision: revision,
+            decision: decision as i32,
+        };
+        submit(&hub);
+        hub.task_review_decide("owner", &decide(1, TaskReviewDecision::Return), 21)
+            .unwrap();
+        assert!(hub.lock().task_notices.is_empty());
+        submit(&hub);
+        assert_eq!(
+            hub.boards.review_parent("p", &task, 2),
+            Some(parent.clone())
+        );
+
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TRIGGER refuse_notice BEFORE INSERT ON settings WHEN NEW.key GLOB 'task-acceptance-notice.*' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        let accept = decide(2, TaskReviewDecision::Accept);
+        assert_eq!(
+            hub.task_review_decide("owner", &accept, 22)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::Internal
+        );
+        assert!(!hub.view().0.tasks[&format!("p/{task}")].done);
+        assert!(hub.lock().task_notices.is_empty());
+        db.execute_batch("DROP TRIGGER refuse_notice").unwrap();
+        drop(db);
+
+        hub.task_review_decide("owner", &accept, 23).unwrap();
+        hub.task_review_decide("owner", &accept, 24).unwrap();
+        let pending = hub.lock().task_notices.values().next().unwrap().clone();
+        assert_eq!(pending.notice.report_revision, 2);
+        assert_eq!(pending.notice.accepted_at_ms, 23);
+        assert_eq!(pending.notice.receiver_run_id, parent.run_id);
+        assert_eq!(hub.lock().task_notices.len(), 1);
+        drop(hub);
+
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert!(hub.view().0.tasks[&format!("p/{task}")].done);
+        assert!(hub
+            .task_notice_batch(25, &Default::default(), &Default::default())
+            .unwrap()
+            .is_empty());
+        assert!(hub.task_notice_pending(&pending.notice.delivery_id));
+        let _old_link = hub.node_link_opened("giver", Vec::new(), 26).unwrap();
+        assert!(hub
+            .task_notice_batch(27, &Default::default(), &Default::default())
+            .unwrap()
+            .is_empty());
+        let _link = hub.node_link_opened("giver", caps, 28).unwrap();
+        let retry = hub
+            .task_notice_batch(29, &Default::default(), &Default::default())
+            .unwrap();
+        assert_eq!(retry.as_slice(), std::slice::from_ref(&pending));
+        let receipts = std::collections::BTreeSet::from([pending.notice.delivery_id.clone()]);
+        assert!(hub
+            .task_notice_batch(30, &receipts, &Default::default())
+            .unwrap()
+            .is_empty());
+        assert!(!hub.task_notice_pending(&pending.notice.delivery_id));
+        assert!(hub
+            .store()
+            .settings_with_prefix(crate::task_notice::QUEUE_PREFIX)
+            .unwrap()
+            .is_empty());
         drop(hub);
         remove_db(&path);
     }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use agora_protocol::v1::DeliverTaskHandoff;
+use agora_protocol::v1::{DeliverTaskAcceptanceNotice, DeliverTaskHandoff};
 use prost::Message;
 
 pub(crate) const MAX_RECORDS: usize = 1024;
@@ -14,21 +14,63 @@ pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
 /// amendment A) and one hour for the two clocks to differ. A later deadline is refused, so a hub
 /// cannot keep the store's records past an ended run for longer than this.
 pub(crate) const MAX_VALIDITY_MS: u64 = 25 * 60 * 60 * 1000;
-const FORMAT: &[u8] = b"AHO1";
 const HEADER_LEN: usize = 20;
 pub(crate) type Id = [u8; 16];
 
-#[derive(Debug)]
-pub(crate) struct Record {
-    pub number: u64,
-    pub accepted_at_ms: u64,
-    pub delivery: DeliverTaskHandoff,
+pub(crate) trait Delivery: Message + Default {
+    const FORMAT: &'static [u8];
+    const RECORD_LIMIT: &'static str;
+    const BYTE_LIMIT: &'static str;
+
+    fn delivery_id(&self) -> &[u8];
+    fn receiver_run_id(&self) -> &[u8];
+    fn valid_until_ms(&self) -> u64;
 }
 
-impl Record {
+macro_rules! delivery {
+    ($ty:ty, $format:literal, $records:literal, $bytes:literal) => {
+        impl Delivery for $ty {
+            const FORMAT: &'static [u8] = $format;
+            const RECORD_LIMIT: &'static str = $records;
+            const BYTE_LIMIT: &'static str = $bytes;
+
+            fn delivery_id(&self) -> &[u8] {
+                &self.delivery_id
+            }
+            fn receiver_run_id(&self) -> &[u8] {
+                &self.receiver_run_id
+            }
+            fn valid_until_ms(&self) -> u64 {
+                self.valid_until_ms
+            }
+        }
+    };
+}
+
+delivery!(
+    DeliverTaskHandoff,
+    b"AHO1",
+    "handoff_records",
+    "handoff_bytes"
+);
+delivery!(
+    DeliverTaskAcceptanceNotice,
+    b"ATN1",
+    "task_notice_records",
+    "task_notice_bytes"
+);
+
+#[derive(Debug)]
+pub(crate) struct Record<D = DeliverTaskHandoff> {
+    pub number: u64,
+    pub accepted_at_ms: u64,
+    pub delivery: D,
+}
+
+impl<D: Delivery> Record<D> {
     fn bytes(&self) -> io::Result<Vec<u8>> {
         let mut bytes = Vec::with_capacity(HEADER_LEN + self.delivery.encoded_len());
-        bytes.extend(FORMAT);
+        bytes.extend(D::FORMAT);
         bytes.extend(self.number.to_le_bytes());
         bytes.extend(self.accepted_at_ms.to_le_bytes());
         self.delivery.encode(&mut bytes).map_err(io::Error::other)?;
@@ -36,13 +78,13 @@ impl Record {
     }
 
     fn decode(bytes: &[u8]) -> io::Result<Self> {
-        if bytes.len() < HEADER_LEN || !bytes.starts_with(FORMAT) {
+        if bytes.len() < HEADER_LEN || !bytes.starts_with(D::FORMAT) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         let invalid = |_| io::Error::from(io::ErrorKind::InvalidData);
         let number = u64::from_le_bytes(bytes[4..12].try_into().map_err(invalid)?);
         let accepted_at_ms = u64::from_le_bytes(bytes[12..20].try_into().map_err(invalid)?);
-        let delivery = DeliverTaskHandoff::decode(&bytes[HEADER_LEN..])
+        let delivery = D::decode(&bytes[HEADER_LEN..])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(Self {
             number,
@@ -54,7 +96,7 @@ impl Record {
     /// The delivery's deadline, never later than [`MAX_VALIDITY_MS`] after its acceptance.
     fn deadline(&self) -> u64 {
         self.delivery
-            .valid_until_ms
+            .valid_until_ms()
             .min(self.accepted_at_ms.saturating_add(MAX_VALIDITY_MS))
     }
 
@@ -63,13 +105,12 @@ impl Record {
         // A number at or past the node's id clamp would push the broker's counter past it on restore (#1194 review).
         if self.number == 0
             || self.number >= crate::mesh_server::MAX_FIRST_ID
-            || self.delivery.receiver_run_id.len() != 16
+            || self.delivery.receiver_run_id().len() != 16
         {
             return Err(invalid.into());
         }
         self.delivery
-            .delivery_id
-            .as_slice()
+            .delivery_id()
             .try_into()
             .map_err(|_| invalid.into())
     }
@@ -83,9 +124,9 @@ pub(crate) enum InsertError {
     Storage(io::Error),
 }
 
-pub(crate) struct Store {
+pub(crate) struct Store<D = DeliverTaskHandoff> {
     root: PathBuf,
-    records: BTreeMap<Id, (Record, usize)>,
+    records: BTreeMap<Id, (Record<D>, usize)>,
     bytes: usize,
 }
 
@@ -113,14 +154,14 @@ fn stale_temporary(name: &str) -> bool {
 
 /// The inbox number in a record's header: `Ok(None)` when the file does not start like one (too
 /// short or another format), `Err` when it could not be read.
-fn header_number(path: &Path) -> io::Result<Option<u64>> {
+fn header_number<D: Delivery>(path: &Path) -> io::Result<Option<u64>> {
     let mut header = [0; HEADER_LEN];
     match std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut header)) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    if !header.starts_with(FORMAT) {
+    if !header.starts_with(D::FORMAT) {
         return Ok(None);
     }
     Ok(header[4..12].try_into().ok().map(u64::from_le_bytes))
@@ -129,7 +170,7 @@ fn header_number(path: &Path) -> io::Result<Option<u64>> {
 /// A record file that could not be read (too many open files, no permission, a disk error): it is
 /// left where it is and not loaded, since the next start may read it. Its size, when known, still
 /// counts toward the byte limit while this store is open.
-fn skipped(store: &mut Store, path: &Path, error: &io::Error) {
+fn skipped<D>(store: &mut Store<D>, path: &Path, error: &io::Error) {
     crate::log_line!(
         "mesh: durable handoff record {} not loaded, left in place: {error}",
         path.display()
@@ -157,7 +198,7 @@ fn set_aside(path: &Path, reason: &str) {
     }
 }
 
-impl Store {
+impl<D: Delivery> Store<D> {
     /// Loads what is on disk within the limits. A record that is not one this node wrote (its
     /// format, name or number) or does not fit the limits is set aside (renamed, see
     /// [`set_aside`]); one that cannot be read now is left in place ([`skipped`]); the rest stay
@@ -195,7 +236,7 @@ impl Store {
                 set_aside(&path, "not a file");
                 continue;
             }
-            match header_number(&path) {
+            match header_number::<D>(&path) {
                 Ok(Some(number)) => found.push((number, path)),
                 Ok(None) => set_aside(&path, "format"),
                 Err(e) => skipped(&mut store, &path, &e),
@@ -204,7 +245,7 @@ impl Store {
         found.sort_unstable();
         for (_, path) in found {
             if store.records.len() == MAX_RECORDS {
-                set_aside(&path, "handoff_records");
+                set_aside(&path, D::RECORD_LIMIT);
                 continue;
             }
             let remaining = MAX_BYTES - store.bytes;
@@ -216,7 +257,7 @@ impl Store {
                 continue;
             }
             if bytes.len() > remaining {
-                set_aside(&path, "handoff_bytes");
+                set_aside(&path, D::BYTE_LIMIT);
                 continue;
             }
             let loaded = Record::decode(&bytes).and_then(|record| Ok((record.id()?, record)));
@@ -236,26 +277,26 @@ impl Store {
         Ok(store)
     }
 
-    pub fn get(&self, id: &Id) -> Option<&Record> {
+    pub fn get(&self, id: &Id) -> Option<&Record<D>> {
         self.records.get(id).map(|(record, _)| record)
     }
 
-    pub fn records(&self) -> impl Iterator<Item = &Record> {
+    pub fn records(&self) -> impl Iterator<Item = &Record<D>> {
         self.records.values().map(|(record, _)| record)
     }
 
     /// Whether one more record holding `delivery` fits the limits. A record's size does not
     /// depend on its number, so this is answered before a number is taken.
-    pub fn room_for(&self, delivery: &DeliverTaskHandoff) -> Result<(), InsertError> {
+    pub fn room_for(&self, delivery: &D) -> Result<(), InsertError> {
         if self.records.len() >= MAX_RECORDS {
             return Err(InsertError::Full {
-                resource: "handoff_records",
+                resource: D::RECORD_LIMIT,
                 limit: MAX_RECORDS,
             });
         }
         if HEADER_LEN + delivery.encoded_len() > MAX_BYTES - self.bytes {
             return Err(InsertError::Full {
-                resource: "handoff_bytes",
+                resource: D::BYTE_LIMIT,
                 limit: MAX_BYTES,
             });
         }
@@ -276,7 +317,7 @@ impl Store {
         }
     }
 
-    pub fn insert(&mut self, record: Record) -> Result<(), InsertError> {
+    pub fn insert(&mut self, record: Record<D>) -> Result<(), InsertError> {
         let id = record.id().map_err(InsertError::Storage)?;
         self.present(&id)?;
         self.room_for(&record.delivery)?;
@@ -290,7 +331,7 @@ impl Store {
 
     /// A receipt remains until its deadline. Payloads for live runs remain available to the
     /// non-destructive MCP inbox, even after the deadline.
-    pub fn prune(&mut self, now: u64, live: impl Fn(&DeliverTaskHandoff) -> bool) {
+    pub fn prune(&mut self, now: u64, live: impl Fn(&D) -> bool) {
         self.records.retain(|id, (record, bytes)| {
             if record.deadline() > now || live(&record.delivery) {
                 return true;
@@ -412,7 +453,7 @@ mod tests {
         for n in 1..=MAX_RECORDS as u64 + 1 {
             plant(&root, &record(n, String::new()));
         }
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.len(), MAX_RECORDS);
         assert!(store.get(&id_of(MAX_RECORDS as u64 + 1)).is_none());
         assert!(store.get(&id_of(1)).is_some());
@@ -426,7 +467,7 @@ mod tests {
         assert_eq!(store.bytes(), size_on_disk(&root));
         drop(store);
         // Opening again finds the same records and nothing more to set aside.
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.len(), MAX_RECORDS);
         assert_eq!(names(&root, ".rejected").len(), 1);
     }
@@ -439,7 +480,7 @@ mod tests {
         let first = plant(&root, &record(1, big()));
         plant(&root, &record(2, big()));
         plant(&root, &record(3, String::new()));
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         // The first fits; the second would pass 32 MiB; the third, small, still fits after it.
         assert!(store.get(&id_of(1)).is_some());
         assert!(store.get(&id_of(2)).is_none());
@@ -465,7 +506,7 @@ mod tests {
             r.delivery.delivery_id = id_of(n % 1000 + 2).to_vec();
             plant(&root, &r);
         }
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.len(), 2);
         assert_eq!(store.records().map(|r| r.number).max(), Some(max - 1));
         assert_eq!(names(&root, ".rejected").len(), 2);
@@ -486,7 +527,7 @@ mod tests {
         if std::fs::File::open(&locked).is_ok() {
             return; // running with privileges that read it anyway
         }
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.len(), 1);
         assert!(store.get(&id_of(2)).is_none());
         assert_eq!(store.bytes(), size_on_disk(&root));
@@ -494,7 +535,7 @@ mod tests {
         assert!(names(&root, ".rejected").is_empty());
         drop(store);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.get(&id_of(2)).unwrap().delivery.summary, "locked");
     }
 
@@ -512,7 +553,7 @@ mod tests {
         if std::fs::File::open(&locked).is_ok() {
             return; // running with privileges that read it anyway
         }
-        let mut store = Store::open(&root).unwrap();
+        let mut store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert!(store.insert(record(3, String::new())).is_ok());
         let mut retry = record(9, "locked".into());
         retry.delivery.delivery_id = id_of(2).to_vec();
@@ -523,7 +564,7 @@ mod tests {
         assert!(store.get(&id_of(2)).is_none());
         drop(store);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.get(&id_of(2)).unwrap().number, 2);
         assert_eq!(store.len(), 2);
     }
@@ -563,7 +604,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("notes.txt"), b"left").unwrap();
 
-        let store = Store::open(&root).unwrap();
+        let store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         assert_eq!(store.len(), 1);
         assert_eq!(store.get(&id_of(1)).unwrap().delivery.summary, "kept");
         assert_eq!(store.bytes(), good);
@@ -581,7 +622,7 @@ mod tests {
     fn prune_keeps_receipts_until_the_deadline_and_never_past_the_cap() {
         let dir = TempDir::new("prune");
         let root = dir.0.join("handoffs");
-        let mut store = Store::open(&root).unwrap();
+        let mut store = Store::<DeliverTaskHandoff>::open(&root).unwrap();
         let mut far = record(3, String::new());
         far.delivery.valid_until_ms = u64::MAX;
         for r in [record(1, String::new()), record(2, String::new()), far] {

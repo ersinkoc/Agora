@@ -346,12 +346,21 @@ pub const INBOX_WAIT_MAX_MS: u64 = 3_600_000;
 fn inbox_items(ms: &[crate::broker::Message]) -> Value {
     json!(ms
         .iter()
-        .map(|m| json!({
+        .map(|m| {
+            let mut row = json!({
             "message_id": m.id, "from": m.provenance.from.as_str(), "body": m.body, "refs": m.refs,
             "at": m.at_ms, "kind": m.kind, "reply_to": m.reply_to,
             "provenance": {"agent": m.provenance.from.as_str(), "kind": m.provenance.kind,
                            "node": m.provenance.node, "project": m.provenance.project},
-        }))
+            });
+            if let Some(notice) = &m.task_acceptance {
+                row["task_acceptance"] = json!({
+                    "project_id": notice.project_id, "task_id": notice.task_id,
+                    "report_revision": notice.report_revision, "accepted_at_ms": notice.accepted_at_ms,
+                });
+            }
+            row
+        })
         .collect::<Vec<_>>())
 }
 

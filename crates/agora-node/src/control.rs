@@ -911,6 +911,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         Cmd::BoardJoin(_) => Err(capability_missing("board.join.local")),
         // ADR-0109: only the hub delivers a durable handoff; the uplink takes it where the hub's commands enter, once negotiated
         // and under the node's grant policy. A local client cannot add an entry to an agent's durable inbox.
+        Cmd::DeliverTaskAcceptanceNotice(_) => Err(capability_missing(
+            agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1,
+        )),
         Cmd::DeliverTaskHandoff(_) => Err(capability_missing(
             agora_protocol::handshake::TASK_HANDOFF_V1,
         )),
@@ -2319,6 +2322,7 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::BoardCall(_) => "board.call",
         Cmd::BoardJoin(_) => "board.join",
         Cmd::DeliverTaskHandoff(_) => agora_protocol::handshake::TASK_HANDOFF_V1,
+        Cmd::DeliverTaskAcceptanceNotice(_) => agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1,
         Cmd::NodePolicyGet(_) => "node.policy.get",
         Cmd::GrantCreate(_) => "grant.create",
         Cmd::GrantList(_) => "grant.list",

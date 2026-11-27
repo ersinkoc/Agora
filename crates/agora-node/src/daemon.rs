@@ -2145,6 +2145,9 @@ impl Node {
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             crate::log_line!("mesh: durable handoffs unavailable: {e}");
         }
+        if let Err(error) = mesh.open_acceptance_notices(&cfg.data_dir) {
+            crate::log_line!("mesh: durable task acceptance notices unavailable: {error}");
+        }
         // ADR-0039: before agents are taken up, so each gets back the shared-board leases the last run renewed for it.
         if let Err(e) = mesh.open_lease_renewals(&cfg.data_dir) {
             crate::log_line!("mesh: lease renewals are not kept across a restart: {e}");

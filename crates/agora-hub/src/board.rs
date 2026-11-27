@@ -167,7 +167,7 @@ pub struct Checkpoint(Option<Mesh>);
 
 // Reuse the metadata's protobuf encoding inside the board's JSON snapshot.
 fn review_json(report: &ReviewReport) -> Value {
-    json!({"metadata": report.metadata.encode_to_vec(), "refs": report.refs})
+    json!({"metadata": report.metadata.encode_to_vec(), "refs": report.refs, "parent": report.parent.as_ref().map(crate::task_notice::parent_json)})
 }
 
 fn stored_review(value: &Value) -> Option<ReviewReport> {
@@ -175,6 +175,7 @@ fn stored_review(value: &Value) -> Option<ReviewReport> {
     Some(ReviewReport {
         metadata: TaskReview::decode(bytes.as_slice()).ok()?,
         refs: serde_json::from_value(value["refs"].clone()).ok()?,
+        parent: crate::task_notice::parse_parent(&value["parent"]),
     })
 }
 
@@ -1137,6 +1138,36 @@ impl Boards {
         for id in &dead {
             mesh.unregister(id, now_ms);
         }
+    }
+
+    pub(crate) fn bind_review_parent(
+        &self,
+        project: &str,
+        task: &str,
+        revision: u64,
+        parent: agora_mesh::broker::ReviewParent,
+    ) {
+        if let Some(mesh) = self
+            .by_project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(project)
+        {
+            mesh.bind_review_parent(task, revision, parent);
+        }
+    }
+
+    pub(crate) fn review_parent(
+        &self,
+        project: &str,
+        task: &str,
+        revision: u64,
+    ) -> Option<agora_mesh::broker::ReviewParent> {
+        self.by_project
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(project)?
+            .review_parent(task, revision)
     }
 
     pub(crate) fn review_report(

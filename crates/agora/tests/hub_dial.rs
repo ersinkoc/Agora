@@ -65,6 +65,7 @@ fn hubside(node_id: &str) -> Hubside {
                 "workspace.directory".into(),
                 "directory.list".into(),
                 agora_protocol::handshake::TASK_HANDOFF_V1.into(),
+                agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1.into(),
                 "agent.launch_settings".into(),
                 // ADR-0090: Stop turn and an agent's settings from the terminal console.
                 "agent.cancel_turn".into(),
@@ -4593,6 +4594,11 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         return;
     }
     use agora_node::uplink_client::MeshOut;
+    use agora_protocol::frame::kinds;
+    use agora_protocol::frame::{Frame, STREAM_COMMANDS, STREAM_EVENTS};
+    use prost::Message;
+    use serde_json::{json, Value};
+    const MARKER: &str = "2fcd3bda-c874-4c7a-b5fe-8fe3327a74d1";
     use agora_protocol::v1::{self, command_ok::Result as Ok_, command_request::Command as Cmd};
     let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
     fake.pop();
@@ -4615,6 +4621,11 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         let manifests = dir.join("manifests");
         std::fs::create_dir_all(&manifests).unwrap();
         std::fs::create_dir_all(dir.join("work")).unwrap();
+        std::fs::write(
+            dir.join("work/.agent-project.json"),
+            json!({"project_id": MARKER}).to_string(),
+        )
+        .unwrap();
         let launch = serde_json::to_string(&vec![
             fake.to_string_lossy().into_owned(),
             "--probe-directory".into(),
@@ -4652,6 +4663,7 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         (link.cert_pem, link.key_pem) = (cert, key);
         link.commands = Some(cfg.socket.clone());
         link.mesh_out = Some(out);
+        link.mesh = Some(Arc::clone(&node.mesh));
         link.spawner = Some(Arc::clone(&node.spawner));
         let up = spawn(Arc::clone(&node.events), link).unwrap();
         (node, up, cfg.socket, dir)
@@ -4700,7 +4712,17 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
     let sock = alpha
         .mesh
         .socket_path(&agora_core::AgentId::new(asker.clone()));
-    wait("the asker's mesh socket", || sock.exists());
+    wait("the asker's mesh socket and hub run identity", || {
+        sock.exists()
+            && hub
+                .state
+                .hub
+                .view()
+                .0
+                .agents
+                .get(&format!("alpha/{asker}"))
+                .is_some_and(|agent| agent.running)
+    });
     let target_folder = agora_platform::canonicalize_plain(&beta_dir.join("work"))
         .unwrap()
         .to_string_lossy()
@@ -4822,6 +4844,162 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         .unwrap_or_default()
         .to_string();
     assert!(!text.contains("agent.not_found"), "{waited}");
+
+    // ADR-0128: only the report accepted by the owner reaches this helper's authenticated parent.
+    let project = info.project_id;
+    hub.state.hub.store().enable_task_review(&project).unwrap();
+    hub.state
+        .hub
+        .store()
+        .enable_task_parent_notices(&project)
+        .unwrap();
+    assert_eq!(
+        started.project_id, project,
+        "the helper belongs to its parent's project"
+    );
+    wait("shared-board Review is enabled", || {
+        let (view, pos) = hub.state.hub.view();
+        server::snapshot_of(&view, pos)
+            .review_enabled_project_ids
+            .contains(&project)
+    });
+    let helper_socket = beta.mesh.socket_path(&AgentId::new(&local));
+    let mut worker = agora_platform::local_connect(&helper_socket).unwrap();
+    mcp(
+        &mut worker,
+        1,
+        "initialize",
+        json!({"protocolVersion": "2025-03-26"}),
+    );
+    let tool = |c: &mut agora_platform::LocalStream, name, args| -> Value {
+        let response = mcp(
+            c,
+            20,
+            "tools/call",
+            json!({"name": name, "arguments": args}),
+        );
+        assert_ne!(response["isError"], true, "{response}");
+        serde_json::from_str(response["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let created = tool(
+        &mut worker,
+        "task_create",
+        json!({"title": "Acceptance notice fixture"}),
+    );
+    let task = created["task_id"].as_str().unwrap();
+    tool(&mut worker, "task_claim", json!({"task_id": task}));
+
+    let mut window = hub.client(addr);
+    let f = |stream_id, kind, payload| Frame {
+        stream_id,
+        kind,
+        seq: None,
+        payload,
+    };
+    hub.rt
+        .block_on(window.send(&f(
+            STREAM_EVENTS,
+            kinds::SUBSCRIBE,
+            v1::Subscribe::default().encode_to_vec(),
+        )))
+        .unwrap();
+    let decide =
+        |window: &mut agora_protocol::ws::Conn<_>, revision, decision: v1::TaskReviewDecision| {
+            let request = v1::CommandRequest {
+                request_id: "review-notice".into(),
+                command: Some(Cmd::TaskReviewDecide(v1::TaskReviewDecide {
+                    project_id: project.clone(),
+                    task_id: task.into(),
+                    report_revision: revision,
+                    decision: decision as i32,
+                })),
+                ..Default::default()
+            };
+            hub.rt.block_on(async {
+                window
+                    .send(&f(STREAM_COMMANDS, 0, request.encode_to_vec()))
+                    .await
+                    .unwrap();
+                loop {
+                    let frame = tokio::time::timeout(Duration::from_secs(10), window.recv())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    if (frame.stream_id, frame.kind) == (STREAM_COMMANDS, 1) {
+                        let reply = v1::CommandResponse::decode(frame.payload.as_slice()).unwrap();
+                        assert!(
+                            matches!(reply.result, Some(v1::command_response::Result::Ok(_))),
+                            "{reply:?}"
+                        );
+                        break;
+                    }
+                }
+            });
+        };
+    let complete = |worker: &mut agora_platform::LocalStream| {
+        tool(
+            worker,
+            "task_complete",
+            json!({"task_id": task, "summary": "private fixture report", "refs": ["fixture:proof"]}),
+        );
+    };
+    complete(&mut worker);
+    decide(&mut window, 1, v1::TaskReviewDecision::Return);
+    tool(&mut worker, "task_claim", json!({"task_id": task}));
+    complete(&mut worker);
+
+    let before = tool(&mut conn, "inbox", json!({}));
+    assert!(before
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["kind"] != "task_accepted"));
+    let cursor = before
+        .as_array()
+        .unwrap()
+        .last()
+        .map(|row| row["message_id"].clone())
+        .unwrap_or(json!("m-0"));
+    let waiter = std::thread::spawn(move || {
+        conn.set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        tool(
+            &mut conn,
+            "inbox_wait",
+            json!({"since": cursor, "timeout_s": 10}),
+        )
+    });
+    decide(&mut window, 2, v1::TaskReviewDecision::Accept);
+    decide(&mut window, 2, v1::TaskReviewDecision::Accept);
+    let messages = waiter.join().unwrap();
+    let messages = messages.as_array().unwrap();
+    let notice = messages
+        .iter()
+        .find(|row| row["kind"] == "task_accepted")
+        .unwrap_or_else(|| panic!("{messages:?}"));
+    assert_eq!(notice["task_acceptance"]["project_id"], project);
+    assert_eq!(notice["task_acceptance"]["task_id"], task);
+    assert_eq!(notice["task_acceptance"]["report_revision"], 2);
+    assert!(
+        notice["task_acceptance"]["accepted_at_ms"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(notice["body"], "");
+    assert_eq!(notice["refs"], json!([]));
+    let all = alpha
+        .mesh
+        .mesh()
+        .lock()
+        .unwrap()
+        .inbox(&AgentId::new(&asker), None, 64)
+        .unwrap();
+    assert_eq!(
+        all.iter().filter(|row| row.kind == "task_accepted").count(),
+        1
+    );
 }
 
 /// ADR-0122 step 3 through a real hub: the owner published two shared MCP servers, one signed by a device this machine trusts and one

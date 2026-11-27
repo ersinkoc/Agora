@@ -434,3 +434,13 @@ mesh calls and the link negotiated `board.subtasks.v1`. A call never falls back 
 boards return `board.subtasks_unavailable`, missing parents return `task.not_found`, and a child outside the
 limits returns `task.subtask_limit`. A subtask's row in `task_list` includes `parent_task_id`. Its parent groups it
 in the window. Its `depends_on` list determines which tasks must be done before it can be claimed.
+
+
+### Acceptance notices for a helper's parent
+
+An opt-in shared board may deliver the accepted report's metadata to the verified parent of a helper on another
+machine (ADR-0128). The parent can read a `task_accepted` item in `inbox` or `inbox_wait`. Its
+`task_acceptance` object contains `project_id`, `task_id`, `report_revision` and `accepted_at_ms`. It has
+hub provenance, an empty body, and no references. The ordinary inbox cursor orders it with other entries.
+The node keeps the entry and receipt through the 24-hour delivery deadline. Expired entries are pruned on
+startup or when the next notice arrives. This does not send terminal input, start a turn, or grant access.

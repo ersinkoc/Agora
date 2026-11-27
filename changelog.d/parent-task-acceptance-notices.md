@@ -1,0 +1,1 @@
+- Review-enabled shared boards can notify a cross-machine helper's parent agent when its task is accepted. The same parent run can receive the notice in its inbox after reconnecting.

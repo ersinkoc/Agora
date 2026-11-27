@@ -198,6 +198,8 @@ fn shared_board_metadata_matches_additive_fixtures() {
         ("task-review", "CommandRequest", "return"),
         ("task-subtasks", "Event", "child"),
         ("task-subtasks", "Snapshot", "family"),
+        ("task-acceptance-notice", "CommandRequest", "notice"),
+        ("task-acceptance-notice", "CommandResponse", "receipt"),
     ] {
         let path = dir().join("..").join(folder);
         let name = format!("agora.v1.{ty}");
@@ -216,6 +218,9 @@ fn shared_board_metadata_matches_additive_fixtures() {
         let round_trip = match ty {
             "Event" => v1::Event::decode(bytes.as_slice()).map(|e| e.encode_to_vec()),
             "Snapshot" => v1::Snapshot::decode(bytes.as_slice()).map(|s| s.encode_to_vec()),
+            "CommandResponse" => {
+                v1::CommandResponse::decode(bytes.as_slice()).map(|r| r.encode_to_vec())
+            }
             _ => v1::CommandRequest::decode(bytes.as_slice()).map(|r| r.encode_to_vec()),
         };
         assert_eq!(round_trip.expect("typed fixture"), bytes);

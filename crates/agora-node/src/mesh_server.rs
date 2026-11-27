@@ -1017,8 +1017,11 @@ struct AgentServer {
 /// record grow far beyond its summary and refs.
 const MAX_HANDOFF_ID_BYTES: usize = crate::holder_link::MAX_AGENT_ID;
 
-struct Handoffs {
-    store: crate::handoff_store::Store,
+type AcceptanceNotice = agora_protocol::v1::DeliverTaskAcceptanceNotice;
+type AcceptanceReceipt = agora_protocol::v1::TaskAcceptanceNoticeReceipt;
+
+struct Handoffs<D = agora_protocol::v1::DeliverTaskHandoff> {
+    store: crate::handoff_store::Store<D>,
     runs: HashMap<AgentId, (String, crate::handoff_store::Id)>,
 }
 
@@ -1043,6 +1046,35 @@ fn handoff_message(record: &crate::handoff_store::Record) -> agora_mesh::broker:
         at_ms: record.accepted_at_ms,
         reply_to: None,
         kind: "handoff",
+        task_acceptance: None,
+    }
+}
+
+fn acceptance_message(
+    record: &crate::handoff_store::Record<AcceptanceNotice>,
+) -> agora_mesh::broker::Message {
+    use agora_mesh::broker::{Message, Provenance, TaskAcceptance};
+    let notice = &record.delivery;
+    Message {
+        id: format!("m-{}", record.number),
+        provenance: Provenance {
+            from: AgentId::new("hub/board"),
+            kind: String::new(),
+            node: "hub".into(),
+            project: notice.project_id.clone(),
+        },
+        to: notice.agent_id.clone(),
+        body: String::new(),
+        refs: Vec::new(),
+        at_ms: record.accepted_at_ms,
+        reply_to: None,
+        kind: "task_accepted",
+        task_acceptance: Some(Box::new(TaskAcceptance {
+            project_id: notice.project_id.clone(),
+            task_id: notice.task_id.clone(),
+            report_revision: notice.report_revision,
+            accepted_at_ms: notice.accepted_at_ms,
+        })),
     }
 }
 
@@ -1063,6 +1095,7 @@ pub struct MeshServer {
     // When both locks are needed, take the broker before the handoff store. This orders
     // a durable write and publication with MCP cursors and with the next run of an agent.
     handoffs: Mutex<Option<Handoffs>>,
+    acceptance_notices: Mutex<Option<Handoffs<AcceptanceNotice>>>,
     agents: Mutex<HashMap<AgentId, AgentServer>>,
     /// #1093: agents whose endpoint is closing (an `unregister` between taking it out of `agents` and its broker `leave`), with how
     /// many closings are under way. Taken before `agents` wherever both are held. A registration of the agent waits until none is
@@ -1188,6 +1221,7 @@ impl MeshServer {
             mesh,
             dir: dir.to_path_buf(),
             handoffs: Mutex::new(None),
+            acceptance_notices: Mutex::new(None),
             agents: Mutex::new(HashMap::new()),
             leaving: Mutex::new(HashMap::new()),
             left: Condvar::new(),
@@ -1367,6 +1401,37 @@ impl MeshServer {
             .is_some()
     }
 
+    pub(crate) fn open_acceptance_notices(&self, data_dir: &Path) -> io::Result<()> {
+        let mut store = crate::handoff_store::Store::<AcceptanceNotice>::open(
+            &data_dir.join("task-acceptance-notices"),
+        )?;
+        store.prune(now_ms(), |_| false);
+        if let Some(last) = store.records().map(|record| record.number).max() {
+            let next = last + 1;
+            self.mesh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reserve_ids(next, next);
+        }
+        *self
+            .acceptance_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Handoffs {
+            store,
+            runs: HashMap::new(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn has_acceptance_notices(&self) -> bool {
+        self.remote_allowed()
+            && self
+                .acceptance_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+    }
+
     pub(crate) fn bind_handoff_run(
         &self,
         agent: &AgentId,
@@ -1375,32 +1440,199 @@ impl MeshServer {
     ) {
         let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
         let mut handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(handoffs) = handoffs.as_mut() else {
-            return;
-        };
+        let mut notices = self
+            .acceptance_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(run) = run {
+            let same = |previous: Option<&(String, [u8; 16])>| {
+                previous.is_some_and(|(p, r)| p == project && *r == run)
+            };
             if handoffs
-                .runs
-                .get(agent)
-                .is_some_and(|(p, r)| p == project && *r == run)
+                .as_ref()
+                .is_none_or(|inbox| same(inbox.runs.get(agent)))
+                && notices
+                    .as_ref()
+                    .is_none_or(|inbox| same(inbox.runs.get(agent)))
             {
                 return;
             }
-            handoffs.runs.insert(agent.clone(), (project.into(), run));
-            let messages = handoffs
-                .store
-                .records()
-                .filter(|record| {
-                    let delivery = &record.delivery;
-                    delivery.agent_id == agent.as_str()
-                        && agora_core::same_project(&delivery.project_id, project)
-                        && delivery.receiver_run_id.as_slice() == run
-                })
-                .map(|record| (record.number, handoff_message(record)));
-            mesh.restore_handoff_inbox(agent, messages);
-        } else if handoffs.runs.remove(agent).is_some() {
+            let mut messages = Vec::new();
+            let matches = |id: &str, incoming_project: &str, incoming_run: &[u8]| {
+                id == agent.as_str()
+                    && agora_core::same_project(incoming_project, project)
+                    && incoming_run == run
+            };
+            if let Some(inbox) = handoffs.as_mut() {
+                inbox.runs.insert(agent.clone(), (project.into(), run));
+                messages.extend(
+                    inbox
+                        .store
+                        .records()
+                        .filter(|r| {
+                            let d = &r.delivery;
+                            matches(&d.agent_id, &d.project_id, &d.receiver_run_id)
+                        })
+                        .map(|r| (r.number, handoff_message(r))),
+                );
+            }
+            if let Some(inbox) = notices.as_mut() {
+                inbox.runs.insert(agent.clone(), (project.into(), run));
+                messages.extend(
+                    inbox
+                        .store
+                        .records()
+                        .filter(|r| {
+                            let d = &r.delivery;
+                            matches(&d.agent_id, &d.project_id, &d.receiver_run_id)
+                        })
+                        .map(|r| (r.number, acceptance_message(r))),
+                );
+            }
+            mesh.restore_handoff_inbox(agent, messages.into_iter());
+        } else {
+            if let Some(inbox) = handoffs.as_mut() {
+                inbox.runs.remove(agent);
+            }
+            if let Some(inbox) = notices.as_mut() {
+                inbox.runs.remove(agent);
+            }
             mesh.restore_handoff_inbox(agent, std::iter::empty());
         }
+    }
+
+    pub(crate) fn stored_acceptance_notice(
+        &self,
+        delivery: &AcceptanceNotice,
+    ) -> Result<Option<AcceptanceReceipt>, agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let Ok(id) = <crate::handoff_store::Id>::try_from(delivery.delivery_id.as_slice()) else {
+            return Ok(None);
+        };
+        let guard = self
+            .acceptance_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(inbox) = guard.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(record) = inbox.store.get(&id) {
+            return Ok((record.delivery == *delivery).then(|| AcceptanceReceipt {
+                delivery_id: delivery.delivery_id.clone(),
+                receiver_run_id: delivery.receiver_run_id.clone(),
+            }));
+        }
+        inbox
+            .store
+            .present(&id)
+            .map_err(|_| Error::new(ErrorCode::MeshUnavailable))?;
+        Ok(None)
+    }
+
+    pub(crate) fn deliver_acceptance_notice(
+        &self,
+        delivery: AcceptanceNotice,
+        now: u64,
+    ) -> Result<AcceptanceReceipt, agora_protocol::Error> {
+        use crate::handoff_store::{Id, InsertError, Record};
+        use agora_protocol::{Error, ErrorCode};
+        let invalid =
+            |field: &str| Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field);
+        let unavailable = || Error::new(ErrorCode::MeshUnavailable);
+        let id =
+            Id::try_from(delivery.delivery_id.as_slice()).map_err(|_| invalid("delivery_id"))?;
+        let run = Id::try_from(delivery.receiver_run_id.as_slice())
+            .map_err(|_| invalid("receiver_run_id"))?;
+        let receipt = AcceptanceReceipt {
+            delivery_id: id.to_vec(),
+            receiver_run_id: run.to_vec(),
+        };
+        let agent = AgentId::new(&delivery.agent_id);
+        let mut mesh = self.mesh.lock().unwrap_or_else(|e| e.into_inner());
+        let mut notices = self
+            .acceptance_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let inbox = notices.as_mut().ok_or_else(unavailable)?;
+        if let Some(stored) = inbox.store.get(&id) {
+            return if stored.delivery == delivery {
+                Ok(receipt)
+            } else {
+                Err(invalid("delivery_id"))
+            };
+        }
+        if !self.remote_allowed() {
+            return Err(Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", "mesh.remote"));
+        }
+        if delivery.valid_until_ms <= now {
+            return Err(unavailable());
+        }
+        if delivery.valid_until_ms - now > crate::handoff_store::MAX_VALIDITY_MS
+            || delivery.accepted_at_ms == 0
+            || delivery
+                .valid_until_ms
+                .saturating_sub(delivery.accepted_at_ms)
+                != 24 * 60 * 60 * 1000
+        {
+            return Err(invalid("valid_until_ms"));
+        }
+        if delivery.report_revision == 0 {
+            return Err(invalid("report_revision"));
+        }
+        if !delivery
+            .task_id
+            .strip_prefix("t-")
+            .and_then(|id| id.parse::<u64>().ok())
+            .is_some_and(|id| id > 0)
+            || delivery.task_id.len() > 22
+        {
+            return Err(invalid("task_id"));
+        }
+        let same_run = |d: &AcceptanceNotice| {
+            inbox
+                .runs
+                .get(&AgentId::new(&d.agent_id))
+                .is_some_and(|(project, run)| {
+                    agora_core::same_project(project, &d.project_id)
+                        && d.receiver_run_id.as_slice() == *run
+                })
+        };
+        if !same_run(&delivery)
+            || !mesh
+                .agent_info(&agent)
+                .is_some_and(|info| agora_core::same_project(&info.project, &delivery.project_id))
+        {
+            return Err(Error::new(ErrorCode::MeshRecipientUnknown).with("to", agent.as_str()));
+        }
+        inbox.store.prune(now, |_| false);
+        mesh.retain_task_acceptances(&inbox.store.records().map(|record| record.number).collect());
+        let refused = |error| match error {
+            InsertError::Full { resource, limit } => Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", resource)
+                .with("limit", limit as i64),
+            InsertError::Storage(error) => {
+                crate::log_line!(
+                    "mesh: durable task acceptance notice could not be written: {error}"
+                );
+                unavailable()
+            }
+        };
+        inbox.store.present(&id).map_err(refused)?;
+        inbox.store.room_for(&delivery).map_err(refused)?;
+        let number = mesh
+            .next_handoff_number(&AgentId::new("hub/board"), now)
+            .map_err(|error| error.to_error(&mesh.limits()))?;
+        let record = Record {
+            number,
+            accepted_at_ms: now,
+            delivery,
+        };
+        let message = acceptance_message(&record);
+        inbox.store.insert(record).map_err(refused)?;
+        mesh.publish_task_acceptance(&agent, number, message);
+        Ok(receipt)
     }
 
     /// ADR-0109 decisions 3 and 4: the receipt of a delivery this node already stored, for an identical retry (the same delivery id
@@ -2033,6 +2265,14 @@ impl MeshServer {
                 .as_mut()
             {
                 handoffs.runs.remove(agent);
+            }
+            if let Some(notices) = self
+                .acceptance_notices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+            {
+                notices.runs.remove(agent);
             }
         }
         // ADR-0039: an agent that ended no longer has its shared-board leases renewed; the hub gives them back when it sees the
@@ -3008,6 +3248,141 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_task_acceptance_notice_reopens_with_one_cursor_and_only_for_the_addressed_run() {
+        let guard = TempDir::new("task-acceptance-reopen");
+        let dir = &guard.0;
+        let agent = AgentId::new("parent");
+        let now = now_ms();
+        let window = 24 * 60 * 60 * 1000;
+        let make = |run| {
+            let node = MeshServer::new(dir, Limits::default()).unwrap();
+            node.open_acceptance_notices(dir).unwrap();
+            node.mesh.lock().unwrap().reserve_ids(10_000, 20_000);
+            node.bind_handoff_run(&agent, "shared", Some([run; 16]));
+            node.mesh.lock().unwrap().register(AgentInfo {
+                id: agent.clone(),
+                kind: "fixture".into(),
+                node: "local".into(),
+                project: "shared".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            });
+            node
+        };
+        let delivery = AcceptanceNotice {
+            delivery_id: vec![1; 16],
+            receiver_run_id: vec![2; 16],
+            agent_id: agent.as_str().into(),
+            project_id: "shared".into(),
+            task_id: "t-3".into(),
+            report_revision: 2,
+            accepted_at_ms: now,
+            valid_until_ms: now + window,
+        };
+        let node = make(2);
+        let blocked = dir
+            .join("task-acceptance-notices")
+            .join(format!("{}.handoff", "01".repeat(16)));
+        std::fs::create_dir(&blocked).unwrap();
+        assert_eq!(
+            node.deliver_acceptance_notice(delivery.clone(), now)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::MeshUnavailable
+        );
+        assert!(node
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir(blocked).unwrap();
+
+        let receipt = node
+            .deliver_acceptance_notice(delivery.clone(), now)
+            .unwrap();
+        let saved = node
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(saved.kind, "task_accepted");
+        assert_eq!(saved.task_acceptance.as_ref().unwrap().report_revision, 2);
+        drop(node);
+
+        let same_run = make(2);
+        assert_eq!(
+            same_run
+                .deliver_acceptance_notice(delivery.clone(), now + 1)
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(
+            same_run
+                .mesh
+                .lock()
+                .unwrap()
+                .inbox(&agent, None, 10)
+                .unwrap(),
+            vec![saved]
+        );
+        let next = AcceptanceNotice {
+            delivery_id: vec![3; 16],
+            accepted_at_ms: now + window,
+            valid_until_ms: now + 2 * window,
+            ..delivery.clone()
+        };
+        same_run
+            .deliver_acceptance_notice(next, now + window)
+            .unwrap();
+        let messages = same_run
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].task_acceptance.as_ref().unwrap().accepted_at_ms,
+            now + window
+        );
+        drop(same_run);
+
+        let fresh = make(4);
+        assert!(fresh
+            .mesh
+            .lock()
+            .unwrap()
+            .inbox(&agent, None, 10)
+            .unwrap()
+            .is_empty());
+        let wrong_run = AcceptanceNotice {
+            delivery_id: vec![4; 16],
+            ..delivery
+        };
+        assert_eq!(
+            fresh
+                .deliver_acceptance_notice(wrong_run.clone(), now)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::MeshRecipientUnknown
+        );
+        fresh.set_remote_allowed(false);
+        assert_eq!(
+            fresh
+                .deliver_acceptance_notice(wrong_run, now)
+                .unwrap_err()
+                .code,
+            agora_protocol::ErrorCode::NodePolicyDenied
+        );
     }
 
     #[test]

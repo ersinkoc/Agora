@@ -11,6 +11,8 @@ pub const TASK_HANDOFF_V1: &str = "mesh.task_handoff.v1";
 pub const FLEET_STATUS_V1: &str = "mesh.fleet_status.v1";
 /// ADR-0126: the link carries subtask creation on Review-enabled shared boards.
 pub const BOARD_SUBTASKS_V1: &str = "board.subtasks.v1";
+/// ADR-0128: a node can durably deliver notices to a verified parent run's inbox.
+pub const TASK_ACCEPTANCE_NOTICE_V1: &str = "board.task_acceptance_notice.v1";
 /// ADR-0119: a helper started on another machine (`HelperStart`, `HelperStartResult`, `HelperFollow`, `HelperRelease`). Named in the
 /// schema step; no node or hub offers it until build steps 2 to 4.
 pub const MESH_SPAWN_REMOTE: &str = "mesh.spawn.remote";

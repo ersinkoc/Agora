@@ -2066,6 +2066,7 @@ fn helper_for_node(
                 );
             }
             h.origin = node_id.to_string();
+            let parent = hub.helper_notice_parent(node_id, &h.from_agent, &h.from_run_id);
             let chain = hub
                 .helpers()
                 .chain_of(node_id, &h.from_agent, &h.from_run_id);
@@ -2078,7 +2079,7 @@ fn helper_for_node(
                 &h.from_agent,
                 &target,
                 &h.start_id,
-                chain,
+                (chain, parent),
                 now_ms(),
             ) {
                 audit("agent.start.remote.asked", &target, "rate_limited");
@@ -2102,8 +2103,15 @@ fn helper_for_node(
                 });
                 return;
             }
-            hub.helpers()
-                .result(node_id, &r.to_node, &r.start_id, &r.agent_id, now_ms());
+            let agent = if r.error.is_none() {
+                r.agent_id.as_str()
+            } else {
+                ""
+            };
+            let verified = hub
+                .helpers()
+                .result(node_id, &r.to_node, &r.start_id, agent, now_ms());
+            hub.remember_task_notice_parent(verified);
             audit(
                 "agent.start.remote.result",
                 &r.to_node,
@@ -3462,6 +3470,7 @@ async fn run_with(
 ) {
     tokio::select! {
         () = crate::handoff::run(&state.hub) => {}
+        () = crate::task_notice::run(&state.hub) => {}
         () = refresh_review_projects(&state.hub) => {}
         () = accept_connections(listener, Arc::clone(&state), tls) => {}
     }

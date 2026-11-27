@@ -1,0 +1,13 @@
+{
+  "requestId": "notice",
+  "deliverTaskAcceptanceNotice": {
+    "deliveryId": "AQEBAQEBAQEBAQEBAQEBAQ==",
+    "agentId": "agent-9",
+    "receiverRunId": "AgICAgICAgICAgICAgICAg==",
+    "projectId": "fixture",
+    "taskId": "t-3",
+    "reportRevision": "2",
+    "acceptedAtMs": "1700000000000",
+    "validUntilMs": "1700086400000"
+  }
+}

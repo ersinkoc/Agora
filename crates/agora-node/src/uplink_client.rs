@@ -740,6 +740,13 @@ where
     if mesh.as_ref().is_some_and(|mesh| mesh.remote_allowed()) {
         capabilities.push(agora_protocol::handshake::BOARD_SUBTASKS_V1);
     }
+    let has_notices = mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.has_acceptance_notices());
+    let notice_capability = agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1;
+    if has_notices {
+        capabilities.push(notice_capability);
+    }
     let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
         STREAM_CONTROL,
@@ -763,6 +770,9 @@ where
     // File writes are serialized. An in-flight write is enough; a later hub retry
     // can return its receipt without queueing unbounded blocking work on this link.
     let handoff_writer = Arc::new(tokio::sync::Semaphore::new(1));
+    let notice_writer = Arc::new(tokio::sync::Semaphore::new(1));
+    let notices_negotiated =
+        has_notices && welcome.capabilities.iter().any(|c| c == notice_capability);
     if let Some(c) = certs {
         c.welcomed(&welcome.capabilities);
     }
@@ -926,6 +936,60 @@ where
                         let tx = answers_tx.clone();
                         tokio::task::spawn_blocking(move || {
                             let _ = tx.send(device_answer(devices.as_deref(), req));
+                        });
+                        continue;
+                    }
+                    if let Some(command_request::Command::DeliverTaskAcceptanceNotice(notice)) =
+                        &req.command
+                    {
+                        use agora_protocol::{Error, ErrorCode};
+                        let Some(mesh) = mesh.as_ref().filter(|_| notices_negotiated) else {
+                            let error = Error::new(ErrorCode::ProtocolCapabilityMissing)
+                                .with("capability", notice_capability);
+                            let _ = answers_tx.send(notice_answer(req.request_id, Err(error)));
+                            continue;
+                        };
+                        let Ok(permit) = Arc::clone(&notice_writer).try_acquire_owned() else {
+                            let _ = answers_tx.send(notice_answer(
+                                req.request_id,
+                                Err(Error::new(ErrorCode::MeshUnavailable)),
+                            ));
+                            continue;
+                        };
+                        let (mesh, tx, grants, notice) = (
+                            Arc::clone(mesh),
+                            answers_tx.clone(),
+                            grants.clone(),
+                            notice.clone(),
+                        );
+                        tokio::task::spawn_blocking(move || {
+                            let answer = match mesh.stored_acceptance_notice(&notice) {
+                                Ok(Some(receipt)) => Ok(receipt),
+                                Err(error) => Err(error),
+                                Ok(None) => {
+                                    let gate = match (grants.as_deref(), req.command.as_ref()) {
+                                        (Some(g), Some(command)) => {
+                                            let now = crate::grants::now_ms();
+                                            let legacy = command_request::Command::MeshPost(
+                                                agora_protocol::v1::MeshPost {
+                                                    to: notice.agent_id.clone(),
+                                                    ..Default::default()
+                                                },
+                                            );
+                                            g.gate(&legacy, now).and_then(|()| g.gate(command, now))
+                                        }
+                                        _ => Ok(()),
+                                    };
+                                    gate.and_then(|()| {
+                                        mesh.deliver_acceptance_notice(
+                                            notice,
+                                            crate::daemon::now_ms(),
+                                        )
+                                    })
+                                }
+                            };
+                            drop(permit);
+                            let _ = tx.send(notice_answer(req.request_id, answer));
                         });
                         continue;
                     }
@@ -1499,6 +1563,22 @@ fn misplaced(request_id: String) -> CommandResponse {
                 .with("field", "stream_id")
                 .to_info(),
         )),
+    }
+}
+
+fn notice_answer(
+    request_id: String,
+    result: Result<agora_protocol::v1::TaskAcceptanceNoticeReceipt, agora_protocol::Error>,
+) -> CommandResponse {
+    use agora_protocol::v1::{command_ok, CommandOk};
+    CommandResponse {
+        request_id,
+        result: Some(match result {
+            Ok(receipt) => command_response::Result::Ok(CommandOk {
+                result: Some(command_ok::Result::TaskAcceptanceNoticeReceipt(receipt)),
+            }),
+            Err(error) => command_response::Result::Err(error.to_info()),
+        }),
     }
 }
 

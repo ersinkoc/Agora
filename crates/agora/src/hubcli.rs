@@ -39,6 +39,7 @@ const HUB_CAPABILITIES: &[&str] = &[
     "directory.list",
     "board.join",
     agora_protocol::handshake::TASK_HANDOFF_V1,
+    agora_protocol::handshake::TASK_ACCEPTANCE_NOTICE_V1,
     "mesh.spawn",
     // ADR-0058
     "agent.set_mode",
@@ -768,7 +769,7 @@ pub fn hub_task_review(say: &Say, o: &Opts) -> ExitCode {
         say.err(key!("cli-bad-arguments"), &[]);
         return ExitCode::from(2);
     };
-    if op != "enable"
+    if !matches!(op.as_str(), "enable" | "notify-parent")
         || project.is_empty()
         || project.len() > 4096
         || project.chars().any(char::is_control)
@@ -782,16 +783,23 @@ pub fn hub_task_review(say: &Say, o: &Opts) -> ExitCode {
         .map_err(|e| e.to_string())
         .and_then(|()| SqliteStore::open(&dir.join("hub.db")).map_err(|e| e.to_string()))
         .and_then(|store| {
-            store
-                .enable_task_review(&project)
-                .map_err(|e| e.to_string())
+            if op == "enable" {
+                store.enable_task_review(&project)
+            } else {
+                store.enable_task_parent_notices(&project)
+            }
+            .map_err(|e| e.to_string())
         });
     if let Err(reason) = result {
         say.err(key!("cli-hub-failed"), &[("reason", reason.into())]);
         return ExitCode::from(1);
     }
     say.out(
-        key!("cli-hub-task-review-enabled"),
+        if op == "enable" {
+            key!("cli-hub-task-review-enabled")
+        } else {
+            key!("cli-hub-task-parent-notices-enabled")
+        },
         &[("project", project.as_ref().into())],
     );
     ExitCode::SUCCESS

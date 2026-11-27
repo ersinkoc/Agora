@@ -88,6 +88,14 @@ pub struct Provenance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAcceptance {
+    pub project_id: String,
+    pub task_id: String,
+    pub report_revision: u64,
+    pub accepted_at_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
     pub provenance: Provenance,
@@ -99,6 +107,7 @@ pub struct Message {
     pub reply_to: Option<String>,
     /// `message`, `ask`, `reply`, `handoff`, `delivery_failed` or `presence`.
     pub kind: &'static str,
+    pub task_acceptance: Option<Box<TaskAcceptance>>,
 }
 
 /// What the node knows about an agent besides [`AgentInfo`], for `agents_list` and `workspace_status`: facts, never what the agent
@@ -236,11 +245,20 @@ struct Ask {
     answer: Option<(String, AgentId)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewParent {
+    pub node_id: String,
+    pub agent_id: String,
+    pub run_id: [u8; 16],
+    pub project_id: String,
+}
+
 /// The task's latest report and review, kept with the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewReport {
     pub metadata: TaskReview,
     pub refs: Vec<String>,
+    pub parent: Option<ReviewParent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -461,6 +479,7 @@ impl Mesh {
             at_ms: now_ms,
             reply_to: None,
             kind: "message",
+            task_acceptance: None,
         };
         let id = m.id.clone();
         self.deliver(std::slice::from_ref(&recipient.id), &m);
@@ -500,6 +519,7 @@ impl Mesh {
             at_ms: now_ms,
             reply_to: (!message_id.is_empty()).then(|| message_id.to_string()),
             kind: "delivery_failed",
+            task_acceptance: None,
         };
         let inbox = self.inboxes.entry(info.id).or_default();
         inbox.push_back(m);
@@ -619,6 +639,7 @@ impl Mesh {
                 at_ms: now_ms,
                 reply_to: None,
                 kind: "presence",
+                task_acceptance: None,
             };
             let inbox = self.inboxes.entry(r.id).or_default();
             inbox.push_back(m);
@@ -901,6 +922,7 @@ impl Mesh {
                     at_ms: now_ms,
                     reply_to: reply_to.map(str::to_string),
                     kind,
+                    task_acceptance: None,
                 };
                 self.outbox.push(Outbound {
                     message_id: m.id.clone(),
@@ -935,6 +957,7 @@ impl Mesh {
             at_ms: now_ms,
             reply_to: reply_to.map(str::to_string),
             kind,
+            task_acceptance: None,
         };
         self.deliver(&recipients, &m);
         Ok((m, recipients))
@@ -1094,6 +1117,22 @@ impl Mesh {
             .entry(agent.clone())
             .or_default()
             .insert(number, Arc::new(m));
+    }
+
+    pub fn publish_task_acceptance(&mut self, agent: &AgentId, number: u64, message: Message) {
+        self.handoff_inboxes
+            .entry(agent.clone())
+            .or_default()
+            .insert(number, Arc::new(message));
+    }
+
+    pub fn retain_task_acceptances(&mut self, numbers: &BTreeSet<u64>) {
+        self.handoff_inboxes.retain(|_, inbox| {
+            inbox.retain(|number, message| {
+                message.task_acceptance.is_none() || numbers.contains(number)
+            });
+            !inbox.is_empty()
+        });
     }
 
     /// `inbox`: messages after `since` (by id), oldest first. Reading does not remove them; `since` moves the cursor.
@@ -1610,6 +1649,7 @@ impl Mesh {
                     ..TaskReview::default()
                 },
                 refs: refs.to_vec(),
+                parent: None,
             });
         } else {
             rec.task.complete(by).map_err(not_owner)?;
@@ -1620,6 +1660,27 @@ impl Mesh {
             self.review_changed(&tid);
         }
         Ok(())
+    }
+
+    pub fn bind_review_parent(&mut self, task: &str, revision: u64, parent: ReviewParent) {
+        if let Some(report) = self
+            .tasks
+            .get_mut(&TaskId::new(task))
+            .and_then(|r| r.review.as_mut())
+        {
+            if report.metadata.report_revision == revision
+                && report.metadata.state() == TaskReviewState::Pending
+            {
+                report.parent = Some(parent);
+            }
+        }
+    }
+
+    pub fn review_parent(&self, task: &str, revision: u64) -> Option<ReviewParent> {
+        let report = self.tasks.get(&TaskId::new(task))?.review.as_ref()?;
+        (report.metadata.report_revision == revision)
+            .then_some(report.parent.as_ref()?)
+            .cloned()
     }
 
     fn review_changed(&mut self, id: &TaskId) {

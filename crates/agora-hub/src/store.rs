@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 22;
+const SCHEMA_VERSION: i64 = 23;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -576,6 +576,10 @@ impl SqliteStore {
             // ADR-0126: earlier hubs would strip parent links when rewriting a stored board.
             conn.pragma_update(None, "user_version", 22)?;
         }
+        if version < 23 {
+            // ADR-0128: an older hub drops a report's verified recipient binding when it rewrites the board.
+            conn.pragma_update(None, "user_version", 23)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -700,6 +704,18 @@ impl SqliteStore {
             conn.prepare("SELECT project_id FROM task_review_projects ORDER BY project_id")?;
         let projects = query.query_map([], |row| row.get(0))?;
         Ok(projects.collect::<Result<_, _>>()?)
+    }
+
+    pub fn enable_task_parent_notices(&self, project: &str) -> Result<(), StoreError> {
+        crate::task_notice::enable(self, project)
+    }
+
+    pub(crate) fn settings_with_prefix(&self, prefix: &str) -> Result<Vec<Vec<u8>>, StoreError> {
+        let conn = self.lock()?;
+        let mut statement =
+            conn.prepare("SELECT value FROM settings WHERE key GLOB ?1 ORDER BY key")?;
+        let rows = statement.query_map([format!("{prefix}*")], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     pub(crate) fn handoff_settings(&self) -> Result<Vec<Vec<u8>>, StoreError> {

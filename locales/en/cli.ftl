@@ -28,6 +28,7 @@ cli-usage =
       agora hub fleet on|off|status [--hub-dir DIR]
       agora hub remote-helpers on|off|status [--hub-dir DIR]
       agora hub task-review enable PROJECT_ID [--hub-dir DIR]
+      agora hub task-review notify-parent PROJECT_ID [--hub-dir DIR]
       agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
@@ -977,4 +978,5 @@ cli-workspaces-kept = Kept workspace { $path }: { $reason ->
 cli-workspaces-clean-summary = { $removed } removed, { $kept } kept (the reason is given for each).
 cli-workspaces-clean-dry-summary = { $removed } would be removed, { $kept } would be kept. Nothing was changed.
 
+cli-hub-task-parent-notices-enabled = Parent agents will receive task acceptance notices for the shared board of { $project }.
 cli-hub-task-review-enabled = Review will be used for the shared board of { $project }.

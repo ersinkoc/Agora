@@ -4,6 +4,7 @@
 //! Everything here lives in memory: after a hub restart every asker is its own root again, so chain grants stop applying (they
 //! narrow, never widen). Pure data, tested without sockets.
 
+use agora_mesh::broker::ReviewParent;
 use std::collections::{HashMap, VecDeque};
 
 /// Starts carried per asking machine in any minute, and starts per asking machine whose first answer has not come back.
@@ -24,11 +25,20 @@ pub struct Chain {
     pub root_run: Vec<u8>,
 }
 
+/// A match from two authenticated facts in a carried helper start.
+pub(crate) struct VerifiedParent {
+    pub helper_node: String,
+    pub helper_agent: String,
+    pub helper_run: [u8; 16],
+    pub parent: ReviewParent,
+}
+
 #[derive(Debug, Clone)]
 struct Pending {
     /// The asking agent on the origin machine (the origin is part of the key).
     asker: String,
     chain: Chain,
+    parent: Option<ReviewParent>,
     at_ms: u64,
 }
 
@@ -39,6 +49,8 @@ struct Expected {
     origin: String,
     asker: String,
     chain: Chain,
+    parent: Option<ReviewParent>,
+    carried_at_ms: u64,
     at_ms: u64,
 }
 
@@ -48,6 +60,8 @@ struct Seen {
     parent_node: String,
     parent_agent: String,
     new: bool,
+    run: Option<[u8; 16]>,
+    project: String,
     at_ms: u64,
 }
 
@@ -98,7 +112,7 @@ impl HelperBroker {
         asker: &str,
         target: &str,
         start_id: &[u8],
-        chain: Chain,
+        (chain, parent): (Chain, Option<ReviewParent>),
         now_ms: u64,
     ) -> Result<(), Refusal> {
         let recent = self.recent.entry(origin.to_string()).or_default();
@@ -135,6 +149,7 @@ impl HelperBroker {
             Pending {
                 asker: asker.to_string(),
                 chain,
+                parent,
                 at_ms: now_ms,
             },
         );
@@ -162,22 +177,19 @@ impl HelperBroker {
     /// The result of a start `origin` asked `target` for. Nothing joins a chain here: the helper it names joins the asker's chain only
     /// once its own `AgentStarted` confirms it ([`Self::agent_started`]), whichever comes first. A result for a start this hub did not
     /// carry from `origin` to `target` records nothing.
-    pub fn result(
+    pub(crate) fn result(
         &mut self,
         target: &str,
         origin: &str,
         start_id: &[u8],
         agent: &str,
         now_ms: u64,
-    ) {
-        let Some(p) =
+    ) -> Option<VerifiedParent> {
+        let p =
             self.pending
-                .remove(&(target.to_string(), origin.to_string(), start_id.to_vec()))
-        else {
-            return;
-        };
+                .remove(&(target.to_string(), origin.to_string(), start_id.to_vec()))?;
         if agent.is_empty() {
-            return;
+            return None;
         }
         let key = (target.to_string(), agent.to_string());
         let expected = Expected {
@@ -187,6 +199,8 @@ impl HelperBroker {
                 depth: p.chain.depth.saturating_add(1),
                 ..p.chain
             },
+            parent: p.parent,
+            carried_at_ms: p.at_ms,
             at_ms: now_ms,
         };
         match self.seen.remove(&key) {
@@ -197,25 +211,28 @@ impl HelperBroker {
                 if self.expected.len() < MAX_PENDING {
                     self.expected.insert(key, expected);
                 }
+                None
             }
         }
     }
 
     /// A target's `AgentStarted` for `agent` naming a parent on another machine; `new`: the hub had not seen that agent before.
-    pub fn agent_started(
+    pub(crate) fn agent_started(
         &mut self,
         target: &str,
         agent: &str,
         parent_node: &str,
         parent_agent: &str,
-        new: bool,
+        (new, run, project): (bool, &[u8], &str),
         now_ms: u64,
-    ) {
+    ) -> Option<VerifiedParent> {
         let key = (target.to_string(), agent.to_string());
         let seen = Seen {
             parent_node: parent_node.to_string(),
             parent_agent: parent_agent.to_string(),
             new,
+            run: run.try_into().ok(),
+            project: project.into(),
             at_ms: now_ms,
         };
         match self.expected.remove(&key) {
@@ -226,14 +243,20 @@ impl HelperBroker {
                 if self.seen.len() < MAX_PENDING {
                     self.seen.insert(key, seen);
                 }
+                None
             }
         }
     }
 
     /// The helper joins the asker's chain only when the hub saw it start new under exactly that parent.
-    fn confirm(&mut self, key: (String, String), expected: &Expected, seen: &Seen) {
+    fn confirm(
+        &mut self,
+        key: (String, String),
+        expected: &Expected,
+        seen: &Seen,
+    ) -> Option<VerifiedParent> {
         if !seen.new || seen.parent_node != expected.origin || seen.parent_agent != expected.asker {
-            return;
+            return None;
         }
         if self.lineage.len() >= MAX_LINEAGE {
             // Bounded: a helper forgotten here is its own root when it asks (narrowing, never widening).
@@ -241,7 +264,20 @@ impl HelperBroker {
                 self.lineage.remove(&k);
             }
         }
-        self.lineage.insert(key, expected.chain.clone());
+        self.lineage.insert(key.clone(), expected.chain.clone());
+        let parent = expected.parent.as_ref()?;
+        if !agora_core::same_project(&parent.project_id, &seen.project)
+            || seen.at_ms < expected.carried_at_ms
+            || seen.at_ms >= expected.carried_at_ms.saturating_add(PENDING_MS)
+        {
+            return None;
+        }
+        Some(VerifiedParent {
+            helper_node: key.0,
+            helper_agent: key.1,
+            helper_run: seen.run?,
+            parent: parent.clone(),
+        })
     }
 
     /// Whether a start from `origin` to `target` with `start_id` is one this hub carried and still waits for (a result for anything
@@ -267,17 +303,98 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_notice_requires_both_start_facts_and_the_same_project() {
+        let parent = ReviewParent {
+            node_id: "mac".into(),
+            agent_id: "parent".into(),
+            run_id: [7; 16],
+            project_id: "p".into(),
+        };
+        for result_first in [true, false] {
+            let mut broker = HelperBroker::default();
+            broker
+                .carry(
+                    "mac",
+                    "parent",
+                    "target",
+                    b"request",
+                    (root(), Some(parent.clone())),
+                    10,
+                )
+                .unwrap();
+            let verified = if result_first {
+                assert!(broker
+                    .result("target", "mac", b"request", "helper", 11)
+                    .is_none());
+                broker.agent_started(
+                    "target",
+                    "helper",
+                    "mac",
+                    "parent",
+                    (true, &[8; 16], "p"),
+                    12,
+                )
+            } else {
+                assert!(broker
+                    .agent_started(
+                        "target",
+                        "helper",
+                        "mac",
+                        "parent",
+                        (true, &[8; 16], "p"),
+                        11
+                    )
+                    .is_none());
+                broker.result("target", "mac", b"request", "helper", 12)
+            }
+            .unwrap();
+            assert_eq!(verified.parent, parent);
+            assert_eq!(verified.helper_run, [8; 16]);
+        }
+        for (at, project, claimed_parent) in [
+            (11, "wrong", "parent"),
+            (9, "p", "parent"),
+            (11, "p", "other"),
+        ] {
+            let mut broker = HelperBroker::default();
+            broker
+                .carry(
+                    "mac",
+                    "parent",
+                    "target",
+                    b"request",
+                    (root(), Some(parent.clone())),
+                    10,
+                )
+                .unwrap();
+            assert!(broker
+                .agent_started(
+                    "target",
+                    "helper",
+                    "mac",
+                    claimed_parent,
+                    (true, &[8; 16], project),
+                    at
+                )
+                .is_none());
+            assert!(broker
+                .result("target", "mac", b"request", "helper", 12)
+                .is_none());
+        }
+    }
+
+    #[test]
     fn a_chain_is_the_hubs_record_never_the_askers_word() {
         let mut b = HelperBroker::default();
         // A person-started agent on mac is its own root.
         assert_eq!(b.chain_of("mac", "agent-3", b"run-1"), root());
-        b.carry("mac", "agent-3", "blackview", b"s1", root(), 0)
+        b.carry("mac", "agent-3", "blackview", b"s1", (root(), None), 0)
             .unwrap();
         b.first_answer("mac");
         // The result alone records nothing; the helper's own start confirms it.
         b.result("blackview", "mac", b"s1", "agent-7", 1);
         assert_eq!(b.chain_of("blackview", "agent-7", b"r").depth, 0);
-        b.agent_started("blackview", "agent-7", "mac", "agent-3", true, 2);
+        b.agent_started("blackview", "agent-7", "mac", "agent-3", (true, &[], ""), 2);
         let helper = b.chain_of("blackview", "agent-7", b"anything");
         assert_eq!(
             (
@@ -289,13 +406,14 @@ mod tests {
         );
         assert_eq!(helper.root_run, b"run-1".to_vec());
         // The other order: its `AgentStarted` first, then the result.
-        b.carry("mac", "agent-3", "win", b"s2", root(), 3).unwrap();
-        b.agent_started("win", "agent-2", "mac", "agent-3", true, 4);
+        b.carry("mac", "agent-3", "win", b"s2", (root(), None), 3)
+            .unwrap();
+        b.agent_started("win", "agent-2", "mac", "agent-3", (true, &[], ""), 4);
         b.result("win", "mac", b"s2", "agent-2", 5);
         assert_eq!(b.chain_of("win", "agent-2", b"r").depth, 1);
         // A result for a start the hub did not carry records nothing.
         b.result("win", "mac", b"s9", "agent-1", 6);
-        b.agent_started("win", "agent-1", "mac", "agent-3", true, 6);
+        b.agent_started("win", "agent-1", "mac", "agent-3", (true, &[], ""), 6);
         assert_eq!(b.chain_of("win", "agent-1", b"r").depth, 0);
     }
 
@@ -304,7 +422,8 @@ mod tests {
     #[test]
     fn a_target_cannot_aim_a_result_elsewhere_or_launder_its_own_agents() {
         let mut b = HelperBroker::default();
-        b.carry("mac", "agent-3", "t", b"s1", root(), 0).unwrap();
+        b.carry("mac", "agent-3", "t", b"s1", (root(), None), 0)
+            .unwrap();
         assert!(b.awaits("t", "mac", b"s1"));
         assert!(
             !b.awaits("t", "win", b"s1"),
@@ -312,19 +431,22 @@ mod tests {
         );
         // An agent the hub already knew (not new) is not taken into the chain.
         b.result("t", "mac", b"s1", "agent-old", 1);
-        b.agent_started("t", "agent-old", "mac", "agent-3", false, 2);
+        b.agent_started("t", "agent-old", "mac", "agent-3", (false, &[], ""), 2);
         assert_eq!(b.chain_of("t", "agent-old", b"r").depth, 0);
         // One whose own start names another parent neither.
-        b.carry("mac", "agent-3", "t", b"s2", root(), 3).unwrap();
+        b.carry("mac", "agent-3", "t", b"s2", (root(), None), 3)
+            .unwrap();
         b.result("t", "mac", b"s2", "agent-9", 4);
-        b.agent_started("t", "agent-9", "mac", "agent-4", true, 5);
+        b.agent_started("t", "agent-9", "mac", "agent-4", (true, &[], ""), 5);
         assert_eq!(b.chain_of("t", "agent-9", b"r").depth, 0);
-        b.carry("mac", "agent-3", "t", b"s3", root(), 6).unwrap();
+        b.carry("mac", "agent-3", "t", b"s3", (root(), None), 6)
+            .unwrap();
         b.result("t", "mac", b"s3", "agent-10", 7);
-        b.agent_started("t", "agent-10", "win", "agent-3", true, 8);
+        b.agent_started("t", "agent-10", "win", "agent-3", (true, &[], ""), 8);
         assert_eq!(b.chain_of("t", "agent-10", b"r").depth, 0);
         // A start that never reached its target leaves nothing waiting.
-        b.carry("mac", "agent-3", "gone", b"s4", root(), 9).unwrap();
+        b.carry("mac", "agent-3", "gone", b"s4", (root(), None), 9)
+            .unwrap();
         b.abandon("mac", "gone", b"s4");
         assert!(!b.awaits("gone", "mac", b"s4"));
     }
@@ -333,26 +455,30 @@ mod tests {
     fn each_asking_machine_has_its_rate_and_its_open_starts() {
         let mut b = HelperBroker::default();
         for i in 0..OPEN_STARTS {
-            b.carry("mac", "a", "t", &[i as u8], root(), 0).unwrap();
+            b.carry("mac", "a", "t", &[i as u8], (root(), None), 0)
+                .unwrap();
         }
         assert_eq!(
-            b.carry("mac", "a", "t", b"x", root(), 0),
+            b.carry("mac", "a", "t", b"x", (root(), None), 0),
             Err(Refusal::Open)
         );
         // Another machine is counted apart.
-        assert!(b.carry("win", "a", "t", b"x", root(), 0).is_ok());
+        assert!(b.carry("win", "a", "t", b"x", (root(), None), 0).is_ok());
         for _ in 0..OPEN_STARTS {
             b.first_answer("mac");
         }
         for i in OPEN_STARTS..STARTS_PER_MINUTE {
-            b.carry("mac", "a", "t", &[i as u8], root(), 1).unwrap();
+            b.carry("mac", "a", "t", &[i as u8], (root(), None), 1)
+                .unwrap();
             b.first_answer("mac");
         }
         assert_eq!(
-            b.carry("mac", "a", "t", b"y", root(), 2),
+            b.carry("mac", "a", "t", b"y", (root(), None), 2),
             Err(Refusal::Rate)
         );
         // A minute later the rate allows again.
-        assert!(b.carry("mac", "a", "t", b"y", root(), 60_001).is_ok());
+        assert!(b
+            .carry("mac", "a", "t", b"y", (root(), None), 60_001)
+            .is_ok());
     }
 }

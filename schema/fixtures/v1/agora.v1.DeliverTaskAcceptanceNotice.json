@@ -1,0 +1,10 @@
+{
+  "deliveryId": "AQID",
+  "agentId": "x",
+  "receiverRunId": "AQID",
+  "projectId": "x",
+  "taskId": "x",
+  "reportRevision": "1",
+  "acceptedAtMs": "1",
+  "validUntilMs": "1"
+}

@@ -78,7 +78,7 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
     // ADR-0049: a viewer's commands stop here, before any node hears of them. (The node still decides what its devices may do.)
     let may = req.command.as_ref().is_some_and(|c| {
         // ADR-0109: only the hub can issue a durable handoff delivery.
-        !matches!(c, C::DeliverTaskHandoff(_))
+        !matches!(c, C::DeliverTaskHandoff(_) | C::DeliverTaskAcceptanceNotice(_))
             && (!matches!(
                 c,
                 C::AcknowledgeTaskHandoff(_) | C::TaskReviewRead(_) | C::TaskReviewDecide(_)

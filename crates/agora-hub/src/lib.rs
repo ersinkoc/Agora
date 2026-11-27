@@ -50,6 +50,7 @@ pub mod ssh;
 pub mod ssh_install;
 pub mod sshsig;
 pub mod store;
+mod task_notice;
 pub mod theme_catalog;
 pub mod tls;
 pub mod transport;
