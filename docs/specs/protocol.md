@@ -1632,7 +1632,11 @@ four requests below with `protocol.capability_missing` (`capability = mesh.spawn
   `origin_agent`, root, kind, folder, the flags, `max_running`, `running`, `starts_this_hour`, `until_ms`), apart from `grants`, so a
   window from before it never reads one as a used-up local grant; `GrantRevoke` with its id ends it.
 - **Error code**: `mesh.remote_helpers_off` (no parameters): a hub with members carries these starts only when its owner turned
-  `remote_helpers` on.
+  `remote_helpers` on (`agora hub remote-helpers on|off|status`; a solo hub carries them without it).
+- **The hub** carries the four requests only between machines that both agreed on `mesh.spawn.remote`; it writes `origin` (every
+  request), the chain's `depth` and root (a start, from its own record of the starts it carried) and `from_node` (a result), forwards a
+  `HelperStartResult` only for a start it carried to that machine, and limits each asking machine to 12 starts a minute and 8 waiting
+  for their first answer (`mesh.rate_limited`). `HelperFollow` and `HelperRelease` name their target in the envelope's `target_node`.
 
 ## Durable cross-node task handoffs (ADR-0109)
 

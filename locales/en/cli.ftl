@@ -26,6 +26,7 @@ cli-usage =
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
       agora hub fleet on|off|status [--hub-dir DIR]
+      agora hub remote-helpers on|off|status [--hub-dir DIR]
       agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
@@ -333,6 +334,9 @@ cli-hub-fleet-solo-on = Agents see every machine and agent of this hub: nobody b
 cli-hub-fleet-user-warning = `agora hub fleet` is on for this hub, so this person's agents see every machine and agent, also in projects they have no access to. `agora hub fleet off` turns it off.
 cli-hub-fleet-on = Agents see every machine and agent of this hub, also in projects their person has no access to. `agora hub fleet off` turns it off.
 cli-hub-fleet-off = Agents see only the machines and agents of their own projects, because other people use this hub. `agora hub fleet on` lets them see every machine and agent.
+cli-hub-remote-helpers-solo = Agents may ask other machines of this hub to start helpers: nobody but you uses it. Each start still needs your signed approval on the machine it starts on, or a standing grant you gave there.
+cli-hub-remote-helpers-on = Agents may ask other machines of this hub to start helpers, also when other people use it. Each start still needs a signed approval on the machine it starts on. `agora hub remote-helpers off` turns it off.
+cli-hub-remote-helpers-off = Agents cannot ask other machines to start helpers, because other people use this hub. `agora hub remote-helpers on` allows it.
 cli-hub-plugin-added = Installed { $name } { $version } ({ $id }) for this hub. It asks to see: { $capabilities }. Each person chooses in the window whether to show it and what it may see.
 cli-hub-plugin-replaced = Installed { $name } { $version } ({ $id }) for this hub, in place of { $old }. It asks to see: { $capabilities }. Anyone who allowed the old version is asked again in the window if this one asks to see more.
 cli-hub-plugin-line = { $id } { $version }  { $name }  asks to see: { $capabilities }  (installed { $installed })

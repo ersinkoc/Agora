@@ -79,6 +79,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     // ADR-0112: answers `BoardCall{tool: "fleet_status"}` (every machine and running agent, for agents), on a solo hub or when the
     // owner turned it on (`agora hub fleet on`). A node offers it unless its policy says `mesh.fleet = false`.
     agora_protocol::handshake::FLEET_STATUS_V1,
+    // ADR-0119: the hub carries helper starts between machines that both agreed on it (a node offers it once its side is built).
+    agora_protocol::handshake::MESH_SPAWN_REMOTE,
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.
@@ -706,6 +708,54 @@ fn commit_password(say: &Say, store: &SqliteStore, hashed: Option<&str>) -> Exit
             ExitCode::from(1)
         }
     }
+}
+
+/// `agora hub remote-helpers on|off|status` (ADR-0119): whether agents may start helpers on other machines of a hub that has people
+/// besides the owner. A hub with no people but the owner carries them; the switch is read on every start, so a running hub follows it.
+pub fn hub_remote_helpers(say: &Say, o: &Opts) -> ExitCode {
+    let op = match o.positional.as_slice() {
+        [op] if matches!(op.as_str(), "on" | "off" | "status") => op.as_str(),
+        _ => {
+            say.err(key!("cli-bad-arguments"), &[]);
+            return ExitCode::from(2);
+        }
+    };
+    let fail = |e: String| {
+        say.err(key!("cli-hub-failed"), &[("reason", e.into())]);
+        ExitCode::from(1)
+    };
+    let dir = hub_dir(o);
+    if private_hub_dir(&dir).is_err() {
+        return fail(dir.display().to_string());
+    }
+    let store = match SqliteStore::open(&dir.join("hub.db")) {
+        Ok(s) => s,
+        Err(e) => return fail(e.to_string()),
+    };
+    if op == "on" || op == "off" {
+        if let Err(e) =
+            agora_hub::users::set_remote_helpers_switch(&store, op == "on", server::now_ms())
+        {
+            return fail(format!("{e:?}"));
+        }
+    }
+    let solo = match agora_hub::users::Users::new(&store).any() {
+        Ok(any) => !any,
+        Err(e) => return fail(format!("{e:?}")),
+    };
+    let on = match agora_hub::users::remote_helpers_switch(&store) {
+        Ok(on) => on,
+        Err(e) => return fail(format!("{e:?}")),
+    };
+    say.out(
+        match (solo, on) {
+            (true, _) => key!("cli-hub-remote-helpers-solo"),
+            (false, true) => key!("cli-hub-remote-helpers-on"),
+            (false, false) => key!("cli-hub-remote-helpers-off"),
+        },
+        &[],
+    );
+    ExitCode::SUCCESS
 }
 
 /// `agora hub fleet on|off|status` (ADR-0112): whether agents see every machine and agent of a hub that has people besides the owner.

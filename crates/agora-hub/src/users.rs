@@ -405,6 +405,48 @@ pub fn fleet_allowed(store: &SqliteStore) -> bool {
     }
 }
 
+/// ADR-0119 decision 2: the hub setting with which the owner lets agents start helpers on other machines of a hub that has people
+/// besides the owner (`agora hub remote-helpers on|off`). Off when missing. A solo hub carries such starts without it.
+pub const REMOTE_HELPERS_SETTING: &str = "remote_helpers";
+
+/// Whether the owner turned cross-machine helper starts on ([`REMOTE_HELPERS_SETTING`]).
+pub fn remote_helpers_switch(store: &SqliteStore) -> Result<bool, StoreError> {
+    use crate::store::EventStore;
+    Ok(store.setting(REMOTE_HELPERS_SETTING)?.as_deref() == Some(FLEET_ON))
+}
+
+/// Turns cross-machine helper starts on or off for a hub with people besides the owner, and records it as the owner's.
+pub fn set_remote_helpers_switch(
+    store: &SqliteStore,
+    on: bool,
+    now_ms: u64,
+) -> Result<(), StoreError> {
+    use crate::store::EventStore;
+    store.set_setting(REMOTE_HELPERS_SETTING, if on { FLEET_ON } else { b"off" })?;
+    let _ = crate::audit::Audit::new(store).record(
+        now_ms,
+        "owner",
+        if on {
+            "remote_helpers_on"
+        } else {
+            "remote_helpers_off"
+        },
+        "cli",
+        "ok",
+    );
+    Ok(())
+}
+
+/// ADR-0119: whether this hub carries helper starts between machines: in solo mode, or when the owner turned
+/// [`REMOTE_HELPERS_SETTING`] on. A store that cannot be read refuses.
+pub fn remote_helpers_allowed(store: &SqliteStore) -> bool {
+    match Users::new(store).any() {
+        Ok(false) => true,
+        Ok(true) => remote_helpers_switch(store).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// What a viewer may still do: everything that only reads. The command names are the schema's, so a new command is refused to
 /// viewers until it is listed here. Answered before this check, for every person: the device commands (ADR-0061) and the plugin
 /// commands (ADR-0114, `server::plugin_command`), so a viewer may also set and remove their own plugin grants. Those are the hub's
@@ -437,6 +479,19 @@ pub fn viewer_may(command: &agora_protocol::v1::command_request::Command) -> boo
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0119: a solo hub carries helper starts between machines; a team hub only once its owner turned them on.
+    #[test]
+    fn a_team_hub_carries_remote_helper_starts_only_with_its_owners_switch() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        assert!(remote_helpers_allowed(&store));
+        Users::new(&store).add("Ayşe", Role::Member, 1).unwrap();
+        assert!(!remote_helpers_allowed(&store));
+        set_remote_helpers_switch(&store, true, 2).unwrap();
+        assert!(remote_helpers_allowed(&store));
+        set_remote_helpers_switch(&store, false, 3).unwrap();
+        assert!(!remote_helpers_allowed(&store));
+    }
 
     /// ADR-0112, F3 of the #1205 review: a person whose role this build cannot read still makes the hub a team hub.
     #[test]

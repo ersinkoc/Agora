@@ -139,6 +139,8 @@ pub struct Hub {
     router: std::sync::Arc<crate::router::Router>,
     /// ADR-0108: the forgets owed to each node, kept in the store.
     forgets: Arc<crate::forgets::Forgets>,
+    /// ADR-0119: the cross-machine helper starts this hub carries (chains, pending starts, per-machine limits), in memory only.
+    helpers: std::sync::Mutex<crate::helpers::HelperBroker>,
     inner: Mutex<Inner>,
 }
 
@@ -242,6 +244,7 @@ impl Hub {
             pairing: crate::pairing_net::Shared::new(),
             prices: std::sync::RwLock::new((crate::usage::Catalog::bundled(), 0)),
             forgets: Arc::new(crate::forgets::Forgets::new(Arc::clone(&store))),
+            helpers: std::sync::Mutex::new(crate::helpers::HelperBroker::default()),
             store,
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             recording_later: std::sync::atomic::AtomicBool::new(false),
@@ -366,6 +369,11 @@ impl Hub {
     }
 
     /// Where connected nodes wait for commands (ADR-0029).
+    /// ADR-0119: the cross-machine helper starts this hub carries.
+    pub fn helpers(&self) -> std::sync::MutexGuard<'_, crate::helpers::HelperBroker> {
+        self.helpers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn router(&self) -> &std::sync::Arc<crate::router::Router> {
         &self.router
     }

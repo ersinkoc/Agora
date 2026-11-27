@@ -626,8 +626,8 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         // A machine that does not run the hub (no hub folder) gets that said, not the database error these commands would hit.
         // The commands that create the hub folder themselves (`code`, `login`, `user`, `prices`, `ssh`, `notify`, `backup`,
         // `restore`) are not listed.
-        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "themes" | "plugin"
-        | "plugins"]
+        ["hub", "fingerprint" | "audit" | "devices" | "machines" | "fleet" | "remote-helpers"
+        | "themes" | "plugin" | "plugins"]
             if !hubcli::hub_dir(opts).is_dir() =>
         {
             Box::new(hubcli::not_here)
@@ -637,6 +637,7 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         ["hub", "login"] => Box::new(hubcli::hub_login),
         ["hub", "user"] => Box::new(hubcli::hub_user),
         ["hub", "fleet"] => Box::new(hubcli::hub_fleet),
+        ["hub", "remote-helpers"] => Box::new(hubcli::hub_remote_helpers),
         ["hub", "plugin"] => Box::new(hubcli::hub_plugin),
         ["hub", "metrics-token"] => Box::new(hubcli::hub_metrics_token),
         ["hub", "audit"] => Box::new(hubcli::hub_audit),

@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod enroll;
 pub mod forgets;
 mod handoff;
+pub mod helpers;
 pub mod hub;
 pub mod leaf;
 pub mod metrics;

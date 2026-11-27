@@ -4591,3 +4591,178 @@ async fn members_and_viewers_read_the_theme_catalog_only_once_the_owner_turned_i
         "{rows:?}"
     );
 }
+
+/// ADR-0119 step 3: a hub whose nodes agreed on `mesh.spawn.remote`.
+fn helpers_state() -> Arc<ServerState> {
+    Arc::new(ServerState {
+        hub: Arc::new(Hub::open(SqliteStore::open_in_memory().unwrap()).unwrap()),
+        support: Support {
+            generations: vec![1],
+            capabilities: vec![agora_protocol::handshake::MESH_SPAWN_REMOTE.into()],
+            required: vec![],
+        },
+        ca: None,
+        lockout: Arc::new(Lockout::new()),
+        auth: Box::new(Tokens),
+        assets: None,
+        sessions: None,
+    })
+}
+
+async fn helper_node(st: &Arc<ServerState>, name: &'static str) -> Conn<TcpStream> {
+    let (mut c, t) = node_conn(st, name).await;
+    std::mem::forget(t);
+    handshake_offering(&mut c, &[agora_protocol::handshake::MESH_SPAWN_REMOTE]).await;
+    c.send(&f(
+        STREAM_EVENTS,
+        kinds::EVENT,
+        event(name, 1, online(name)),
+    ))
+    .await
+    .unwrap();
+    next_ack(&mut c).await;
+    c
+}
+
+fn helper_start(id: &str, target: &str, claimed_origin: &str) -> Frame {
+    let req = v1::CommandRequest {
+        request_id: id.into(),
+        command: Some(command_request::Command::HelperStart(v1::HelperStart {
+            start_id: vec![7; 16],
+            target_node: target.into(),
+            kind: "codex".into(),
+            folder: "/w".into(),
+            from_agent: "agent-3".into(),
+            from_run_id: vec![1; 16],
+            origin: claimed_origin.into(),
+            // A node's claim of a deep place in someone's chain: the hub writes its own record instead.
+            depth: 2,
+            root_node: "n9".into(),
+            root_agent: "agent-99".into(),
+            root_run_id: vec![9; 16],
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    f(STREAM_COMMANDS, 0, req.encode_to_vec())
+}
+
+/// ADR-0119 decision 2: the hub carries a start to its target with the origin and the chain it vouches for (never the node's word),
+/// relays the first answer, carries the result back only for a start it carried, and the helper's own starts then sit one level
+/// deeper in the asker's chain.
+#[tokio::test]
+async fn a_helper_start_is_carried_with_the_origin_and_chain_the_hub_vouches_for() {
+    let st = helpers_state();
+    let mut n1 = helper_node(&st, "n1").await;
+    let mut n2 = helper_node(&st, "n2").await;
+    n1.send(&helper_start("s1", "n2", "n9")).await.unwrap();
+    let got = command_to_node(&mut n2, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let Some(command_request::Command::HelperStart(h)) = got.command else {
+        panic!("not a helper start");
+    };
+    assert_eq!(
+        (
+            h.origin.as_str(),
+            h.depth,
+            h.root_node.as_str(),
+            h.root_agent.as_str(),
+            h.root_run_id.clone()
+        ),
+        ("n1", 0, "n1", "agent-3", vec![1; 16])
+    );
+    let accepted = v1::CommandResponse {
+        request_id: got.request_id,
+        result: Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::HelperStartAccepted(
+                v1::HelperStartAccepted {
+                    approval_id: "ap-1".into(),
+                    ttl_ms: 600_000,
+                    ..Default::default()
+                },
+            )),
+        })),
+    };
+    n2.send(&f(STREAM_COMMANDS, 1, accepted.encode_to_vec()))
+        .await
+        .unwrap();
+    let r = response(&mut n1).await;
+    assert_eq!(r.request_id, "s1");
+    assert!(matches!(
+        r.result,
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::HelperStartAccepted(_))
+        }))
+    ));
+    // The result: from n2 to n1, `from_node` written by the hub; a result for a start never carried is dropped.
+    let result = |id: &str, start: u8| {
+        let req = v1::CommandRequest {
+            request_id: id.into(),
+            command: Some(command_request::Command::HelperStartResult(
+                v1::HelperStartResult {
+                    start_id: vec![start; 16],
+                    to_node: "n1".into(),
+                    agent_id: "agent-7".into(),
+                    from_node: "forged".into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        f(STREAM_COMMANDS, 0, req.encode_to_vec())
+    };
+    n2.send(&result("r0", 3)).await.unwrap();
+    assert!(matches!(
+        response(&mut n2).await.result,
+        Some(command_response::Result::Ok(_))
+    ));
+    assert!(command_to_node(&mut n1, Duration::from_millis(300))
+        .await
+        .is_none());
+    n2.send(&result("r1", 7)).await.unwrap();
+    let carried = command_to_node(&mut n1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let Some(command_request::Command::HelperStartResult(res)) = carried.command else {
+        panic!("not a result");
+    };
+    assert_eq!(
+        (res.from_node.as_str(), res.agent_id.as_str()),
+        ("n2", "agent-7")
+    );
+    // The helper on n2 asks in turn: one level deeper in n1's chain.
+    let mut deeper = helper_start("s2", "n1", "");
+    if let Ok(mut req) = v1::CommandRequest::decode(deeper.payload.as_slice()) {
+        if let Some(command_request::Command::HelperStart(h)) = &mut req.command {
+            h.from_agent = "agent-7".into();
+            h.start_id = vec![8; 16];
+        }
+        deeper = f(STREAM_COMMANDS, 0, req.encode_to_vec());
+    }
+    n2.send(&deeper).await.unwrap();
+    let got = command_to_node(&mut n1, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let Some(command_request::Command::HelperStart(h)) = got.command else {
+        panic!("not a helper start");
+    };
+    assert_eq!(
+        (
+            h.origin.as_str(),
+            h.depth,
+            h.root_node.as_str(),
+            h.root_agent.as_str()
+        ),
+        ("n2", 1, "n1", "agent-3")
+    );
+    // Refusals: itself and an unknown machine.
+    for (id, target, code) in [
+        ("s3", "n1", "protocol.invalid_message"),
+        ("s4", "nowhere", "node.unknown"),
+    ] {
+        n1.send(&helper_start(id, target, "")).await.unwrap();
+        let r = response(&mut n1).await;
+        assert_eq!((r.request_id.as_str(), err_code(&r)), (id, code));
+    }
+}

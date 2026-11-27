@@ -318,7 +318,15 @@ New threat-model rows (numbers are the next free ones when built):
    answered at once (`mesh.too_many_asks`); a chain grant matches only a non-empty hub-written root node and run. Grants live in
    memory, so a node restart ends them all (they narrow, never widen), and one rooted in a run ends early only through a release from
    the root's own machine: a machine that dies silently leaves its grants until their end (at most 24 hours).
-3. The hub: not started.
+3. The hub: built (`crates/agora-hub/src/helpers.rs`, `server.rs` `helper_for_node`). It carries the four requests only between
+   machines that both agreed on `mesh.spawn.remote` (it lists the capability; a node offers it once step 4 is built), on a solo hub or
+   with the owner's `agora hub remote-helpers on` (else `mesh.remote_helpers_off`). It writes `origin` on every request, the chain's
+   `depth` and root on a start from its own record of the starts it carried (an asker it carried none for is depth 0 and its own
+   root), and `from_node` on a result; it forwards a result only for a start it carried to that machine (anything else is dropped and
+   audited) and records the new helper one level deeper in the asker's chain. Per asking machine: 12 starts a minute and 8 waiting
+   for their first answer (`mesh.rate_limited`), within the node's 64 open forwards. Audit rows `agent.start.remote.asked`,
+   `agent.start.remote.result` and `agent.start.remote.released`. The record is in memory: after a hub restart every asker is its own
+   root (chain grants stop applying). Tests: `crates/agora-hub/tests/server.rs`, `helpers.rs` and `users.rs`.
 4. The asking node: not started.
 5. The window and the terminal client: not started.
 

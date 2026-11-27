@@ -1701,17 +1701,14 @@ fn post_for_node(
         Some(command_request::Command::BoardCall(call)) => {
             return board_for_node(hub, node_id, &rid, &call, open, answers);
         }
-        // ADR-0119: the cross-machine helper requests are in the schema, but this hub does not carry them yet (build step 3).
+        // ADR-0119: a helper started on another machine, its result, following it and releasing it.
         Some(
             command_request::Command::HelperStart(_)
             | command_request::Command::HelperStartResult(_)
             | command_request::Command::HelperFollow(_)
             | command_request::Command::HelperRelease(_),
         ) => {
-            return refuse(
-                Error::new(ErrorCode::ProtocolCapabilityMissing)
-                    .with("capability", agora_protocol::handshake::MESH_SPAWN_REMOTE),
-            );
+            return helper_for_node(hub, node_id, req, open, answers);
         }
         _ => {
             return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
@@ -1769,6 +1766,179 @@ fn post_for_node(
                 &Error::new(ErrorCode::NodeTimeout).with("node_id", target.as_str()),
             ),
         };
+        open.fetch_sub(1, Ordering::Relaxed);
+        let _ = answers.send(resp);
+    });
+}
+
+/// ADR-0119 decision 2: carries a node's helper request to another machine and its answer back. The hub writes what it vouches for,
+/// whatever the node sent: `origin` on every request, the chain's depth and root on a start (from its own record of the starts it
+/// carried), `from_node` on a result. It approves nothing and widens nothing: the target decides from its own policy.
+fn helper_for_node(
+    hub: &Arc<Hub>,
+    node_id: &str,
+    req: v1::CommandRequest,
+    open: &Arc<std::sync::atomic::AtomicUsize>,
+    answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+) {
+    use agora_protocol::handshake::MESH_SPAWN_REMOTE;
+    use std::sync::atomic::Ordering;
+    let rid = req.request_id.clone();
+    let refuse = |e: Error| {
+        let _ = answers.send(error_response(&rid, &e));
+    };
+    let missing =
+        || Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", MESH_SPAWN_REMOTE);
+    let agreed = hub.router().nodes_with(MESH_SPAWN_REMOTE);
+    if !agreed.iter().any(|n| n == node_id) {
+        return refuse(missing());
+    }
+    if !crate::users::remote_helpers_allowed(hub.store()) {
+        return refuse(Error::new(ErrorCode::MeshRemoteHelpersOff));
+    }
+    let audit = |action: &str, target: &str, outcome: &str| {
+        let _ = crate::audit::Audit::new(hub.store()).record(
+            now_ms(),
+            node_id,
+            action,
+            target,
+            outcome,
+        );
+    };
+    let mut start_of: Option<Vec<u8>> = None;
+    let (target, command) = match req.command {
+        Some(command_request::Command::HelperStart(mut h)) => {
+            let target = h.target_node.clone();
+            if target.is_empty() || target == node_id {
+                return refuse(
+                    Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"),
+                );
+            }
+            h.origin = node_id.to_string();
+            let chain = hub
+                .helpers()
+                .chain_of(node_id, &h.from_agent, &h.from_run_id);
+            h.depth = chain.depth;
+            h.root_node.clone_from(&chain.root_node);
+            h.root_agent.clone_from(&chain.root_agent);
+            h.root_run_id.clone_from(&chain.root_run);
+            if let Err(_refused) =
+                hub.helpers()
+                    .carry(node_id, &target, &h.start_id, chain, now_ms())
+            {
+                audit("agent.start.remote.asked", &target, "rate_limited");
+                return refuse(Error::new(ErrorCode::MeshRateLimited));
+            }
+            audit("agent.start.remote.asked", &target, "carried");
+            start_of = Some(h.start_id.clone());
+            (target, command_request::Command::HelperStart(h))
+        }
+        Some(command_request::Command::HelperStartResult(mut r)) => {
+            r.from_node = node_id.to_string();
+            // Only the result of a start this hub carried to this machine goes on; anything else is dropped (and audited).
+            if !hub.helpers().awaits(node_id, &r.start_id) {
+                audit("agent.start.remote.result", &r.to_node, "dropped");
+                let _ = answers.send(v1::CommandResponse {
+                    request_id: rid.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::Empty(v1::Empty {})),
+                    })),
+                });
+                return;
+            }
+            hub.helpers().result(node_id, &r.start_id, &r.agent_id);
+            audit(
+                "agent.start.remote.result",
+                &r.to_node,
+                if r.error.is_some() {
+                    "refused"
+                } else {
+                    "started"
+                },
+            );
+            (
+                r.to_node.clone(),
+                command_request::Command::HelperStartResult(r),
+            )
+        }
+        Some(command_request::Command::HelperFollow(mut f)) => {
+            f.origin = node_id.to_string();
+            (
+                req.target_node.clone(),
+                command_request::Command::HelperFollow(f),
+            )
+        }
+        Some(command_request::Command::HelperRelease(mut r)) => {
+            r.origin = node_id.to_string();
+            audit("agent.start.remote.released", &req.target_node, "carried");
+            (
+                req.target_node.clone(),
+                command_request::Command::HelperRelease(r),
+            )
+        }
+        _ => return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
+    };
+    let first_answer = |hub: &Hub| {
+        if start_of.is_some() {
+            hub.helpers().first_answer(node_id);
+        }
+    };
+    if target.is_empty() || target == node_id {
+        first_answer(hub);
+        return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "target_node"));
+    }
+    if !hub.node_known(&target) {
+        first_answer(hub);
+        return refuse(Error::new(ErrorCode::NodeUnknown).with("node_id", target.as_str()));
+    }
+    if !agreed.contains(&target) {
+        first_answer(hub);
+        return refuse(missing());
+    }
+    if open.load(Ordering::Relaxed) >= MAX_NODE_POSTS {
+        first_answer(hub);
+        return refuse(
+            Error::new(ErrorCode::NodeResourceLimit)
+                .with("resource", "requests")
+                .with("limit", MAX_NODE_POSTS as i64),
+        );
+    }
+    let forwarded = v1::CommandRequest {
+        request_id: String::new(),
+        idempotency_key: String::new(),
+        target_node: String::new(),
+        command: Some(command),
+    };
+    let reply = match hub.router().send(&target, forwarded) {
+        Ok(r) => r,
+        Err(e) => {
+            first_answer(hub);
+            return refuse(e);
+        }
+    };
+    open.fetch_add(1, Ordering::Relaxed);
+    let open = Arc::clone(open);
+    let hub = Arc::clone(hub);
+    let asker = node_id.to_string();
+    let carried_start = start_of.is_some();
+    tokio::spawn(async move {
+        let resp = match tokio::time::timeout(COMMAND_DEADLINE, reply).await {
+            Ok(Ok(mut r)) => {
+                r.request_id.clone_from(&rid);
+                r
+            }
+            Ok(Err(_)) => error_response(
+                &rid,
+                &Error::new(ErrorCode::NodeOffline).with("node_id", target.as_str()),
+            ),
+            Err(_) => error_response(
+                &rid,
+                &Error::new(ErrorCode::NodeTimeout).with("node_id", target.as_str()),
+            ),
+        };
+        if carried_start {
+            hub.helpers().first_answer(&asker);
+        }
         open.fetch_sub(1, Ordering::Relaxed);
         let _ = answers.send(resp);
     });

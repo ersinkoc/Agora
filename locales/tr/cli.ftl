@@ -26,6 +26,7 @@ cli-usage =
       agora hub user add NAME [--role owner|member|viewer] | list | role ID ROLE | remove ID | login ID [--hub-dir DIR]
       agora hub user projects | grant|revoke ID MACHINE/PROJECT | grant|revoke ID MACHINE FOLDER [--hub-dir DIR]
       agora hub fleet on|off|status [--hub-dir DIR]
+      agora hub remote-helpers on|off|status [--hub-dir DIR]
       agora hub plugin add FILE|list|remove ID [--hub-dir DIR]
       agora hub audit export [--since MS] [--who ID] [--hub-dir DIR]
       agora hub metrics-token create NAME [--expires DAYS] | list | revoke NAME [--hub-dir DIR]
@@ -321,6 +322,9 @@ cli-hub-fleet-solo-on = Ajanlar bu hub'ın her makinesini ve ajanını görür: 
 cli-hub-fleet-user-warning = Bu hub'da `agora hub fleet` açık, bu yüzden bu kişinin ajanları her makineyi ve ajanı görür; erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
 cli-hub-fleet-on = Ajanlar bu hub'ın her makinesini ve ajanını görür; kişilerinin erişimi olmayan projelerdekileri de. `agora hub fleet off` bunu kapatır.
 cli-hub-fleet-off = Bu hub'ı başka kişiler de kullandığı için ajanlar yalnızca kendi projelerinin makinelerini ve ajanlarını görür. `agora hub fleet on` her makineyi ve ajanı görmelerini sağlar.
+cli-hub-remote-helpers-solo = Ajanlar bu hub'ın diğer makinelerinden yardımcı başlatmalarını isteyebilir: hub'ı sizden başka kimse kullanmıyor. Her başlatma yine de başlayacağı makinede imzalı onayınızı ya da orada verdiğiniz kalıcı izni gerektirir.
+cli-hub-remote-helpers-on = Ajanlar bu hub'ın diğer makinelerinden, başka kişiler de kullansa, yardımcı başlatmalarını isteyebilir. Her başlatma yine de başlayacağı makinede imzalı onay gerektirir. `agora hub remote-helpers off` bunu kapatır.
+cli-hub-remote-helpers-off = Bu hub'ı başka kişiler de kullandığı için ajanlar başka makinelerden yardımcı başlatmalarını isteyemez. `agora hub remote-helpers on` buna izin verir.
 cli-hub-plugin-added = { $name } { $version } ({ $id }) bu hub için kuruldu. Görmek istedikleri: { $capabilities }. Her kişi pencerede onu gösterip göstermeyeceğini ve neyi görebileceğini kendisi seçer.
 cli-hub-plugin-replaced = { $name } { $version } ({ $id }), { $old } sürümünün yerine bu hub için kuruldu. Görmek istedikleri: { $capabilities }. Eski sürüme izin veren herkese, bu sürüm daha fazlasını görmek isterse pencerede yeniden sorulur.
 cli-hub-plugin-line = { $id } { $version }  { $name }  görmek istedikleri: { $capabilities }  (kuruldu: { $installed })
