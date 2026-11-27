@@ -83,6 +83,18 @@ pub trait SessionApi: Send + Sync {
     fn metrics_on(&self) -> bool {
         false
     }
+
+    /// `POST /api/preview/enter` (ADR-0088 Amendment A, point 2): `{"node", "forward"}` from the session `bearer`, asked through a
+    /// request whose `Host` header was `host`; `{"port", "ticket"}` for the forward's opener, else a stable code. Hubs without
+    /// previews answer 404.
+    fn preview_enter(
+        &self,
+        _bearer: Option<&str>,
+        _host: &str,
+        _body: &serde_json::Value,
+    ) -> (u16, String) {
+        (404, String::new())
+    }
 }
 
 pub enum SignInReply {
@@ -580,7 +592,11 @@ where
         "/api/password" => Some("password"),
         _ => None,
     };
-    if method == "POST" && (path == "/api/session" || passkey_op.is_some() || account_op.is_some())
+    if method == "POST"
+        && (path == "/api/session"
+            || path == "/api/preview/enter"
+            || passkey_op.is_some()
+            || account_op.is_some())
     {
         let length = match request_content_length(&text) {
             Ok(Some(length)) => length,
@@ -607,7 +623,15 @@ where
         }
         body.truncate(length);
         let json = serde_json::from_slice::<serde_json::Value>(&body).ok();
-        let (status, out) = if let Some(op) = passkey_op.or(account_op) {
+        let (status, out) = if path == "/api/preview/enter" {
+            match (sessions, json) {
+                (Some(api), Some(j)) => {
+                    api.preview_enter(bearer().as_deref(), &header("host").unwrap_or_default(), &j)
+                }
+                (None, _) => (404, String::new()),
+                _ => (400, String::new()),
+            }
+        } else if let Some(op) = passkey_op.or(account_op) {
             match (sessions, json) {
                 (Some(api), Some(j)) if account_op.is_some() => {
                     api.account(op, bearer().as_deref(), &client, &j).await

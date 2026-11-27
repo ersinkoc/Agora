@@ -355,6 +355,8 @@ pub(crate) struct Opts {
     refuse_return: bool,
     /// `agora hub run --metrics`: the hub answers `GET /api/metrics` (owner only).
     metrics: bool,
+    /// ADR-0088 Amendment A: `agora hub run --preview-ports FIRST-LAST`, the ports the hub gives previews (default the 16 after its own).
+    preview_ports: Option<(u16, u16)>,
     /// ADR-0076: `agora hub metrics-token create NAME --expires DAYS`.
     expires: Option<u64>,
     ui: Option<String>,
@@ -423,6 +425,14 @@ fn parse(args: &[String]) -> Option<Opts> {
             "--test" => o.test = true,
             "--yes" => o.yes = true,
             "--metrics" => o.metrics = true,
+            "--preview-ports" => {
+                let (a, b) = it.next()?.split_once('-')?;
+                let (a, b): (u16, u16) = (a.parse().ok()?, b.parse().ok()?);
+                if a == 0 || b < a || b - a >= 256 {
+                    return None;
+                }
+                o.preview_ports = Some((a, b));
+            }
             "--serve" => o.serve = true,
             "--trust-header" => o.trust_header = Some(it.next()?.clone()),
             "--host" => o.hosts.push(it.next()?.clone()),

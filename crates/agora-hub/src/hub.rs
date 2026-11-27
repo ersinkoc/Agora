@@ -171,6 +171,8 @@ pub struct Hub {
     /// #996: whether a task is retrying the presence facts the store refused (at most one per hub).
     pub(crate) recording_later: std::sync::atomic::AtomicBool,
     router: std::sync::Arc<crate::router::Router>,
+    /// ADR-0088 Amendment A: the preview origins (ports, tickets, tokens, relayed connections).
+    previews: std::sync::Arc<crate::preview_net::PreviewNet>,
     /// ADR-0108: the forgets owed to each node, kept in the store.
     forgets: Arc<crate::forgets::Forgets>,
     /// ADR-0119: the cross-machine helper starts this hub carries (chains, pending starts, per-machine limits), in memory only.
@@ -263,6 +265,7 @@ impl Hub {
         let handoffs = crate::handoff::load(&store)?;
         let task_notices = crate::task_notice::load(&store)?;
         let store = Arc::new(store);
+        let router = crate::router::Router::new();
         let hub = Self {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
@@ -283,7 +286,10 @@ impl Hub {
             store,
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             recording_later: std::sync::atomic::AtomicBool::new(false),
-            router: crate::router::Router::new(),
+            previews: std::sync::Arc::new(crate::preview_net::PreviewNet::new(
+                std::sync::Arc::clone(&router),
+            )),
+            router,
             inner: Mutex::new(Inner {
                 view,
                 pos,
@@ -414,6 +420,11 @@ impl Hub {
 
     pub fn router(&self) -> &std::sync::Arc<crate::router::Router> {
         &self.router
+    }
+
+    /// ADR-0088 Amendment A: the preview origins.
+    pub fn previews(&self) -> &std::sync::Arc<crate::preview_net::PreviewNet> {
+        &self.previews
     }
 
     pub fn store(&self) -> &SqliteStore {
@@ -571,6 +582,12 @@ impl Hub {
                 };
                 // Read before the event is folded in: whether an agent is new, and what a decision was about.
                 let audit = spawn_audit(&g.view, &event);
+                // ADR-0088 Amendment A: a forward opened or ended; one that ended takes its port, tokens and connections with it.
+                if let Some(Body::PreviewChanged(c)) = &event.body {
+                    if let Some(f) = &c.forward {
+                        self.previews.changed(&event.producer_id, f);
+                    }
+                }
                 // ADR-0122: a machine that will not give a shared item to its agents says so; kept against that item's version.
                 if let Some(Body::ShareItemRefused(r)) = &event.body {
                     if r.node_id == event.producer_id {

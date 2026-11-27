@@ -329,6 +329,11 @@ pub fn hub_run(say: &Say, o: &Opts) -> ExitCode {
             // `agora pair open` when an address is missing; the listener takes the new one for new connections.
             let leaf = start_leaf(say, &state, &dir, addr.ip(), &o.names)?;
             let acceptor_slot = leaf.slot();
+            // ADR-0088 Amendment A: previews get ports of their own, listened on with the same certificate.
+            state
+                .hub
+                .previews()
+                .configure(addr, acceptor_slot.clone(), o.preview_ports);
             watch_remote_names(&dir, &leaf);
             keep_certificates_fresh(&state, &leaf);
             // The hub can pair once it knows the hash of the certificate machines will see; the switch is closed until the owner

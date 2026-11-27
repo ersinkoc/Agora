@@ -143,7 +143,12 @@ the head parser (bounded, rejects malformed heads, never reads bodies).
    connection), and the node offers `preview.v1`. Measured (release, blackview, 2026-11-27): a command's round trip through the link
    p50 98 us / p95 147 us alone, p50 294 us / p95 459 us while one preview connection carries 749 MB/s, well inside ADR-0022's
    5 ms of Agora overhead for a remote node's keystroke round trip. Forward ids are 128 random bits (review of 6221f9c9). Done.
-3. Hub relay, origin per forward, audit: started (2026-11-27), point 8 decided. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
+3. Hub relay, origin per forward, audit: built (2026-11-27), point 8 decided. `crates/agora-hub/src/preview_gate.rs` (the head
+   gate, the cookie partition, tickets and tokens, the port pool, as plain data), `router.rs` (`connect_preview`: the hub's own
+   `PreviewConnect` on the node's link, written only while no command waits), `preview_net.rs` (the per-forward listeners, the entry,
+   the relay with the node's credit, revocation) and `POST /api/preview/enter` (`signin.rs`); `docs/specs/preview.md` "The hub's
+   part", threat model T78. Left (follow-ups): the audit row's forward and port, point 7's scope with the window (step 4), the hub
+   offering `preview.v1` to windows, and a benchmark under preview load before it is turned on in a release. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
    connect to it through the hub; the per-forward origin follows the accepted open question (a separate hub port where possible,
    otherwise refuse and say why).
 4. Web Browser pane: not started.

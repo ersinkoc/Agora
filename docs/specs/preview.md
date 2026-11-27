@@ -62,11 +62,27 @@ it would hand the window that trust; that is why those ports are refused even fo
   steady terminal flood that queue fills and every bridge waits to send; a waiting bridge notices the hub's close only when the queue
   moves (or the link ends), so its threads and its place under the caps stay held until then.
 
-## The hub's part (not built)
-The hub relays preview streams without parsing them, gives each forward an origin of its own (a per-forward host name, or a separate
-port), binds the forward URL to the signed-in window with a short-lived per-forward token, applies the screen password (ADR-0067), and
-writes audit rows (port, never content). Where no origin of its own is possible it answers `preview.unavailable` (`no_origin`) and
-opens nothing.
+## The hub's part (ADR-0088 Amendment A, `crates/agora-hub/src/preview_gate.rs`, `preview_net.rs`)
+- **Origins.** A pool of the hub's ports (`agora hub run --preview-ports FIRST-LAST`, default the 16 after its own), one per carried
+  forward, bound when its opener first enters and given back when the forward ends; the same certificate as the hub's. The node's
+  probe refuses a forward to one of them (it answers with a hub certificate).
+- **Entry.** `POST /api/preview/enter` with the session's bearer and `{"node", "forward"}` answers `{"port", "ticket"}` to the person
+  whose device opened the forward (its `creator`; a forward opened on the node's control socket has none and is refused), only when
+  the request's `Host` names the hub's own port (else `409 {code: preview.unavailable, reason: no_origin}`: a window behind a proxy or
+  a tunnel cannot reach the other ports). Refusals are `404 preview.unknown`, `403 auth.forbidden {reason: preview}`. The frame loads
+  `https://<hub>:<port>/.agora-preview/enter?t=<ticket>`: a single-use, 60 s ticket for that port becomes the cookie
+  `agora_preview_<port>` (`HttpOnly; Secure; SameSite=Strict; Path=/`) and a `302` to `/` with `Referrer-Policy: no-referrer`.
+  Audit: `preview.enter` (the person, the machine, the outcome).
+- **Each connection carries one request.** Its head (at most 16 KiB, strict HTTP/1.1, one `Content-Length` of digits at most and
+  never beside a `Transfer-Encoding`) needs this port's token; every `agora_preview_*` cookie is removed, only this forward's
+  `p<port>-<tag>_*` cookies go on with the prefix removed, `Host` becomes `localhost:<port>`, and the request asks for
+  `Connection: close` (a WebSocket keeps `Connection: Upgrade`). Answer heads up to the final one are read: each `Set-Cookie` is
+  renamed into the forward's partition, capped at the forward's end and made host-only, and the final answer says `Connection: close`;
+  after it nothing more from the browser is relayed. A `101` the browser did not ask for ends the connection. Bodies are never read.
+- **Revocation.** A forward that ends, a person who signs out and a token past its 8 hours end live connections too (checked at every
+  revocation and every 30 s).
+- **On the node's link** the bytes ride a hub-originated `PreviewConnect` under the node's credit, and the hub writes preview frames
+  only while no command waits for that node.
 
 ## Not decided by the ADR (left open for the next steps)
 - How the per-forward token is minted and presented to the preview origin (an HTTP surface, not a protocol message here).

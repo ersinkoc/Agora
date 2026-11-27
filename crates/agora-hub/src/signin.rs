@@ -442,6 +442,8 @@ impl crate::web::SessionApi for HubSessions {
         };
         match signin.end(bearer) {
             Ok(_) => {
+                // ADR-0088 Amendment A: a person who signs out ends their previews too, live connections included.
+                self.hub.previews().end_user(&access.user);
                 let _ = crate::audit::Audit::new(self.hub.store()).record_in(
                     &access.session,
                     now,
@@ -464,6 +466,66 @@ impl crate::web::SessionApi for HubSessions {
         body: &'a serde_json::Value,
     ) -> crate::web::SessionReply<'a, (u16, String)> {
         Box::pin(self.account_op(op, bearer, client, body))
+    }
+
+    fn preview_enter(
+        &self,
+        bearer: Option<&str>,
+        host: &str,
+        body: &serde_json::Value,
+    ) -> (u16, String) {
+        let now = crate::server::now_ms();
+        // A session is a person who passed the screen password where it applies (ADR-0067): no password is asked again here.
+        let Some(access) = bearer.and_then(|t| self.signin().access(t, now)) else {
+            return (401, String::new());
+        };
+        let field = |k: &str| body.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let (node, forward) = (field("node"), field("forward"));
+        if node.is_empty() || forward.is_empty() || node.len() > 128 || forward.len() > 64 {
+            return (400, String::new());
+        }
+        let store = self.hub.store();
+        let device_user = |device: &str| -> Option<String> {
+            let conn = store.lock().ok()?;
+            conn.query_row(
+                "SELECT user_id FROM user_devices WHERE device_id = ?1 AND revoked_ms = 0",
+                [device],
+                |r| r.get(0),
+            )
+            .ok()
+        };
+        // The row names the person, the machine and the outcome; the forward and its port wait for a column of their own
+        // (docs/backlog/follow-ups.md).
+        let audit = |outcome: &str| {
+            let _ = crate::audit::Audit::new(store).record_in(
+                &access.session,
+                now,
+                &access.user,
+                "preview.enter",
+                node,
+                outcome,
+            );
+        };
+        match self
+            .hub
+            .previews()
+            .enter(&access.user, device_user, node, forward, host)
+        {
+            Ok((port, ticket)) => {
+                audit("ok");
+                (
+                    200,
+                    serde_json::json!({ "port": port, "ticket": ticket }).to_string(),
+                )
+            }
+            Err(r) => {
+                audit(r.code);
+                (
+                    r.status,
+                    serde_json::json!({ "code": r.code, "reason": r.reason }).to_string(),
+                )
+            }
+        }
     }
 }
 

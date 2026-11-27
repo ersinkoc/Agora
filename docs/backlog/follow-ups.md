@@ -103,15 +103,17 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Previews (ADR-0088)
 
-- **The hub relay (step 3) must carry `Host` and `Origin` unchanged**, as the node does (review of 96786517 and efadc92d), and a TLS-terminating reverse proxy on the
-  loopback in front of a hub is not recognised by the node's probe (it shows its own certificate); the per-port deny list below would
-  cover it.
+- The hub relay carries `Origin` unchanged and rewrites `Host` to `localhost:<port>` (the maintainer, ADR-0088 Amendment A point 8).
+  A TLS-terminating reverse proxy on the loopback in front of a hub is not recognised by the node's probe (it shows its own
+  certificate); the per-port deny list below would cover it.
 - The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
   them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
-- **Hub step 3:** only the person who opened a forward may connect to it through the hub (the maintainer's decision, 2026-11-27); the node
-  accepts a routed `PreviewConnect` for an open forward from its hub (review of d267e547). A local client that reads its control
-  connection slowly still holds that connection's other streams while a preview send waits; the hub link avoids it with a local
-  connection per preview connection.
+- A local client that reads its control connection slowly still holds that connection's other streams while a preview send waits; the
+  hub link avoids it with a local connection per preview connection.
+- **Hub step 3, left:** the audit row `preview.enter` names the person, the machine and the outcome but not the forward and its port
+  (the audit table has no column for them; a store migration); `PreviewChanged` and `PreviewSuggested` still reach nobody (point 7's
+  scope, with the window's Browser pane, step 4); the hub does not offer `preview.v1` to windows yet (step 4); a benchmark of a
+  terminal's keystroke round trip through the hub while a preview carries a large transfer, before the release that turns it on.
 - The default budgets are "no limit" for the rate and the forward's total (only the chunk, the window and the connection caps hold):
   choose real defaults once previews run against real dev servers.
 

@@ -38,6 +38,7 @@ pub mod plugin_catalog;
 pub mod plugin_package;
 pub mod plugins;
 pub mod preview_gate;
+pub mod preview_net;
 pub mod project_names;
 pub mod projection;
 pub mod proxy;
