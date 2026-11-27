@@ -790,6 +790,18 @@ All additions; nothing published changed.
 - **What is not built yet.** The TUI's own start picker; remembering the last choice per kind and machine; the owner's `start.models`
   allow-list and the price class on the card; settings are not kept across a node restart's resume.
 
+### Provider, model and effort (ADR-0123)
+
+- `AgentKind.provider` (8): who serves the kind's models, from the manifest's `[agent] provider` (`[a-z0-9-]`, at most 32); empty when
+  the manifest does not say.
+- `AgentStarted.launch_settings` (35): the `LaunchSetting { id, value }` pairs (ADR-0066) the agent was started with, as the node
+  applied them (at most 8, values at most 64 bytes), re-stated by a resume. `LaunchSetting` is defined in `common.proto` (it was in
+  `commands.proto`; same name and wire).
+- `AgentSnapshot.model` (49), `effort` (50), `config` (51, the last `AgentSessionConfig` options, at most 16) and `launch_settings`
+  (52), filled by the hub's projection: `model` is the adapter's current model, else the launch setting `model`, else the model last
+  reported with usage; `effort` is the THOUGHT_LEVEL option's current value, else the launch setting `effort`. Schema only for now:
+  no node or hub fills them yet (ADR-0123 build step 2).
+
 ### Launch options (ADR-0059)
 
 All additions; nothing published changed. Node capability `agent.launch_options`.

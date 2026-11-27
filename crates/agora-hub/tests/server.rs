@@ -78,6 +78,7 @@ fn online(node: &str) -> Body {
 
 fn agent(node: &str, id: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
+        launch_settings: Vec::new(),
         run_id: Vec::new(),
         agent_id: id.into(),
         project_id: "p".into(),
@@ -1619,6 +1620,7 @@ impl ClientAuth for Scoped {
 
 fn started(id: &str, project: &str) -> Body {
     Body::AgentStarted(v1::AgentStarted {
+        launch_settings: Vec::new(),
         run_id: Vec::new(),
         agent_id: id.into(),
         project_id: project.into(),

@@ -1550,6 +1550,7 @@ mod tests {
 
     fn started(id: &str) -> Body {
         Body::AgentStarted(AgentStarted {
+            launch_settings: Vec::new(),
             run_id: Vec::new(),
             agent_id: id.into(),
             project_id: "p".into(),

@@ -85,6 +85,14 @@ message SessionConfigOption {
   bool skips_permissions = 8;
 }
 
+// ADR-0066: one value chosen for a kind's `[[launch.setting]]`. The node checks it against its manifest (`agent.setting_unknown`,
+// `agent.setting_invalid`) and puts it into its argument template as one argument, never through a shell.
+// (Defined here, not in commands.proto, so events can carry it too: ADR-0123. Same package, same wire.)
+message LaunchSetting {
+  string id = 1;
+  string value = 2;
+}
+
 // A flat error parameter: a string or a number (docs/specs/error-codes.md).
 message ParamValue {
   oneof value {

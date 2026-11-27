@@ -65,3 +65,12 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("every agent's pro
 1. Schema (the four additions), manifests' `provider` for the bundled kinds, golden fixtures.
 2. Node: `launch_settings` on `AgentStarted` and in the ledger; hub projection fills `model`, `effort`, `config`.
 3. Window: the agent row, card, details and filters; screenshots in both themes.
+
+## Status of the build
+
+1. Schema: done (2026-11-27). `AgentKind.provider` (8), `AgentStarted.launch_settings` (35), `AgentSnapshot.model` (49), `effort`
+   (50), `config` (51), `launch_settings` (52); `LaunchSetting` moved to `common.proto` (same name and wire); round-trip and
+   old-fixture test `crates/agora-protocol/tests/agent_model_effort.rs`; `protocol.md` "Provider, model and effort". Nothing fills
+   the fields yet.
+2. Node and hub: not started.
+3. Window: not started.

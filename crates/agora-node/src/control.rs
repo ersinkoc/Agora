@@ -924,6 +924,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .kinds()
                 .into_iter()
                 .map(|k| v1::AgentKind {
+                    provider: String::new(),
                     kind: k.kind,
                     display_name: k.display_name,
                     level: match k.level {

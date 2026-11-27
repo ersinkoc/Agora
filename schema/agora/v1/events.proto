@@ -191,6 +191,9 @@ message AgentStarted {
   string grant_id = 32;
   string parent_node_id = 33;
   string parent_node_agent_id = 34;
+  // ADR-0123: the ADR-0066 launch settings the agent was started with, as the node applied them (at most 8, each value at most 64
+  // bytes); re-stated by a resume. Old clients ignore them.
+  repeated LaunchSetting launch_settings = 35;
 }
 
 message AgentStateChanged {

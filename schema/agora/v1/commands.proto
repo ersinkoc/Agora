@@ -231,13 +231,6 @@ message AgentStart {
   repeated LaunchSetting settings = 9;
 }
 
-// ADR-0066: one value chosen for a kind's `[[launch.setting]]`. The node checks it against its manifest (`agent.setting_unknown`,
-// `agent.setting_invalid`) and puts it into its argument template as one argument, never through a shell.
-message LaunchSetting {
-  string id = 1;
-  string value = 2;
-}
-
 message AgentStop {
   string agent_id = 1;
   // ADR-0057: also stop the helpers this agent started (and theirs). Old nodes ignore it and stop only this agent.
@@ -908,6 +901,9 @@ message AgentKind {
   string program = 6;
   // ADR-0066: the settings a start may give (the manifest's `[[launch.setting]]`s, in its order). Old nodes send none.
   repeated LaunchSettingSpec settings = 7;
+  // ADR-0123: who serves the kind's models (the manifest's `[agent] provider`, `[a-z0-9-]`, at most 32), empty when the manifest
+  // does not say (a kind that can use many providers). Old nodes send none.
+  string provider = 8;
 }
 
 // ADR-0066: one `[[launch.setting]]` of a kind, as clients show it. The arguments it adds stay on the node.

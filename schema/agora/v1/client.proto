@@ -95,6 +95,15 @@ message AgentSnapshot {
   // ADR-0119 decision 10: a helper started from another machine: its parent's machine and agent there (`parent_agent_id` stays empty).
   string parent_node_id = 47;
   string parent_node_agent_id = 48;
+  // ADR-0123: the model the agent runs on, from the first known of: the adapter's current model, the launch setting `model`, the
+  // model it last reported with its usage (`provider/model` when the manifest maps it); empty when none is known.
+  string model = 49;
+  // ADR-0123: the adapter's THOUGHT_LEVEL option's current value, else the launch setting `effort`; empty when neither is known.
+  string effort = 50;
+  // ADR-0123: the last `AgentSessionConfig` options with their current values (at most 16), so a window that connects later has them.
+  repeated SessionConfigOption config = 51;
+  // ADR-0123: `AgentStarted.launch_settings`.
+  repeated LaunchSetting launch_settings = 52;
 }
 
 message TerminalSnapshot {
