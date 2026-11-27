@@ -17,6 +17,11 @@ tui-asks-start-outside = { $agent } ({ $agent_kind }) on { $node } asks to start
         [true] , in its own worktree
        *[other] {""}
     } (depth { $depth }). Its first prompt:
+tui-asks-start-remote = { $agent } ({ $agent_kind }) on another machine, { $origin }, asks to start { $kind } here on { $node } in { $folder }{ $worktree ->
+        [true] , in its own worktree
+       *[other] {""}
+    } (depth { $depth }). Its first prompt:
+tui-start-remote-once = Answering here allows this one start. To let it start more without asking, answer from the window.
 tui-started-by = started by { $agent }
 tui-blocked = { $agent } is waiting for you
 tui-machines = Machines

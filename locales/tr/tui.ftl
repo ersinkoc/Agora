@@ -17,6 +17,11 @@ tui-asks-start-outside = { $node } üzerindeki { $agent } ({ $agent_kind }), ken
         [true] , kendi çalışma ağacında
        *[other] {""}
     } { $kind } başlatmak istiyor (derinlik { $depth }). İlk istemi:
+tui-asks-start-remote = Başka bir makinedeki ({ $origin }) { $agent } ({ $agent_kind }), bu makinede ({ $node }) { $folder } klasöründe{ $worktree ->
+        [true] , kendi çalışma ağacında
+       *[other] {""}
+    } { $kind } başlatmak istiyor (derinlik { $depth }). İlk istemi:
+tui-start-remote-once = Burada verilen yanıt yalnızca bu başlatmaya izin verir. Sormadan daha fazlasını başlatabilmesi için pencereden yanıtlayın.
 tui-started-by = { $agent } tarafından başlatıldı
 tui-blocked = { $agent } sizi bekliyor
 tui-machines = Makineler

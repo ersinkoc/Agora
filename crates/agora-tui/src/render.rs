@@ -377,6 +377,8 @@ struct StartRequest {
     inside: bool,
     worktree: bool,
     depth: i64,
+    /// ADR-0119: an `agent.start.remote` card: the agent asking runs on `origin`, another machine, and the helper would start on `node`.
+    origin: Option<String>,
 }
 
 /// ADR-0057: what an `agent.start` request shows before it is answered: one line saying who asks to start what and where, then its whole
@@ -388,22 +390,24 @@ pub(crate) fn start_card(
     t: Text<'_>,
 ) -> Option<(String, Vec<String>, Vec<String>)> {
     let start = start_request(action, detail)?;
-    let line = t(
-        if start.inside {
-            key!("tui-asks-start")
-        } else {
-            key!("tui-asks-start-outside")
-        },
-        &[
-            ("agent", Arg::Str(visible(&start.agent))),
-            ("agent_kind", Arg::Str(visible(&start.agent_kind))),
-            ("node", Arg::Str(visible(&start.node))),
-            ("kind", Arg::Str(visible(&start.kind))),
-            ("folder", Arg::Str(visible(&start.folder))),
-            ("worktree", Arg::Str(start.worktree.to_string())),
-            ("depth", Arg::Num(start.depth)),
-        ],
-    );
+    let mut args = vec![
+        ("agent", Arg::Str(visible(&start.agent))),
+        ("agent_kind", Arg::Str(visible(&start.agent_kind))),
+        ("node", Arg::Str(visible(&start.node))),
+        ("kind", Arg::Str(visible(&start.kind))),
+        ("folder", Arg::Str(visible(&start.folder))),
+        ("worktree", Arg::Str(start.worktree.to_string())),
+        ("depth", Arg::Num(start.depth)),
+    ];
+    let key = match &start.origin {
+        Some(origin) => {
+            args.push(("origin", Arg::Str(visible(origin))));
+            key!("tui-asks-start-remote")
+        }
+        None if start.inside => key!("tui-asks-start"),
+        None => key!("tui-asks-start-outside"),
+    };
+    let line = t(key, &args);
     // ADR-0066: every launch setting, in the order the request lists them and the signature covers them, named in this terminal's words.
     let settings = crate::client::start_setting_rows(detail)
         .iter()
@@ -435,6 +439,10 @@ pub(crate) fn start_card(
         if options.iter().any(|(_, _, skips)| *skips) {
             settings.push(t(key!("tui-start-does-not-ask"), &[]));
         }
+    }
+    // ADR-0119: y here allows this one start; a standing grant is given from the window, which shows the grant's terms.
+    if start.origin.is_some() {
+        settings.push(t(key!("tui-start-remote-once"), &[]));
     }
     let prompt = visible(&start.prompt).lines().map(str::to_string).collect();
     Some((line, settings, prompt))
@@ -492,9 +500,11 @@ pub(crate) fn start_kind(action: &str, detail: &str) -> Option<String> {
 }
 
 fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
-    if action != "agent.start" {
-        return None;
-    }
+    let remote = match action {
+        "agent.start" => false,
+        "agent.start.remote" => true,
+        _ => return None,
+    };
     let v: serde_json::Value = serde_json::from_str(detail).ok()?;
     let s = |k: &str| {
         v.get(k)
@@ -507,9 +517,15 @@ fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     };
+    // ADR-0119: a remote card names the asking agent and its machine with `origin_*` (the hub wrote the origin).
+    let (agent, agent_kind) = if remote {
+        (s("origin_agent"), s("origin_agent_kind"))
+    } else {
+        (s("agent"), s("agent_kind"))
+    };
     Some(StartRequest {
-        agent: s("agent"),
-        agent_kind: s("agent_kind"),
+        agent,
+        agent_kind,
         node: s("node"),
         kind: s("kind"),
         folder: s("folder"),
@@ -520,6 +536,7 @@ fn start_request(action: &str, detail: &str) -> Option<StartRequest> {
             .get("depth")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(1),
+        origin: remote.then(|| s("origin_node")),
     })
 }
 
@@ -1594,6 +1611,28 @@ mod tests {
             lines[parent + 1].contains("agent-3")
                 && lines[parent + 1].contains("tui-started-by[agent=agent-1]"),
             "{lines:?}"
+        );
+    }
+
+    /// ADR-0119: a start another machine asks for names the asking agent and its machine, says that y here allows this one start, and
+    /// still shows its whole first prompt.
+    #[test]
+    fn a_start_another_machine_asks_for_names_that_machine() {
+        let mut snap = snapshot();
+        snap.approvals[0].action = "agent.start.remote".into();
+        snap.approvals[0].detail = r#"{"node":"laptop","origin_node":"mac","origin_agent":"agent-7","origin_agent_kind":"codex","kind":"claude-code","folder":"/w","worktree":false,"depth":2,"root_node":"mac","root_agent":"agent-1","grant_allowed":true,"prompt":"fix the tests"}"#.into();
+        let text = render(&snap, false, false, "", "", 0, 0, &t).join("\n");
+        assert!(
+            text.contains("tui-asks-start-remote[agent=agent-7,agent_kind=codex,node=laptop,kind=claude-code,folder=/w,worktree=false,depth=2,origin=mac]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("tui-start-remote-once") && text.contains("fix the tests"),
+            "{text}"
+        );
+        assert_eq!(
+            start_kind("agent.start.remote", &snap.approvals[0].detail).as_deref(),
+            Some("claude-code")
         );
     }
 

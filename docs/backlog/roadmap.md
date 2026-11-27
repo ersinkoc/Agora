@@ -39,7 +39,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
 - [ ] **M8.1 Agents start agents on any machine** (ADR-0119 Accepted, = M7.1): schema, the target node with standing grants, the hub,
   the asking node, the window's card and grant indicator; then a two-machine run on blackview and mac. Built on main: steps 1 to 5
   (schema, target node, hub, asking node with following, the card with its standing grant, the agent panel and the Machines page);
-  left: the card's choices for time, any kind and folders below, the TUI card text, and the two-machine run
+  left: the card's choices for time, any kind and folders below, and the two-machine run
 - [ ] **M8.2 The board drives the work** (ADR-0095): the Review column and subtasks (M3.2, **schema**); dispatch to an agent on any
   machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
   open task it is allowed (an automation rule: **decision**, ADR first)
