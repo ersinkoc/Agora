@@ -4597,9 +4597,6 @@ impl Supervisor {
                 // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
                 entry.inputs_seen = 0;
                 entry.gate.clear();
-                // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
-                entry.inputs_seen = 0;
-                entry.gate.clear();
                 entry.next_check = now;
                 // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
                 entry.inside = None;
@@ -5106,6 +5103,9 @@ impl Supervisor {
         entry.run_id = process_run_id(terminal.pid(), terminal.is_held());
         entry.terminal = Some(terminal);
         entry.pacer = Pacer::default();
+        // ADR-0117: a new process has a new terminal: its input count starts again, and nothing of the old screen waits.
+        entry.inputs_seen = 0;
+        entry.gate.clear();
         entry.next_check = now;
         // ADR-0094: a new process; its `AgentStarted` clears the hub's mark, and the lookup starts again.
         entry.inside = None;
