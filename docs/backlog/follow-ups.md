@@ -8,7 +8,7 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **Task handoff delivery on the board** (ADR-0109, ADR-0121 Proposed, **schema**): the hub retries the durable queue and logs an
+- **Task handoff delivery on the board** (ADR-0109, ADR-0121 Accepted): the hub retries the durable queue and logs an
   unresolved delivery after its deadline. Add visible delivery states and reconciliation before treating the board as the
   operator's view of delivery. Unresolved entries count toward the queue limit. When the receiver's node process restarts instead
   of reconnecting, the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the
