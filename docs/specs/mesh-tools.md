@@ -26,15 +26,21 @@ the node per MCP connection; agents cannot impersonate each other.
 ## Waiting for messages
 
 An agent that is idle does not see a message until it reads its inbox, and nothing is ever typed into its terminal for it (ADR-0031).
-To stay reachable, an agent with nothing else to do calls `inbox_wait` (the maintainer's choice of 2026-11-27, instead of a typed
-nudge). It answers at once with the messages numbered above `since` when there are any; otherwise the node holds the call (polled
-every 100 ms) and answers with them as soon as one arrives, or with `[]` once `timeout_s` passes, so the agent simply calls again.
-Without `since` it waits for what arrives from the moment of the call (messages already in the inbox are not handed back). A
-connection may have 8 calls waiting (`mesh.too_many_asks`); a call the client cancels, or one whose connection ends, is dropped and
-nothing is kept for it. It is opt-in: the standing instructions say to wait on it only when the agent was asked to stay reachable
-(a line in its first prompt or a person's message, as the maintainer chose), since an agent waiting on it keeps its turn open: its
-screen shows it working, so it does not read as idle or finished, and each timeout is one more model turn. It reads exactly what
-`inbox` reads and the content is the same untrusted data.
+To stay reachable, an agent calls `inbox_wait` (the maintainer's choice of 2026-11-27, instead of a typed nudge). It answers at once
+with the messages numbered above `since` when there are any; otherwise the node holds the call and answers as soon as one arrives, or
+with `[]` once `timeout_s` passes (default 600 s, at least 5 s: a shorter value, 0 included, is raised; at most 3600 s), so the agent
+simply calls again. Without `since` it waits for what arrives from the moment of the call (messages already in the inbox are not
+handed back). The node polls every 100 ms but compares the inbox's newest message number with `since` first, so nothing is built
+while nothing new arrived. A connection may have 8 calls waiting (`mesh.too_many_asks`); inside a JSON-RPC batch it is refused
+(`-32602`, `data.field = "batch"`), so the batch's other answers are never held; a call the client cancels, or one whose connection
+ends, is dropped and nothing is kept for it.
+
+**It is opt-in** (the maintainer, 2026-11-27: "do the most sensible"). The standing instructions and the tool's description say to
+wait on it only when the person or the agent's task asked it to stay reachable for other agents, between tasks, and that a person's
+prompt always comes first. Waiting has three costs: each `[]` at the timeout is one more model turn; while the call is open the agent's
+screen shows a running tool, so it reads as working, never idle or finished (the Finished mark and idle-based waits do not fire); and
+a person typing into its terminal queues behind the call until they interrupt it (a person's input ending the wait is a follow-up).
+It reads exactly what `inbox` reads and the content is the same untrusted data.
 
 ## Safety rules
 

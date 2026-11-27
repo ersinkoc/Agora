@@ -1035,6 +1035,26 @@ impl Mesh {
     }
 
     /// `inbox`: messages after `since` (by id), oldest first. Reading does not remove them; `since` moves the cursor.
+    /// The number of the newest message in `agent`'s inbox (0 when it is empty), without building a page: `inbox_wait`'s polls compare
+    /// it with their `since` first. `None` when the agent is not registered.
+    pub fn inbox_newest(&self, agent: &AgentId) -> Option<u64> {
+        self.caller(agent).ok()?;
+        let ordinary = self
+            .inboxes
+            .get(agent)
+            .into_iter()
+            .flatten()
+            .filter_map(|m| inbox_message_number(&m.id))
+            .next_back()
+            .unwrap_or(0);
+        let durable = self
+            .handoff_inboxes
+            .get(agent)
+            .and_then(|d| d.keys().next_back().copied())
+            .unwrap_or(0);
+        Some(ordinary.max(durable))
+    }
+
     pub fn inbox(
         &self,
         agent: &AgentId,

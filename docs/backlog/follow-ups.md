@@ -76,6 +76,13 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   200 ms (mostly serial `git.exe` spawns; the side-by-side identity queries are merged, not measured on Windows yet); keystroke → echo p95
   18.21 / 17.45 ms against 16 ms (likely the ~15.6 ms timer tick in ConPTY, not measured alone).
 
+## Mesh
+
+- **A person's input ends an `inbox_wait`** (the maintainer's decision relayed by agora-ac, 2026-11-27): when the node writes a person's
+  input (a window's or the terminal client's `TerminalInput`, not a mesh-typed prompt) into an agent's terminal while that agent's mesh
+  connection has an `inbox_wait` open, answer the wait at once with `[]` so the agent's turn ends and the prompt is read. Needs a signal
+  from the supervisor's input path to the agent's mesh connections; until then the person interrupts the call (Esc).
+
 ## Previews (ADR-0088)
 
 - **The hub relay (step 3) must carry `Host` and `Origin` unchanged**, as the node does (review of 96786517 and efadc92d), and a TLS-terminating reverse proxy on the

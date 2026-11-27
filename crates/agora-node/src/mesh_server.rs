@@ -2489,6 +2489,9 @@ struct Session<'a> {
     spawn_waits: Vec<SpawnWait>,
     /// `inbox_wait` calls still waiting for a message (at most [`MAX_WAITS`]).
     inbox_waits: Vec<InboxWait>,
+    /// The message being routed is one value of a batch: an `inbox_wait` there is refused, so the batch's other answers are never
+    /// held for minutes.
+    in_batch: bool,
     starts: ConnectionStarts,
     /// Batches (2025-03-26) with a request still waiting; each is sent whole once the last of them is answered (#981). Every one
     /// holds a waiting call, so the limits on those (open asks, `agent_wait`s, starts) bound how many there are.
@@ -2557,6 +2560,13 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
             limit,
             deadline_ms,
         } => {
+            if s.in_batch {
+                return Step::Reply(Message::ErrorResponse {
+                    id: request_id,
+                    code: agora_mesh::mcp::invalid_params_error(),
+                    data: Some(json!({"field": "batch"})),
+                });
+            }
             if s.inbox_waits.len() >= MAX_WAITS {
                 let e = agora_protocol::Error::new(agora_protocol::ErrorCode::MeshTooManyAsks)
                     .with("limit", MAX_WAITS as i64);
@@ -2633,6 +2643,19 @@ fn cancel_in_batches(
     }
 }
 
+/// [`route`] for one value of a batch: `inbox_wait` is refused there.
+fn routed_in_batch(
+    text: &str,
+    s: &mut Session<'_>,
+    mesh: &Arc<Mutex<Mesh>>,
+    links: &Links<'_>,
+) -> Step {
+    s.in_batch = true;
+    let step = route(text, s, mesh, links);
+    s.in_batch = false;
+    step
+}
+
 /// One line from the client: one message, a batch, or something to refuse (#981, #984). `Err` when the client is gone.
 fn serve_line(
     text: &str,
@@ -2663,7 +2686,7 @@ fn serve_line(
         match batch_item(item) {
             BatchItem::Answer(msg) => batch.answer(msg),
             BatchItem::Skip => {}
-            BatchItem::Handle { msg, text } => match route(&text, s, mesh, links) {
+            BatchItem::Handle { msg, text } => match routed_in_batch(&text, s, mesh, links) {
                 Step::Reply(msg) => batch.answer(msg),
                 Step::Silent => {}
                 Step::Waits => {
@@ -2713,6 +2736,7 @@ fn serve(
         },
         spawn_waits: Vec::new(),
         inbox_waits: Vec::new(),
+        in_batch: false,
         starts: ConnectionStarts {
             helpers: links.helpers.clone(),
             tickets: HashSet::new(),
@@ -4726,13 +4750,28 @@ mod tests {
         assert_eq!(items[0]["from"], "b1");
         // A short wait with nothing new ends with an empty list.
         let last = items[0]["message_id"].as_str().unwrap().to_string();
-        ca.send(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"since": last, "timeout_s": 0.3}}}).to_string());
-        let empty = ca.answer();
+        // The shortest wait is 5 s.
+        ca.send(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"since": last, "timeout_s": 0}}}).to_string());
+        assert!(
+            ca.next(Duration::from_secs(4)).is_none(),
+            "a wait shorter than 5 s"
+        );
+        let empty = ca.next(Duration::from_secs(5)).unwrap();
         assert_eq!(empty["id"], 10);
         assert_eq!(
             agora_mesh::mcp::tool_result_value(&empty["result"]).unwrap(),
             json!([])
         );
+        // Inside a batch it is refused, so the batch's other answers are not held for minutes.
+        let mut cb2 = Wire::open(&b);
+        cb2.initialize("2025-03-26");
+        cb2.send(r#"[{"jsonrpc":"2.0","id":21,"method":"ping"},{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"inbox_wait","arguments":{}}}]"#);
+        let batch = cb2.next(Duration::from_secs(2)).unwrap();
+        let answers = batch.as_array().unwrap();
+        let refused = answers.iter().find(|a| a["id"] == 22).unwrap();
+        assert_eq!(rpc_error_code(refused), -32602, "{refused}");
+        assert_eq!(refused["error"]["data"]["field"], "batch");
+        assert!(answers.iter().any(|a| a["id"] == 21));
         done(server, dir);
     }
 
