@@ -109,6 +109,17 @@ changes decision 4's "the hub does not parse them" for one thing only: the head 
 7. **Suggestions and changes** go to the opener only (`PreviewSuggested` to the project's owner and the person who started the agent
    that suggested it, `PreviewChanged` to the opener), until a wider rule is decided.
 
+8. **Decided later the same day (the maintainer, one question with three answers)**, refining points 3 and 6:
+   - **One request per relayed connection.** The hub adds `Connection: close` to each request head (a WebSocket upgrade keeps its
+     `Upgrade`), reads that one request head and the response heads up to the first that is not `1xx` (or a `101`, after which the
+     connection is opaque bytes), and relays everything else unread. It never tracks body lengths, so no head on a connection goes by
+     unread. This replaces "keep-alive included" in point 3.
+   - **The partition carries the forward too.** A renamed cookie is `p<port><tag>_<name>`, where `<tag>` is short and random per
+     forward, and its lifetime (`Max-Age`, `Expires`) is capped at the forward's end. A forward that gets a port another one used
+     starts with an empty jar.
+   - **`Host` is rewritten** to `localhost:<port>` (the forward's port on the node) before the head goes on, because development
+     servers refuse a host name they do not know. `Origin` and `Referer` are left as the browser sent them.
+
 Threat-model rows to add: cookies across previews (shared by the browser across ports; the hub strips its own and partitions the apps'
 cookies by port, point 6), a leaked entry ticket (single use, 60 s, opener only, no referrer, not logged), and
 the head parser (bounded, rejects malformed heads, never reads bodies).
@@ -130,7 +141,7 @@ the head parser (bounded, rejects malformed heads, never reads bodies).
    connection), and the node offers `preview.v1`. Measured (release, blackview, 2026-11-27): a command's round trip through the link
    p50 98 us / p95 147 us alone, p50 294 us / p95 459 us while one preview connection carries 749 MB/s, well inside ADR-0022's
    5 ms of Agora overhead for a remote node's keystroke round trip. Forward ids are 128 random bits (review of 6221f9c9). Done.
-3. Hub relay, origin per forward, audit: not started. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
+3. Hub relay, origin per forward, audit: started (2026-11-27), point 8 decided. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
    connect to it through the hub; the per-forward origin follows the accepted open question (a separate hub port where possible,
    otherwise refuse and say why).
 4. Web Browser pane: not started.
