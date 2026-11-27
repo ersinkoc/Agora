@@ -704,8 +704,12 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
     let home = temp_home("v1holder");
     let socket = home.join("old.sock");
     let listener = agora_platform::local_listen(&socket).expect("listen");
+    // The node checks who serves the endpoint (M2.6, T79): this test's own process, which `HelloOk` must name, and still connected when
+    // it asks (macOS answers ENOTCONN for a peer that already closed), so the last connection stays open until the node is done.
+    let (done, client_done) = std::sync::mpsc::channel::<()>();
     let server = std::thread::spawn(move || {
         let mut seen = Vec::new();
+        let mut last = None;
         for _ in 0..2 {
             let mut s = listener.accept().expect("accept");
             s.set_read_timeout(Some(Duration::from_secs(5))).expect("t");
@@ -719,7 +723,7 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
             let reply = if version == LINK_VERSION {
                 Reply::HelloOk {
                     version: LINK_VERSION,
-                    holder_pid: 1,
+                    holder_pid: std::process::id(),
                     holder_start: 2,
                 }
             } else {
@@ -729,10 +733,14 @@ fn a_new_node_falls_back_to_version_one_against_a_holder_that_only_speaks_it() {
                 }
             };
             write_frame(&mut s, &reply.encode(), None).expect("reply");
+            last = Some(s);
         }
+        let _ = client_done.recv_timeout(Duration::from_secs(10));
+        drop(last);
         seen
     });
     let c = Client::connect(&socket).expect("falls back");
+    let _ = done.send(());
     assert_eq!(c.version, LINK_VERSION);
     assert_eq!(
         server.join().expect("server"),

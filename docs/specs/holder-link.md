@@ -416,7 +416,9 @@ Holder to node: `StartedRef`(73: agent, pid, `terminal: bytes`) and `TerminalRef
 - **Who answers.** A Windows pipe name is global, so another user could create the holder's pipe first. Right after `HelloOk`, before
   anything else is trusted, the node asks who serves the endpoint (`LocalStream::server`: `GetNamedPipeServerProcessId`, the kernel's
   peer credentials on Unix). It goes on only when that is the process `HelloOk` names and, on Windows, its token is this user's, not restricted,
-  not an AppContainer and at the node's integrity level or higher, so a confined agent cannot pass (`LinkError::NotHolder` otherwise), then pins that process by its start time (`ProcessWatch`). Threat model T79.
+  not an AppContainer and at the node's integrity level or higher, so a confined agent cannot pass (`LinkError::NotHolder` otherwise;
+  on macOS a holder that answers and closes at once fails as an I/O error instead, since the kernel no longer names a closed peer:
+  refused either way), then pins that process by its start time (`ProcessWatch`). Threat model T79.
 - **The holder** duplicates both ends into the node through the handle it opened and checked by start time when it admitted that node
   (decision 5; `TerminalHandle::export_to`). If the frame does not go out (a send fails, the link drops first), it closes both duplicates
   in the node again (`DUPLICATE_CLOSE_SOURCE`), so nothing of an undelivered frame stays there. Once the frame went out, they are the node's.
