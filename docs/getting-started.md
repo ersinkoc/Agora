@@ -2,7 +2,10 @@
 
 Three steps on one machine (Linux, macOS or Windows). The details are in ADR-0062.
 
-1. **Get the `agora` binary** (a release, see the README, or `cargo build --release -p agora`) and put it on your `PATH`.
+1. **Get the `agora` binary**: `curl -fsSL https://raw.githubusercontent.com/ersinkoc/Agora/main/install.sh | sh` on Linux and
+   macOS, `irm https://raw.githubusercontent.com/ersinkoc/Agora/main/install.ps1 | iex` in Windows PowerShell. Either checks the
+   release's checksum and signature, installs it for you and puts it on your `PATH` (README, "Install a release"). Or download a
+   release yourself, or `cargo build --release -p agora`, and put it on your `PATH`.
 2. **Type `agora`** in a terminal, in the folder of a project if you like (a git checkout there is offered to your agents). The
    first time it asks one question:
    ```

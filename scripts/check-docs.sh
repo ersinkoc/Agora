@@ -51,4 +51,9 @@ done
 grep -q '^## Next$' CHANGELOG.md || { echo "CHANGELOG.md: no '## Next' section"; fail=1; }
 # Every Fluent key used must exist in the source locale (placeholder until the i18n lint exists).
 [ -f locales/en/main.ftl ] || { echo "locales/en/main.ftl missing"; fail=1; }
+# The install scripts check releases against the key they carry: it must be the published release key.
+key=$(cat docs/security/release-key.pub)
+for f in install.sh install.ps1; do
+  grep -qF "'$key'" "$f" || { echo "$f: its release key is not docs/security/release-key.pub"; fail=1; }
+done
 exit $fail

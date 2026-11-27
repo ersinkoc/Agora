@@ -55,6 +55,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: sh scripts/check-docs.sh
       - run: sh scripts/check-case.sh
+      # The install scripts (shellcheck and pwsh are on the runner image).
+      - run: shellcheck -s sh install.sh
+      - run: pwsh -NoProfile -Command '$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$e); if ($e) { $e; exit 1 }'
 
   schema:
     runs-on: ubuntu-latest

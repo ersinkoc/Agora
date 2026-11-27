@@ -13,8 +13,16 @@ for what's implemented and where it has been tested.
 
 ## Get started
 
-1. Download the binary for your platform from [GitHub Releases](https://github.com/ersinkoc/Agora/releases).
-   [Verify the download](#install-a-release) and put it on your PATH as `agora` (`agora.exe` on Windows).
+1. Install the newest release. The script checks its checksum and release signature, puts `agora` on your PATH
+   (no root or administrator rights) and pins the release key for `agora update`:
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/ersinkoc/Agora/main/install.sh | sh     # Linux, macOS
+   ```
+   ```powershell
+   irm https://raw.githubusercontent.com/ersinkoc/Agora/main/install.ps1 | iex           # Windows PowerShell
+   ```
+   Or download the binary from [GitHub Releases](https://github.com/ersinkoc/Agora/releases) and
+   [verify it yourself](#install-a-release).
 2. Run `agora` from a project folder and choose **Start Agora here**. For a new Git repository, make the first
    commit before running setup in that folder. The first run starts a local hub and node in the background
    and signs you in. It opens the browser on a desktop and the terminal client over SSH or on Linux without
@@ -117,7 +125,16 @@ node-mediated writes. [Sandbox recipes](docs/security/sandbox-recipes.md)
 
 ## Install a release
 
-Releases include the web app. Choose the binary for Linux (x64 or ARM64), macOS (Intel or Apple Silicon),
+`install.sh` (Linux, macOS) and `install.ps1` (Windows) do everything below for you: they download the binary for this machine
+with its `.sha256` and `.sig`, check both against the [release verification key](docs/security/release-key.pub) (they need
+`ssh-keygen`, OpenSSH 8.1 or newer; Windows has it as the OpenSSH Client optional feature), install it for your user
+(`~/.local/bin`, or `%LOCALAPPDATA%\Programs\agora`; over your `agora` already on PATH when it is yours), add that folder to PATH
+and save the key as `~/.agora/release-key`. On a machine already set up they offer to start Agora at login
+(`agora service install`); on a new one `agora` asks that on its first run. They never stop or restart a running Agora. Options:
+`--version X.Y.Z`, `--dir DIR`, `--no-modify-path`, `--service`, `--no-service` (`-Version`, `-Dir`, ... in PowerShell). To pass
+them through a pipe: `curl -fsSL .../install.sh | sh -s -- --version 0.3.43`.
+
+By hand: releases include the web app. Choose the binary for Linux (x64 or ARM64), macOS (Intel or Apple Silicon),
 or Windows (x64), and download its `.sha256` and `.sig` files. Save the repository's
 [release verification key](docs/security/release-key.pub) as `release-key.pub` in the same directory.
 
