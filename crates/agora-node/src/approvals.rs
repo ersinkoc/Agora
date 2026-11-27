@@ -417,6 +417,9 @@ pub struct SkipBinding {
 pub struct RemoteBinding {
     pub origin_node: String,
     pub origin_agent: String,
+    /// The node's own judgement of the request (no settings, no launch options, a kind a grant may cover): a decision that gives a
+    /// standing grant on a card where this is false is refused (review of step 2, finding 3).
+    pub grant_allowed: bool,
 }
 
 /// ADR-0119: a start another machine asks this node for. Only the node raises it (the whole `agent.` namespace is reserved).
@@ -789,7 +792,7 @@ impl<V: Verifier> Approvals<V> {
                 return Err(ApprovalError::BadSignature);
             }
             let granted = remote_grant.max_running != 0;
-            if granted && (!r.approved || !options.is_empty()) {
+            if granted && (!r.approved || !options.is_empty() || !remote.grant_allowed) {
                 return Err(ApprovalError::BadSignature);
             }
             if remote_grant_end(&remote_grant, now_ms).is_err() {
@@ -1468,6 +1471,31 @@ impl NodeApprovals {
             .request(agent.as_str(), START_ACTION, detail, now_ms, 0)?;
         routes.insert(p.id.clone(), (agent.clone(), String::new()));
         Some(p)
+    }
+
+    /// ADR-0119 (review of step 2, finding 1): the start of the trust term a standing remote grant's decision verifies in now (itself
+    /// `None` for a device trusted without a term), or `None` when its
+    /// signer no longer vouches for it (revoked, or out of its term) or is limited to some projects (a limited device never grants starts
+    /// from other machines). The trusted-devices file is read again first when it changed.
+    pub fn remote_grant_term(
+        &self,
+        signer: &str,
+        message: &[u8],
+        signature: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<u64>> {
+        self.reload_trust_if_changed();
+        let (_, term) = self.vouches(signer, message, signature)?;
+        if term.until.is_some_and(|u| now_ms >= u) {
+            return None;
+        }
+        let limited = self
+            .limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|l| l.is_limited(signer));
+        (!limited).then_some(term.since)
     }
 
     /// ADR-0119: another machine asks this node to start a helper. Returns the pending `agent.start.remote` card to announce, bound to the
@@ -2497,6 +2525,7 @@ mod tests {
             let remote = RemoteBinding {
                 origin_node: s("origin_node"),
                 origin_agent: s("origin_agent"),
+                grant_allowed: true,
             };
             let m = start_signed_message_v4(
                 &s("node"),
@@ -2514,11 +2543,16 @@ mod tests {
     }
 
     fn remote_card(a: &mut Approvals<Fake>, detail: &str) -> Pending {
+        remote_card_allowing(a, detail, true)
+    }
+
+    fn remote_card_allowing(a: &mut Approvals<Fake>, detail: &str, grant_allowed: bool) -> Pending {
         a.request_remote(
             detail,
             RemoteBinding {
                 origin_node: "mac".into(),
                 origin_agent: "agent-3".into(),
+                grant_allowed,
             },
             1_000,
             0,
@@ -2622,6 +2656,23 @@ mod tests {
         assert!(a
             .resolve(
                 &remote_decision(&q, true, RemoteGrant::default(), &RemoteGrant::default()),
+                2_000
+            )
+            .is_ok());
+        // A card the node judged not grantable (settings, or a kind a grant may not cover) takes no grant, only the start itself.
+        let r#fixed = remote_card_allowing(&mut a, r#"{"kind":"shell"}"#, false);
+        assert_eq!(
+            a.resolve(&remote_decision(&r#fixed, true, six, &six), 2_000),
+            Err(ApprovalError::BadSignature)
+        );
+        assert!(a
+            .resolve(
+                &remote_decision(
+                    &r#fixed,
+                    true,
+                    RemoteGrant::default(),
+                    &RemoteGrant::default()
+                ),
                 2_000
             )
             .is_ok());

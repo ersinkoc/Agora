@@ -1824,3 +1824,60 @@ fn a_start_from_another_machine_asks_once_and_a_grant_covers_the_next() {
         "agent.not_found"
     );
 }
+
+/// Review of ADR-0119 step 2, finding 1: a standing grant ends once its signer is no longer trusted (the trusted-devices file is read
+/// again when it changed): the next start is asked again.
+#[test]
+fn a_standing_grant_ends_when_its_signer_is_no_longer_trusted() {
+    use agora_node::approvals::start_signed_message_v4;
+    if !supported() {
+        return;
+    }
+    let e = Env::new("remote-trust");
+    let sp = &e.node().spawner;
+    sp.set_remote_helpers(true);
+    let first = sp.remote_start(&remote_ask(&e, 1, 9), wall_ms()).unwrap();
+    let p = e
+        .node()
+        .approvals
+        .waiting()
+        .into_iter()
+        .find(|p| p.id == first.approval_id)
+        .unwrap();
+    let grant = v1::RemoteGrant {
+        max_running: 3,
+        ..Default::default()
+    };
+    let sig = e.sign(&start_signed_message_v4(
+        NODE,
+        p.remote.as_ref().unwrap(),
+        &p.id,
+        true,
+        &[],
+        &[],
+        &grant,
+        &p.detail,
+    ));
+    e.client()
+        .call(Cmd::ApprovalResolve(v1::ApprovalResolve {
+            approval_id: p.id.clone(),
+            approved: true,
+            signer_device_id: DEVICE.into(),
+            signature: sig,
+            remote_grant: Some(grant),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    assert!(
+        sp.remote_start(&remote_ask(&e, 2, 9), wall_ms())
+            .unwrap()
+            .granted
+    );
+    // The owner removes the device (a newer file: its time must move for the node to read it again).
+    std::thread::sleep(Duration::from_millis(1100));
+    std::fs::write(e.root.join("data/trusted-devices"), "").unwrap();
+    let next = sp.remote_start(&remote_ask(&e, 3, 9), wall_ms()).unwrap();
+    assert!(!next.granted, "{next:?}");
+    assert!(sp.remote_grants(wall_ms()).is_empty());
+}

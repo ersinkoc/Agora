@@ -20,6 +20,8 @@ pub const RUNNING_PER_RUN: usize = 3;
 pub const GRANT_STARTS_PER_HOUR: usize = 30;
 /// The longest one `HelperFollow` waits, so its answer fits in a forwarded command's deadline.
 pub const MAX_FOLLOW_WAIT_MS: u32 = 20_000;
+/// Follows of one asking machine answered at once (each may hold a blocking thread for up to 20 s).
+pub const FOLLOWS_PER_ORIGIN: usize = 8;
 
 /// Who asked, as the hub carried it: the machine (`origin`, the hub's word), its agent and run, and the chain's root (the hub's word).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,6 +83,14 @@ pub(super) struct Started {
 pub(super) struct Grant {
     id: String,
     signer: String,
+    /// The decision as signed and its signature, so each use checks again that the signer still vouches for it (review of step 2,
+    /// finding 1), and the trust term it was made in.
+    message: Vec<u8>,
+    signature: Vec<u8>,
+    since: Option<u64>,
+    /// Starts this grant covered that are launching now (counted with the running ones, so starts that arrive together cannot pass
+    /// `max_running`: review of step 2, finding 2).
+    launching: u32,
     asker: Asker,
     chain: bool,
     kind: String,
@@ -101,6 +111,8 @@ pub(super) struct RemoteState {
     grants: Vec<Grant>,
     /// Results for the hub to carry back to the asking machines.
     outbox: Vec<v1::HelperStartResult>,
+    /// Follows being answered now, per asking machine.
+    following: HashMap<String, usize>,
 }
 
 fn policy_off(node: &str) -> Error {
@@ -229,7 +241,9 @@ impl Spawner {
         let now = Instant::now();
         for g in &mut st.remote.grants {
             let who = if g.chain {
-                !g.asker.root_node.is_empty() && g.asker.same_root(asker)
+                !g.asker.root_node.is_empty()
+                    && !g.asker.root_run.is_empty()
+                    && g.asker.same_root(asker)
             } else {
                 g.asker.same_run(asker)
             };
@@ -253,11 +267,13 @@ impl Spawner {
             {
                 g.starts.pop_front();
             }
-            let in_use = running.iter().filter(|(_, _, id)| *id == g.id).count();
+            let in_use =
+                running.iter().filter(|(_, _, id)| *id == g.id).count() + g.launching as usize;
             if in_use >= g.max_running as usize || g.starts.len() >= GRANT_STARTS_PER_HOUR {
                 continue;
             }
             g.starts.push_back(now);
+            g.launching += 1;
             return Some(g.id.clone());
         }
         None
@@ -279,9 +295,11 @@ impl Spawner {
         }
         let asker = Asker::from(h);
         let req = self.remote_check(h, &asker)?;
-        let views = self.sup().list();
+        self.recheck_remote_grants(now_ms);
         let granted = {
+            // The view of the node is taken under this lock, so starts covered at once by one grant each see the others.
             let mut st = self.st();
+            let views = self.sup().list();
             let running = self.remote_running(&st, &views);
             Self::covering_grant(&mut st, &running, &asker, &req, now_ms)
         };
@@ -294,6 +312,15 @@ impl Spawner {
             let may_start = self.grant_allows_chain(&grant_id);
             let outcome = self.launch_as(&req, may_start, Some(&parent));
             self.finish_remote(&h.start_id, &asker, &grant_id, outcome);
+            if let Some(g) = self
+                .st()
+                .remote
+                .grants
+                .iter_mut()
+                .find(|g| g.id == grant_id)
+            {
+                g.launching = g.launching.saturating_sub(1);
+            }
             return Ok(v1::HelperStartAccepted {
                 approval_id: String::new(),
                 ttl_ms: 0,
@@ -303,6 +330,7 @@ impl Spawner {
         }
         {
             let st = self.st();
+            let views = self.sup().list();
             let running = self.remote_running(&st, &views);
             let cards = st
                 .remote
@@ -339,6 +367,7 @@ impl Spawner {
             RemoteBinding {
                 origin_node: asker.origin.clone(),
                 origin_agent: asker.agent.clone(),
+                grant_allowed: req.settings.is_empty() && req.options.is_empty() && req.grantable,
             },
             now_ms,
         ) else {
@@ -363,6 +392,38 @@ impl Spawner {
             granted: false,
             grant_id: String::new(),
         })
+    }
+
+    /// Ends every standing grant whose signer no longer vouches for it, in the term it was made in (revoked, out of its term, or now
+    /// limited to some projects). Checked without holding the spawner's lock.
+    fn recheck_remote_grants(&self, now_ms: u64) {
+        let check: Vec<Vouch> = self
+            .st()
+            .remote
+            .grants
+            .iter()
+            .map(|g| {
+                (
+                    g.id.clone(),
+                    g.signer.clone(),
+                    g.message.clone(),
+                    g.signature.clone(),
+                    g.since,
+                )
+            })
+            .collect();
+        let ended: Vec<String> = check
+            .into_iter()
+            .filter(|(_, signer, message, signature, since)| {
+                self.approvals
+                    .remote_grant_term(signer, message, signature, now_ms)
+                    != Some(*since)
+            })
+            .map(|(id, ..)| id)
+            .collect();
+        if !ended.is_empty() {
+            self.st().remote.grants.retain(|g| !ended.contains(&g.id));
+        }
     }
 
     fn grant_allows_chain(&self, grant_id: &str) -> bool {
@@ -427,13 +488,37 @@ impl Spawner {
                 agent: w.asker.agent.clone(),
                 grant_id: String::new(),
             };
+            // The decision as signed, so each later use checks again that its signer still vouches for it.
+            let message = request.remote.as_ref().map(|b| {
+                crate::approvals::start_signed_message_v4(
+                    &self.node_id,
+                    b,
+                    &request.id,
+                    r.approved,
+                    &crate::approvals::detail_settings(&request.detail),
+                    &crate::approvals::detail_launch_options(&request.detail),
+                    &grant,
+                    &request.detail,
+                )
+            });
+            let since = message.as_ref().and_then(|m| {
+                self.approvals
+                    .remote_grant_term(&r.signer_device_id, m, &r.signature, now_ms)
+            });
+            let end = end.filter(|_| since.is_some());
             let chain = end.is_some() && grant.chain;
             let outcome = self.launch_as(&w.req, chain, Some(&parent));
-            if let (Ok(_), Some(end_ms)) = (&outcome, end) {
+            if let (Ok(_), Some(end_ms), Some(message), Some(since)) =
+                (&outcome, end, message, since)
+            {
                 grant_id = request.id.clone();
                 self.st().remote.grants.push(Grant {
                     id: request.id.clone(),
                     signer: r.signer_device_id.clone(),
+                    message,
+                    signature: r.signature.clone(),
+                    since,
+                    launching: 0,
                     asker: w.asker.clone(),
                     chain: grant.chain,
                     kind: w.req.kind.clone(),
@@ -525,6 +610,21 @@ impl Spawner {
         if !mine || f.origin.is_empty() {
             return Err(not_found(&f.agent_id));
         }
+        // At most a few follows of one machine at once: each may hold a thread for up to 20 s.
+        {
+            let mut st = self.st();
+            let n = st.remote.following.entry(f.origin.clone()).or_insert(0);
+            if *n >= FOLLOWS_PER_ORIGIN {
+                return Err(
+                    Error::new(ErrorCode::MeshTooManyAsks).with("limit", FOLLOWS_PER_ORIGIN as i64)
+                );
+            }
+            *n += 1;
+        }
+        let _done = Following {
+            spawner: self,
+            origin: f.origin.clone(),
+        };
         let state = || {
             self.sup()
                 .list()
@@ -681,5 +781,26 @@ impl Spawner {
         let before = st.remote.grants.len();
         st.remote.grants.retain(|g| g.id != id);
         before != st.remote.grants.len()
+    }
+}
+
+/// A grant's id, signer, signed decision, signature and trust term, checked again on each use.
+type Vouch = (String, String, Vec<u8>, Vec<u8>, Option<u64>);
+
+/// One follow of `origin` being answered: counted down when it ends, however it ends.
+struct Following<'a> {
+    spawner: &'a Spawner,
+    origin: String,
+}
+
+impl Drop for Following<'_> {
+    fn drop(&mut self) {
+        let mut st = self.spawner.st();
+        if let Some(n) = st.remote.following.get_mut(&self.origin) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.remote.following.remove(&self.origin);
+            }
+        }
     }
 }

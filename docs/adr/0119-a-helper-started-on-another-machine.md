@@ -311,6 +311,13 @@ New threat-model rows (numbers are the next free ones when built):
    run (20 s waits, 200 lines); release withdraws that run's cards, ends its follow rights and the grants rooted in it, and stops its
    helpers here through the node's own stop path when a person stopped it with its helpers. The node still does not offer
    `mesh.spawn.remote`. Tests: `crates/agora-node/tests/agent_spawn.rs` (the whole flow) and `approvals.rs` (v4 and the grant rules).
+   From the review: every use re-checks that the grant's signer still vouches for the decision (a revoked device, one out of its term
+   or one now limited to some projects ends its grants); starts that arrive together reserve their place under the grant, so
+   `max_running` holds; a card the node judged not grantable (settings, launch options, a kind a grant may not cover) takes no grant
+   whatever the decision says (`RemoteBinding.grant_allowed`, from the node's own record); at most 8 follows of one machine are
+   answered at once (`mesh.too_many_asks`); a chain grant matches only a non-empty hub-written root node and run. Grants live in
+   memory, so a node restart ends them all (they narrow, never widen), and one rooted in a run ends early only through a release from
+   the root's own machine: a machine that dies silently leaves its grants until their end (at most 24 hours).
 3. The hub: not started.
 4. The asking node: not started.
 5. The window and the terminal client: not started.
