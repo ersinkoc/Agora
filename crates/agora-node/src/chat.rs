@@ -1514,7 +1514,7 @@ impl ChatBoard {
                     Ok(()) => true,
                     Err(e) => {
                         // Operational log, not UI text: the node answers the forget with a code.
-                        eprintln!("transcripts: {}: not removed: {e}", agent.as_str());
+                        crate::log_line!("transcripts: {}: not removed: {e}", agent.as_str());
                         false
                     }
                 });
@@ -4795,7 +4795,7 @@ mod review3 {
         b.push_item(&a, &ChatItem::Tool(t), 2_000);
         save_due(&b, 2_100);
         let f = body(&s, "a");
-        eprintln!("outv2 file:\n{f}");
+        crate::log_line!("outv2 file:\n{f}");
         assert_eq!(leaked(&f, value), None);
     }
 
@@ -4817,7 +4817,7 @@ mod review3 {
         }
         save_due(&b, t + 5_000);
         let el = start.elapsed();
-        eprintln!(
+        crate::log_line!(
             "perf: 20k pieces, {written} batches: {el:?}, file {} bytes",
             body(&s, "a").len()
         );
@@ -4866,7 +4866,7 @@ mod review3perf {
                 write += t1.elapsed();
             }
         }
-        eprintln!(
+        crate::log_line!(
             "{tag}: total {:?} take {:?} write {:?}",
             start.elapsed(),
             take,
@@ -5696,7 +5696,7 @@ mod property {
             .filter_map(|seed| run_case(seed).err())
             .collect();
         for (name, n) in SCENARIOS.iter().zip(&HITS) {
-            eprintln!(
+            crate::log_line!(
                 "property: {name}: {} cases",
                 n.load(std::sync::atomic::Ordering::Relaxed)
             );
@@ -7162,10 +7162,10 @@ mod live {
         let item = ChatItem::Plan(lines);
         let start = std::time::Instant::now();
         b.push_item_cut(&a, &item, &cuts, 1);
-        eprintln!("plan of 1.4M steps, 64 places: {:?}", start.elapsed());
+        crate::log_line!("plan of 1.4M steps, 64 places: {:?}", start.elapsed());
         let start = std::time::Instant::now();
         b.push_item(&a, &item, 2);
-        eprintln!("the same without places: {:?}", start.elapsed());
+        crate::log_line!("the same without places: {:?}", start.elapsed());
     }
 
     /// ADR-0111 (ADR-0022): the cost of reported places on the chat path: a 128 KiB tool output cleaned and capped with none and with
@@ -7197,7 +7197,7 @@ mod live {
                     cuts,
                 ));
             }
-            eprintln!(
+            crate::log_line!(
                 "tidy 128 KiB output, {label}: {:?} each",
                 start.elapsed() / n
             );
@@ -7231,7 +7231,7 @@ mod live {
                     store.write(&batch).unwrap();
                 }
             }
-            eprintln!(
+            crate::log_line!(
                 "push + redact + write, {label}: {:?} each",
                 start.elapsed() / n
             );

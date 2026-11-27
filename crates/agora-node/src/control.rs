@@ -1922,7 +1922,7 @@ fn forget_agent(ctx: &ControlContext, agent_id: &str) -> Result<v1::CommandOk, E
     match answer.recv_timeout(FORGET_WAIT) {
         Ok(true) => {
             // Operational log (codes only, never the conversation).
-            eprintln!("agent.forget: {agent_id}: conversation removed");
+            crate::log_line!("agent.forget: {agent_id}: conversation removed");
             Ok(ok_empty())
         }
         Ok(false) => Err(Error::new(ErrorCode::Internal).with("incident_id", "agent.forget")),
@@ -2108,7 +2108,7 @@ pub(crate) fn resume_agent(
     // Said once for this interruption: the ledger remembers it (so it is not sent again), and the node's log says it was sent.
     if carried {
         ledger.mark_continue_sent(agent_id, crate::daemon::now_ms());
-        eprintln!("resume: {agent_id} was working when the node stopped; its resume carried the kind's \"carry on\" message");
+        crate::log_line!("resume: {agent_id} was working when the node stopped; its resume carried the kind's \"carry on\" message");
     }
     if new_session {
         ledger.forget_session(agent_id, crate::daemon::now_ms());
@@ -3212,7 +3212,7 @@ mod idempotency_tests {
         }
         // The test agent is `sh` (#972): Git for Windows puts it on PATH only with its `usr\bin`.
         if !sh_on_path() {
-            eprintln!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
+            crate::log_line!("skipped: no `sh` on PATH (on Windows, add Git's usr\\bin to PATH)");
             return;
         }
         let dir = std::env::temp_dir().join(format!("agora-ctl-idem-{}", std::process::id()));

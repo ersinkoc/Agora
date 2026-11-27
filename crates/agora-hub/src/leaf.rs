@@ -171,7 +171,7 @@ impl Leaf {
         if let Some(save) = &self.persist {
             if let Err(e) = save(&cert) {
                 crate::metrics::saturating_add(&self.persist_failures, 1);
-                eprintln!(
+                crate::log_line!(
                     "warn: the hub's new certificate is in use but server-cert.pem could not be written: {e}"
                 );
             }

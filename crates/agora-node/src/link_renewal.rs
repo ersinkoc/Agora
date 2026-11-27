@@ -478,7 +478,7 @@ impl Renewer {
     fn log(&self, line: String) {
         let mut last = self.last_log.lock().unwrap_or_else(|e| e.into_inner());
         if *last != line {
-            eprintln!("{line}");
+            crate::log_line!("{line}");
             let mut all = self.logged.lock().unwrap_or_else(|e| e.into_inner());
             if all.len() >= 100 {
                 all.remove(0);

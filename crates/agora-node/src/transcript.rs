@@ -1449,7 +1449,9 @@ impl Store {
         if let Err(e) = std::fs::rename(&path, &earlier) {
             if e.kind() != io::ErrorKind::NotFound {
                 // Operational log, not UI text. The new session is written after the earlier one in the same file then.
-                eprintln!("transcripts: {agent}: the earlier session was not moved aside: {e}");
+                crate::log_line!(
+                    "transcripts: {agent}: the earlier session was not moved aside: {e}"
+                );
                 return;
             }
         }
@@ -1461,7 +1463,9 @@ impl Store {
                 .and_then(|()| agora_platform::write_private(&path, &out))
             {
                 // Operational log, not UI text. The ids still go on in this node's memory; the first batch writes them.
-                eprintln!("transcripts: {agent}: the new session's file was not started: {e}");
+                crate::log_line!(
+                    "transcripts: {agent}: the new session's file was not started: {e}"
+                );
             }
         }
     }
@@ -1739,7 +1743,7 @@ fn write_batches(
             Err(e) => {
                 if failed.insert(batch.agent.clone(), ()).is_none() {
                     // Operational log, not UI text; the person is told by the notice.
-                    eprintln!(
+                    crate::log_line!(
                         "transcripts: {}: history not written: {e}",
                         batch.agent.as_str()
                     );
@@ -2341,7 +2345,7 @@ mod tests {
             .iter()
             .map(|k| k.sam.len.len() * 12 + 4 + k.sam.by.len() * 5)
             .sum();
-        eprintln!(
+        crate::log_line!(
             "matcher: {} KiB for {} bytes of values, built in {:?}",
             bytes / 1024,
             64 * 8000,

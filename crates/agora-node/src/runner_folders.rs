@@ -151,7 +151,7 @@ pub fn remove_in_background(root: PathBuf, names: Vec<OsString>) {
         .spawn(clean_queue);
     if let Err(e) = spawned {
         cleaner.running = false;
-        eprintln!("package runner folders not removed: {e}");
+        crate::log_line!("package runner folders not removed: {e}");
     }
 }
 
@@ -203,14 +203,14 @@ fn clean_one(root: &Path, name: &OsStr) {
         Ok(Removal::Removed) => {}
         Ok(Removal::Partial) => {
             let left = mark_left();
-            eprintln!("package runner folder left in part: {left:?}");
+            crate::log_line!("package runner folder left in part: {left:?}");
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         // A folder that cannot be removed at all (e.g. its agent took away the access to it) is marked as well, so it is not
         // queued again at every later start, and `agora doctor` counts it.
         Err(e) => {
             let left = mark_left();
-            eprintln!("package runner folder not removed: {left:?}: {e}");
+            crate::log_line!("package runner folder not removed: {left:?}: {e}");
         }
     }
 }

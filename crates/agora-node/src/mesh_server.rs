@@ -371,7 +371,7 @@ impl LeaseRenewals {
         let bytes = lease_renewal::encode(&rows, mono_ms(), now_ms());
         if let Err(e) = agora_platform::write_private(file, &bytes) {
             // Operational log, not UI text: the renewals go on; a restart in between loses them (those leases end at their TTL).
-            eprintln!("mesh: lease renewals not kept: {e}");
+            crate::log_line!("mesh: lease renewals not kept: {e}");
             self.lock().mark_dirty();
         }
     }
@@ -1484,7 +1484,7 @@ impl MeshServer {
                     .with("limit", limit as i64)
             }
             crate::handoff_store::InsertError::Storage(error) => {
-                eprintln!("mesh: durable handoff could not be written: {error}");
+                crate::log_line!("mesh: durable handoff could not be written: {error}");
                 unavailable()
             }
         };

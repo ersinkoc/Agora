@@ -134,7 +134,7 @@ fn invalid(field: &str) -> Error {
 }
 
 fn store_error(e: StoreError) -> Error {
-    eprintln!("devices: {e}");
+    crate::log_line!("devices: {e}");
     Error::new(ErrorCode::Internal).with("incident_id", "devices")
 }
 

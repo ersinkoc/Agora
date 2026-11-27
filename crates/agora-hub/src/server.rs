@@ -176,17 +176,17 @@ where
     match &result {
         Err(ServeError::Protocol(e)) => {
             // Codes and parameters only: this is the hub's log, not a user's screen.
-            eprintln!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
+            crate::log_line!("node refused: {node_id} {} {:?}", e.code.as_str(), e.params);
             conn.close_with(e.code.as_str()).await;
         }
         // Closed, so a node that was only frozen or asleep reads the end of the stream as soon as it runs again and dials at once.
         // Bounded: a peer that reads nothing must not hold this task. It is recorded offline as `silent` (see `converse_node`).
         Err(ServeError::Silent) => {
-            eprintln!("node silent: {node_id}");
+            crate::log_line!("node silent: {node_id}");
             let _ = tokio::time::timeout(Duration::from_secs(1), conn.close()).await;
         }
         // Said in the hub's log: the node sees only a dropped connection (#935: "database is locked" here went unlogged).
-        Err(ServeError::Store(e)) => eprintln!("node link ended: {node_id} store: {}", e.0),
+        Err(ServeError::Store(e)) => crate::log_line!("node link ended: {node_id} store: {}", e.0),
         _ => {}
     }
     result
@@ -476,7 +476,7 @@ fn persist_event(
     } = outcome
     {
         let node_id = session.producer();
-        eprintln!("node resync: {node_id} skipped {from_seq}..={to_seq}");
+        crate::log_line!("node resync: {node_id} skipped {from_seq}..={to_seq}");
         let _ = crate::audit::Audit::new(hub.store()).record(
             now_ms(),
             crate::ca::RESERVED_HUB_ID,
@@ -3077,7 +3077,7 @@ async fn handle_within(
                 &id.serial_hex,
                 now_ms(),
             ) {
-                eprintln!("node {}: could not note its certificate: {e:?}", id.node_id);
+                crate::log_line!("node {}: could not note its certificate: {e:?}", id.node_id);
             }
             let mut conn = conn;
             // The first frame decides; a peer that says nothing is dropped like a silent node (ADR-0070).
@@ -3098,7 +3098,7 @@ async fn handle_within(
             let active = || match Enrollment::new(state.hub.store()).is_active(&id.serial_hex) {
                 Ok(active) => active,
                 Err(_) => {
-                    eprintln!(
+                    crate::log_line!(
                         "node {}: enrollment record unreadable; connection kept",
                         id.node_id
                     );
@@ -3243,7 +3243,7 @@ async fn accept_connections(
                 continue
             }
             Err(e) => {
-                eprintln!("hub accept failed: {e}");
+                crate::log_line!("hub accept failed: {e}");
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(ACCEPT_RETRY_MAX);
                 continue;

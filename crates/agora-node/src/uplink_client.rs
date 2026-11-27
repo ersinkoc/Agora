@@ -1193,7 +1193,7 @@ where
     } = replay
     {
         // Codes and numbers only: this goes to the node's log, not to the user's screen.
-        eprintln!("hub link: resync, events {from_seq}..{oldest_retained} are gone");
+        crate::log_line!("hub link: resync, events {from_seq}..{oldest_retained} are gone");
         // F1701: bounded like every other send, so a hub that stopped reading is noticed instead of waited for forever.
         put(
             conn,
@@ -1949,7 +1949,7 @@ pub fn spawn(sink: Arc<EventSink>, link: HubLink) -> std::io::Result<UplinkHandl
                         if let Err(e) = &r {
                             let now = format!("{e:?}");
                             if now != last {
-                                eprintln!("hub link: {now}");
+                                crate::log_line!("hub link: {now}");
                                 last = now;
                             }
                         } else {

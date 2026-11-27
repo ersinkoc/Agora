@@ -130,7 +130,7 @@ fn header_number(path: &Path) -> io::Result<Option<u64>> {
 /// left where it is and not loaded, since the next start may read it. Its size, when known, still
 /// counts toward the byte limit while this store is open.
 fn skipped(store: &mut Store, path: &Path, error: &io::Error) {
-    eprintln!(
+    crate::log_line!(
         "mesh: durable handoff record {} not loaded, left in place: {error}",
         path.display()
     );
@@ -146,11 +146,11 @@ fn set_aside(path: &Path, reason: &str) {
     let mut aside = path.as_os_str().to_owned();
     aside.push(".rejected");
     match std::fs::rename(path, &aside) {
-        Ok(()) => eprintln!(
+        Ok(()) => crate::log_line!(
             "mesh: durable handoff record {} set aside ({reason})",
             path.display()
         ),
-        Err(e) => eprintln!(
+        Err(e) => crate::log_line!(
             "mesh: durable handoff record {} not loaded ({reason}); could not set it aside: {e}",
             path.display()
         ),

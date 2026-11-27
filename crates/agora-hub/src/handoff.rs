@@ -218,7 +218,7 @@ pub(crate) async fn run(hub: &Hub) {
             !matches!(hub.settle_handoff(pending, outcome, now), Ok(true))
         });
         if let Err(error) = hub.expire_handoffs(now, |id| settling.contains_key(id)) {
-            eprintln!("task handoff expiry: {error}");
+            crate::log_line!("task handoff expiry: {error}");
         }
         let mut nodes = std::collections::BTreeSet::new();
         let batch = hub.pending_handoffs(
@@ -258,7 +258,7 @@ pub(crate) async fn run(hub: &Hub) {
                 retry.remove(&id);
                 let result = hub.settle_handoff(&pending, &outcome, now_ms());
                 if let Err(error) = &result {
-                    eprintln!("task handoff settlement: {error}");
+                    crate::log_line!("task handoff settlement: {error}");
                 }
                 if !matches!(result, Ok(true)) {
                     settling.insert(id, (pending, outcome));

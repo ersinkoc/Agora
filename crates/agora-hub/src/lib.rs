@@ -1,4 +1,16 @@
 //! The hub: identity, routing, event store, approvals (docs/architecture.md).
+#![cfg_attr(not(test), deny(clippy::print_stderr))]
+
+/// One line for the log (the supervisor points this process's error output at the role's log file). Never panics: `eprintln!` does
+/// when the write fails, and a full disk then killed the thread that wrote it (the hub link, 2026-11-27: it stopped redialling for
+/// good). A line that cannot be written is dropped.
+#[macro_export]
+macro_rules! log_line {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
 
 pub mod audit;
 pub mod board;

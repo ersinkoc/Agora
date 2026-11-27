@@ -640,16 +640,16 @@ impl SupervisorError {
             Self::Spawn(text) => {
                 // The client gets only the stable code; the cause (an OS error text, never a secret) goes to the node's stderr, which
                 // the supervisor's log keeps, so a start that failed is not silent. `{:?}` escapes control characters.
-                eprintln!("agent start failed: {text:?}");
+                crate::log_line!("agent start failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
             Self::Prompt(text) => {
                 // As for a failed start: only the reference goes to the caller, the cause to the node's log (`{:?}` escapes it).
-                eprintln!("agent prompt failed: {text:?}");
+                crate::log_line!("agent prompt failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "agent.prompt")
             }
             Self::Approval(text) => {
-                eprintln!("agent approval answer failed: {text:?}");
+                crate::log_line!("agent approval answer failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "approval.resolve")
             }
             Self::NoAnswer {
@@ -659,7 +659,7 @@ impl SupervisorError {
                 ..
             } => {
                 // The node's log names the call, as for the failures above.
-                eprintln!(
+                crate::log_line!(
                     "agent {} failed: the adapter did not answer in {waited_ms} ms",
                     call_name(call)
                 );
@@ -669,7 +669,7 @@ impl SupervisorError {
                     .with("waited_ms", i64::try_from(*waited_ms).unwrap_or(i64::MAX))
             }
             Self::AdapterCall(call, text) => {
-                eprintln!("agent {call} failed: {text:?}");
+                crate::log_line!("agent {call} failed: {text:?}");
                 Error::new(ErrorCode::Internal).with("incident_id", "unassigned")
             }
             Self::ProgramMissing(k, p) => Error::new(ErrorCode::AgentProgramMissing)
@@ -1271,7 +1271,7 @@ impl AdapterEntry {
             return Vec::new();
         }
         if ignored > 0 && !std::mem::replace(cuts_logged, true) {
-            eprintln!(
+            crate::log_line!(
                 "adapter.cuts_ignored: agent={} ignored={ignored}",
                 id.as_str()
             );
@@ -4767,7 +4767,7 @@ impl Supervisor {
         if crate::doctor::locate_in(&agora_adapters::package::agora_home(), program).is_some() {
             return e;
         }
-        eprintln!("agent start failed: {text:?}");
+        crate::log_line!("agent start failed: {text:?}");
         SupervisorError::ProgramMissing(kind.to_string(), program.to_string())
     }
 
@@ -5512,7 +5512,7 @@ fn refuse_skipping(
     events: &mut Vec<SupervisorEvent>,
 ) {
     // Operational log, not UI text.
-    eprintln!(
+    crate::log_line!(
         "agent.skip_refused: agent={} policy={} setting={}",
         id.as_str(),
         verdict.policy,
@@ -5641,13 +5641,13 @@ pub(crate) fn log_call_failure(what: &str, agent: &AgentId, e: &SupervisorError)
         SupervisorError::Prompt(cause)
         | SupervisorError::Approval(cause)
         | SupervisorError::AdapterCall(_, cause) => {
-            eprintln!("agent {what} failed: {}: {cause:?}", agent.as_str())
+            crate::log_line!("agent {what} failed: {}: {cause:?}", agent.as_str())
         }
-        SupervisorError::NoAnswer { waited_ms, .. } => eprintln!(
+        SupervisorError::NoAnswer { waited_ms, .. } => crate::log_line!(
             "agent {what} failed: {}: the adapter did not answer in {waited_ms} ms",
             agent.as_str()
         ),
-        other => eprintln!("agent {what} failed: {}: {other:?}", agent.as_str()),
+        other => crate::log_line!("agent {what} failed: {}: {other:?}", agent.as_str()),
     }
 }
 
@@ -6037,7 +6037,7 @@ fn launch_adapter(
 fn log_old_holder_once(holder_pid: u32) {
     static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
+        crate::log_line!(
             "holder.link_v1: structured agent runs in the node, holder_pid={holder_pid} holder_link_version=1"
         );
     }

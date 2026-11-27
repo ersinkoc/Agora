@@ -424,7 +424,7 @@ impl EventSink {
         // Shutdown safety: a log that cannot be read is set aside, so the node still starts (operational log, not UI text).
         let (mut log, unreadable) = DiskEventLog::open_or_set_aside(dir, max_bytes, secs)?;
         if let Some(path) = unreadable {
-            eprintln!(
+            crate::log_line!(
                 "events: the event log could not be read; set aside as {} and started again",
                 path.display()
             );
@@ -1716,7 +1716,7 @@ pub fn policy_sandbox_entries(path: &std::path::Path) -> Vec<(&'static str, Stri
 fn private_node_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     if let Err(e) = agora_platform::close_to_others(dir) {
-        eprintln!("{}: not closed to other users: {e}", dir.display());
+        crate::log_line!("{}: not closed to other users: {e}", dir.display());
     }
     Ok(())
 }
@@ -2083,11 +2083,11 @@ impl Node {
         mesh.set_fleet_allowed(policy.mesh_fleet);
         // ADR-0109: the durable inbox opens first, so the reservation below starts above every restored record's number.
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
-            eprintln!("mesh: durable handoffs unavailable: {e}");
+            crate::log_line!("mesh: durable handoffs unavailable: {e}");
         }
         // ADR-0039: before agents are taken up, so each gets back the shared-board leases the last run renewed for it.
         if let Err(e) = mesh.open_lease_renewals(&cfg.data_dir) {
-            eprintln!("mesh: lease renewals are not kept across a restart: {e}");
+            crate::log_line!("mesh: lease renewals are not kept across a restart: {e}");
         }
         // #965: ids never start over below what an agent kept across this restart still holds (its `inbox` cursor). A failed
         // reservation does not stop the node: its agents run on, and messages are refused until the mesh's ticker reserves.
@@ -2177,7 +2177,7 @@ impl Node {
                     )
                     // #1093: the agent still starts, outside the mesh; the node's log says so (operational log, not UI text).
                     .inspect_err(|e| {
-                        eprintln!(
+                        crate::log_line!(
                             "mesh: {} could not get its endpoint and runs outside the mesh: {e}",
                             l.id.as_str()
                         );
@@ -2185,7 +2185,7 @@ impl Node {
                     .ok()?;
                 let command = std::env::current_exe()
                     .inspect_err(|e| {
-                        eprintln!(
+                        crate::log_line!(
                             "mesh: {} gets no endpoint (this program's path is unknown): {e}",
                             l.id.as_str()
                         );
@@ -2837,7 +2837,10 @@ impl Node {
                                         }
                                     });
                                 if let Err(e) = told {
-                                    eprintln!("approval refusal not sent: {}: {e}", agent.as_str());
+                                    crate::log_line!(
+                                        "approval refusal not sent: {}: {e}",
+                                        agent.as_str()
+                                    );
                                 }
                             }
                             // ADR-0090: nobody decided in time. ADR-0110 (S2): unless an answer call of it still runs; that call
@@ -2992,7 +2995,7 @@ impl Node {
             )
             .unwrap_or_else(|e| {
                 // Operational log, not UI text.
-                eprintln!("transcripts: the writer did not start: {e}");
+                crate::log_line!("transcripts: the writer did not start: {e}");
                 None
             })
         };
@@ -3565,7 +3568,7 @@ fn deliver_held(
         Some((true, Some(c))) => c,
         Some((false, _)) => {
             // Operational log, not UI text.
-            eprintln!(
+            crate::log_line!(
                 "task dispatch: {} turned bracketed paste off; the held prompt for task {} is dropped and the task given back",
                 h.given.agent.as_str(),
                 h.given.task_id
@@ -3591,7 +3594,7 @@ fn deliver_held(
 pub fn load_manifests(dir: &Path) -> (Vec<crate::manifests::Loaded>, Vec<(PathBuf, String)>) {
     let (loaded, problems) = crate::manifests::load(dir);
     for (kind, file) in crate::manifests::shadowing(&loaded) {
-        eprintln!(
+        crate::log_line!(
             "manifests: {} replaces the built-in kind {kind}; newer built-in features of it (such as plan limits) are not used",
             file.display()
         );

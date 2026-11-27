@@ -117,7 +117,7 @@ pub fn start_program(home: &Path, program: &str) -> String {
         Lookup::Installed(i) => i.path.to_str().map(str::to_string),
         Lookup::Unsafe => {
             // No secret here: only the program's file name.
-            eprintln!("agent program {program:?} was installed by agora but its folder or file is not safe; using the PATH");
+            crate::log_line!("agent program {program:?} was installed by agora but its folder or file is not safe; using the PATH");
             None
         }
         Lookup::NotInstalled => None,

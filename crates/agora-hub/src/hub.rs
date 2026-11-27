@@ -615,7 +615,7 @@ impl Hub {
         if let Err(error) =
             self.reconcile_board_runs(g, project, &format!("board.{project}"), now_ms)
         {
-            eprintln!("board restart reconciliation: {project}: {error}");
+            crate::log_line!("board restart reconciliation: {project}: {error}");
         }
     }
 
@@ -714,7 +714,7 @@ impl Hub {
         if !local.is_empty() {
             if let Err(e) = self.forgets.add(node, local) {
                 // Operational log, not UI text: the hub has forgotten the agent; its node keeps the file until retention removes it.
-                eprintln!("agent.forget: {agent}: not owed to its node: {e}");
+                crate::log_line!("agent.forget: {agent}: not owed to its node: {e}");
             }
         }
         Ok((node.to_string(), local.to_string()))
@@ -761,13 +761,13 @@ impl Hub {
             .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
         {
             // Operational log, not UI text.
-            eprintln!("node.forget: {node}: its board notices stay: {e}");
+            crate::log_line!("node.forget: {node}: its board notices stay: {e}");
         }
         drop(g);
         // ADR-0108: nothing is owed to a machine the owner forgot (its files go by retention, as before).
         if let Err(e) = self.forgets.drop_node(node) {
             // Operational log, not UI text.
-            eprintln!("node.forget: {node}: its pending forgets stay: {e}");
+            crate::log_line!("node.forget: {node}: its pending forgets stay: {e}");
         }
         Ok(())
     }
@@ -974,7 +974,7 @@ impl Hub {
                 .remove_setting(&format!("{OWED_NOTICES_KEY}{node}"))
             {
                 // Operational log, not UI text.
-                eprintln!("board notices: {node}: given but still stored: {e}");
+                crate::log_line!("board notices: {node}: given but still stored: {e}");
             }
         }
         owed
