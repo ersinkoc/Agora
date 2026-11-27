@@ -114,8 +114,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   hub link avoids it with a local connection per preview connection.
 - **Hub step 3, left:** the audit row `preview.enter` names the person, the machine and the outcome but not the forward and its port
   (the audit table has no column for them; a store migration); `PreviewSuggested` reaches the owner but not yet the person who started
-  the agent (point 7); a benchmark of a
-  terminal's keystroke round trip through the hub while a preview carries a large transfer, before the release that turns it on.
+  the agent (point 7); the keystroke round trip under a preview was measured on
+  loopback only (`crates/agora-hub/tests/preview_priority.rs`: p95 2.8 ms at 1.9 GB/s toward the node); over a slow link the kernel's
+  send buffer can still hold preview bytes ahead of a command (bounded by the credit windows): measure on a real remote node and, if
+  needed, cap the link's send buffer or pace preview frames.
 - The default budgets are "no limit" for the rate and the forward's total (only the chunk, the window and the connection caps hold):
   choose real defaults once previews run against real dev servers.
 
