@@ -951,7 +951,7 @@ cli-explain-file-too-large = The screen file { $path } is larger than { $max } b
 cli-explain-manifest-problem = Skipped the manifest file { $path }, as the node does: { $reason }
 cli-explain-bad-size = --size takes the terminal size as COLSxROWS, for example 120x40 (each from 2 to 1000).
 # ADR-0064: `agora workspaces` and `agora workspaces clean`. Each workspace line is fixed tokens for scripts (path, state, reason,
-# size, free for, branch); only these sentences are translated.
+# size, free for, branch, the ignored paths that keep it); only these sentences are translated.
 cli-workspaces-empty = This node has made no workspaces that are still on disk.
 cli-workspaces-summary = { $count } workspaces, { $size } in all; { $cleanable } can be removed with: agora workspaces clean
 cli-workspaces-ledger-unreadable = The node's record of its agents could not be read, so it cannot be told which workspaces are in use. Nothing was changed.
@@ -965,6 +965,7 @@ cli-workspaces-kept = Kept workspace { $path }: { $reason ->
         [unmerged] its branch has commits that are on no other branch and were not pushed
         [links-moved] its Git links were changed, so its repository cannot be trusted
         [moved] it is no longer where the node made it
+        [ignored] git ignores files in it that may be needed: { $paths }
        *[other] Git could not check it
     }
 cli-workspaces-clean-summary = { $removed } removed, { $kept } kept (the reason is given for each).

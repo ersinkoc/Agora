@@ -576,9 +576,8 @@ fn the_cap_and_free_disk_refuse_a_new_worktree() {
     assert!(matches!(rig.ws.room(), Err(("free_disk_gb", _))));
 }
 
-#[test]
-fn a_stale_claim_beside_a_newer_record_goes_and_no_longer_refuses_starts() {
-    let rig = Rig::new("claim-twice");
+/// A claim file as a process left it: the record, stamped (or not) with when and by whom it was claimed.
+fn write_claim(rig: &Rig, stamp: Option<(u64, u32, u64)>) -> PathBuf {
     let dir = rig.data.join("workspaces");
     let record = fs::read_dir(&dir)
         .unwrap()
@@ -586,20 +585,38 @@ fn a_stale_claim_beside_a_newer_record_goes_and_no_longer_refuses_starts() {
         .find(|p| p.extension().is_some_and(|x| x == "json"))
         .unwrap();
     let claim = record.with_extension("claim");
-    // A process claimed it and ended mid-way, and the other one's pass wrote the record again meanwhile.
-    fs::copy(&record, &claim).unwrap();
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+    let mut v: serde_json::Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    if let Some((at, pid, started)) = stamp {
+        v["claimed_at_ms"] = at.into();
+        v["claimer_pid"] = pid.into();
+        v["claimer_started"] = started.into();
+    }
+    fs::write(&claim, serde_json::to_vec(&v).unwrap()).unwrap();
+    // A rename keeps the record's time of last writing, which may be days old: never what decides.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 60 * 60);
     fs::File::options()
         .write(true)
         .open(&claim)
         .unwrap()
         .set_modified(old)
         .unwrap();
-    assert!(rig.ws.removing(&rig.work));
-    let now = std::time::SystemTime::now()
+    claim
+}
+
+fn wall_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as u64;
+        .as_millis() as u64
+}
+
+#[test]
+fn a_stale_claim_beside_a_newer_record_goes_and_no_longer_refuses_starts() {
+    let rig = Rig::new("claim-twice");
+    let now = wall_now();
+    // A process claimed it two hours ago and ended mid-way (nobody runs as pid 0), and the other one's pass wrote the record again.
+    let claim = write_claim(&rig, Some((now - 2 * H, 0, 0)));
+    assert!(rig.ws.removing(&rig.work));
     let mut busy = Users::default();
     busy.busy(&rig.work);
     assert_eq!(
@@ -608,4 +625,79 @@ fn a_stale_claim_beside_a_newer_record_goes_and_no_longer_refuses_starts() {
     );
     assert!(!claim.exists());
     assert!(!rig.ws.removing(&rig.work));
+}
+
+/// Review of 26cf1825 finding 1: a claim's age is when it was claimed, not the file's time, and a holder that still runs keeps it.
+#[test]
+fn a_claim_held_by_a_running_process_is_never_given_back() {
+    let rig = Rig::new("claim-live");
+    let now = wall_now();
+    let me = std::process::id();
+    let started = agora_platform::process_start_time(me).unwrap();
+    // Claimed two hours ago by this very process (a slow clean-up): another pass leaves it be.
+    let claim = write_claim(&rig, Some((now - 2 * H, me, started)));
+    let busy = Users::default();
+    rig.clean(&busy, now, true);
+    assert!(claim.exists(), "a live holder's claim was given back");
+    assert!(rig.ws.removing(&rig.work));
+    // The same pid with another start time is a later process: the claim is stale.
+    write_claim(&rig, Some((now - 2 * H, me, started.wrapping_add(1))));
+    rig.clean(&busy, now, true);
+    assert!(!claim.exists());
+}
+
+#[test]
+fn a_claim_with_no_stamp_is_kept_for_an_hour_then_given_back() {
+    let rig = Rig::new("claim-unstamped");
+    let now = wall_now();
+    // The file is two days old, but nothing says when it was claimed: it counts from when a pass first saw it.
+    let claim = write_claim(&rig, None);
+    let busy = Users::default();
+    rig.clean(&busy, now, true);
+    assert!(claim.exists());
+    rig.clean(&busy, now + 30 * 60 * 1000, true);
+    assert!(claim.exists());
+    rig.clean(&busy, now + H, true);
+    assert!(!claim.exists());
+    assert!(!rig.ws.removing(&rig.work));
+}
+
+/// The maintainer's rule (2026-11-27): files git ignores go with the worktree only when they are build output or caches.
+#[test]
+fn ignored_files_that_may_be_needed_keep_the_worktree() {
+    let rig = Rig::new("ignored");
+    let exclude = rig.checkout.join(".git/info/exclude");
+    fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+    fs::write(&exclude, ".env\n*.db\n*.log\ndist/\n__pycache__/\n").unwrap();
+    fs::write(rig.work.join(".env"), "TOKEN=x\n").unwrap();
+    fs::create_dir_all(rig.work.join("data")).unwrap();
+    fs::write(rig.work.join("data/app.db"), "db").unwrap();
+    fs::create_dir_all(rig.work.join("dist")).unwrap();
+    fs::write(rig.work.join("dist/app.js"), "x").unwrap();
+    fs::write(rig.work.join("run.log"), "log").unwrap();
+    fs::create_dir_all(rig.work.join("pkg/__pycache__")).unwrap();
+    fs::write(rig.work.join("pkg/__pycache__/m.pyc"), "x").unwrap();
+    let users = rig.ended(T0);
+    rig.clean(&users, T0, true);
+    let never = AtomicBool::new(false);
+    let how = Clean {
+        by_node: true,
+        older_than_ms: None,
+        dry_run: false,
+    };
+    let out = rig.ws.clean(&|| users.clone(), T0 + 24 * H, how, &never);
+    assert_eq!(out[0].action, left_behind(Reason::Ignored));
+    let mut needed = out[0].needed.clone();
+    needed.sort();
+    assert_eq!(needed, vec![".env".to_string(), "data/app.db".to_string()]);
+    let listed = rig.ws.list(&users, T0 + 24 * H, true);
+    assert_eq!(listed[0].state, State::LeftBehind(Reason::Ignored));
+    assert_eq!(listed[0].needed.len(), 2);
+    assert!(rig.work.join(".env").is_file());
+    assert!(rig.work.join("data/app.db").is_file());
+    // A person moves what they need out of it: the build output and caches go with the worktree.
+    fs::remove_file(rig.work.join(".env")).unwrap();
+    fs::remove_file(rig.work.join("data/app.db")).unwrap();
+    assert_eq!(rig.clean(&users, T0 + 25 * H, true), vec![Action::Removed]);
+    assert!(!rig.work.exists());
 }

@@ -807,6 +807,31 @@ pub fn keeps_work(checkout: &Path, worktree: &Path) -> Result<Option<Keeps>, Git
     })
 }
 
+/// ADR-0064 (the maintainer's rule, 2026-11-27): the ignored paths in `worktree` that git would let `git worktree remove` take without
+/// `--force`: each path an ignore rule matches, as `git status --ignored=matching` reports it (a folder a rule matches as a whole is one
+/// entry ending in `/`; a file matched by its own rule is listed by itself, wherever it is). Pinned and link-checked like every read; an
+/// answer git could not give is an error.
+pub fn ignored_paths(worktree: &Path) -> Result<Vec<String>, GitError> {
+    with_links(worktree, || {
+        let out = git(
+            worktree,
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored=matching",
+                "--untracked-files=all",
+            ],
+        )?;
+        Ok(out
+            .split('\0')
+            .filter_map(|e| e.strip_prefix("!! "))
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned)
+            .collect())
+    })
+}
+
 /// ADR-0064 decision 4: whether `name`, a folder at the top of `worktree`, is build output git ignores and holds nothing tracked in
 /// (`git ls-files` lists nothing below it, and `git check-ignore` says it is ignored). Pinned and link-checked like every read.
 pub fn ignored_untracked(worktree: &Path, name: &str) -> Result<bool, GitError> {

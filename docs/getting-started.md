@@ -148,8 +148,8 @@ tell (unknown) is waited for until it shows one, so give such waits a `--timeout
 ## Clean up workspaces
 
 An agent started with its own worktree ("Separate worktree") leaves that folder behind when it ends. The node removes it a day later
-when nothing would be lost (no uncommitted change, no commit that is not on another branch or pushed; the branch is kept), and keeps
-the rest. `agora workspaces` lists them with their state (`in-use`, `waiting`, `cleanable`, `left-behind` and why) and size;
+when nothing would be lost (no uncommitted change, no commit that is not on another branch or pushed, and no file git ignores other
+than build output and caches: an `.env`, a database or a key keeps it; the branch is kept), and keeps the rest. `agora workspaces` lists them with their state (`in-use`, `waiting`, `cleanable`, `left-behind` and why) and size;
 `agora workspaces clean --dry-run` shows what would go, and `agora workspaces clean [--older-than 7d]` removes it now. Folders you
 selected yourself are never removed. `workspaces.clean = off` in the node policy stops the automatic removal.
 

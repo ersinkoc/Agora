@@ -10,14 +10,17 @@
 //! worktree is still a real folder directly in the node's worktree folder, at its recorded place; its `.git`, `commondir` and
 //! `gitdir` still hold what git wrote ([`git::MadeLinks::still_hold`]), so every git answer comes from the recorded repository; git
 //! says it has no uncommitted change (untracked files included), no checked-out submodule and no commit that no other branch or
-//! remote has ([`git::keeps_work`]); and, for the node's own pass, the grace period passed since its agent ended. Removal is
+//! remote has ([`git::keeps_work`]); every file git ignores there is regenerable build output or a cache ([`needed_ignored`], the
+//! maintainer's rule: "if git ignores it and it is unimportant, delete it; if it is needed, keep it"); and, for the node's own pass, the
+//! grace period passed since its agent ended. Removal is
 //! `git::remove_worktree` without force, which checks all of that again; the branch is never deleted. Anything else leaves it in
 //! place as "left behind" with its reason ([`Reason`]). Every removal is written to `workspaces.log`.
 //!
 //! **Two removers.** The node's pass and `agora workspaces clean` may run at once. A workspace is claimed before it is checked, by
 //! renaming its record (`rename_no_replace`, never replacing): only one process holds a claim, and a start or resume into a claimed
 //! folder is refused ([`Workspaces::removing`], checked by the supervisor under its lock). Whether the folder is in use is asked again
-//! after the claim, so a start that came first is seen.
+//! after the claim, so a start that came first is seen. A claim is stamped with when it was made and by which process; it is given
+//! back by another process only when it is over an hour old and that process is gone (a crash), never while its holder runs.
 //!
 //! **Build output.** A left-behind worktree whose grace period passed has its `target/` (beside a `Cargo.toml`) and `node_modules/`
 //! (beside a `package.json`) removed, once: only a real folder at the top of the worktree that git says is ignored and holds nothing
@@ -49,6 +52,55 @@ const GB: u64 = 1 << 30;
 /// Build output removed from a left-behind worktree, each only beside its project file (ADR-0064 decision 4's defaults).
 const BUILD_OUTPUT: [(&str, &str); 2] =
     [("Cargo.toml", "target"), ("package.json", "node_modules")];
+/// Ignored folders that are regenerable build output or caches (the maintainer's rule, 2026-11-27): a worktree whose ignored paths are
+/// all these, [`DISPOSABLE_FILES`] and `target/` beside a `Cargo.toml` may be removed. Any other ignored path (`.env*`, `*.db`,
+/// `*.sqlite*`, keys and certificates, notes) is needed: the worktree stays as left behind with reason `ignored`.
+pub const DISPOSABLE_DIRS: [&str; 15] = [
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    "coverage",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".gradle",
+];
+/// Ignored files that are regenerable (see [`DISPOSABLE_DIRS`]): a name, or `*` and a suffix.
+pub const DISPOSABLE_FILES: [&str; 3] = ["*.pyc", "*.log", ".DS_Store"];
+
+/// Whether `entry` (a path git ignores in `work`, as [`git::ignored_paths`] lists it: a folder ends in `/`) is build output or a cache.
+fn disposable(work: &Path, entry: &str) -> bool {
+    if let Some(dir) = entry.strip_suffix('/') {
+        let last = dir.rsplit('/').next().unwrap_or(dir);
+        if last == "target" {
+            // Only a Rust build folder: beside its `Cargo.toml`.
+            let beside = work.join(dir).with_file_name("Cargo.toml");
+            return std::fs::symlink_metadata(beside).is_ok_and(|m| m.is_file());
+        }
+        return DISPOSABLE_DIRS.contains(&last);
+    }
+    let base = entry.rsplit('/').next().unwrap_or(entry);
+    DISPOSABLE_FILES.iter().any(|f| match f.strip_prefix('*') {
+        Some(suffix) => base.len() > suffix.len() && base.ends_with(suffix),
+        None => base == *f,
+    })
+}
+
+/// The ignored paths in `work` that are not build output or caches ([`disposable`]): what removing it would lose.
+pub fn needed_ignored(work: &Path, entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| !disposable(work, e))
+        .cloned()
+        .collect()
+}
 
 /// The owner's settings (policy file `workspaces.*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +239,11 @@ pub struct Users {
     unknown: bool,
 }
 
+/// `p` in lower case, compared by its parts.
+fn folded(p: &Path) -> PathBuf {
+    PathBuf::from(p.to_string_lossy().to_lowercase())
+}
+
 /// `folder` and, when it exists, its canonical spelling.
 fn spellings(folder: &Path) -> Vec<PathBuf> {
     let mut v = vec![folder.to_path_buf()];
@@ -233,16 +290,20 @@ impl Users {
         u
     }
 
-    /// Whether anyone works at or below `work`, and when the last one there ended.
+    /// Whether anyone works at or below `work`, and when the last one there ended. Folders are compared without case on every system:
+    /// on one whose disk ignores case a folder may be spelled in another case than the worktree, and on one that does not, a folder that
+    /// differs only in case counting as in use only keeps a workspace longer.
     pub fn of(&self, work: &Path) -> Use {
-        if self.unknown || self.busy.iter().any(|f| f.starts_with(work)) {
+        let work = folded(work);
+        let under = |f: &PathBuf| folded(f).starts_with(&work);
+        if self.unknown || self.busy.iter().any(under) {
             return Use::Busy;
         }
         Use::Free {
             last_end_ms: self
                 .ended
                 .iter()
-                .filter(|(f, _)| f.starts_with(work))
+                .filter(|(f, _)| under(f))
                 .map(|(_, at)| *at)
                 .max(),
         }
@@ -270,6 +331,8 @@ pub enum Reason {
     Moved,
     /// git could not answer.
     GitFailed,
+    /// git ignores files in it that are not build output or caches ([`needed_ignored`]): they would be lost.
+    Ignored,
 }
 
 impl Reason {
@@ -281,6 +344,7 @@ impl Reason {
             Self::LinksMoved => "links-moved",
             Self::Moved => "moved",
             Self::GitFailed => "git-failed",
+            Self::Ignored => "ignored",
         }
     }
 
@@ -303,7 +367,10 @@ impl Reason {
 
     /// Git answered and the workspace holds work: its build output may still go (decision 4).
     fn holds_work(self) -> bool {
-        matches!(self, Self::Changes | Self::Submodules | Self::Unmerged)
+        matches!(
+            self,
+            Self::Changes | Self::Submodules | Self::Unmerged | Self::Ignored
+        )
     }
 }
 
@@ -377,6 +444,8 @@ pub struct Listed {
     pub free_since_ms: Option<u64>,
     pub size_bytes: u64,
     pub size_truncated: bool,
+    /// Left behind for `ignored`: the ignored paths that would be lost.
+    pub needed: Vec<String>,
 }
 
 /// What a clean-up did with one workspace.
@@ -398,6 +467,8 @@ pub struct Outcome {
     pub path: PathBuf,
     pub branch: String,
     pub action: Action,
+    /// Kept for `ignored`: the ignored paths that would be lost.
+    pub needed: Vec<String>,
 }
 
 /// How a clean-up runs.
@@ -552,16 +623,29 @@ impl Workspaces {
         })
     }
 
-    /// Gives back claims left by a process that ended mid-way.
+    /// Gives back claims left by a process that ended mid-way: stamped over an hour ago by a process that no longer runs. A claim with no
+    /// stamp yet (its holder is between the rename and the stamp, or ended there) is stamped now as nobody's, so it goes in an hour.
     fn release_stale_claims(&self, now_ms: u64) {
         for c in self.files(CLAIM_EXT) {
-            let age = std::fs::symlink_metadata(&c)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| now_ms.saturating_sub(d.as_millis() as u64));
-            if age >= CLAIM_STALE_MS {
-                give_back(&c, &c.with_extension(RECORD_EXT));
+            let Ok(bytes) = agora_platform::read_small_regular_file_no_follow(&c, RECORD_MAX)
+            else {
+                continue;
+            };
+            let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            match Stamp::of(&v) {
+                Some(stamp) => {
+                    if now_ms.saturating_sub(stamp.at_ms) >= CLAIM_STALE_MS && !stamp.alive() {
+                        give_back(&c, &c.with_extension(RECORD_EXT));
+                    }
+                }
+                None => {
+                    Stamp::nobody(now_ms).put(&mut v);
+                    if let Ok(bytes) = serde_json::to_vec(&v) {
+                        let _ = agora_platform::write_private(&c, &bytes);
+                    }
+                }
             }
         }
     }
@@ -617,10 +701,30 @@ impl Workspaces {
         Ok(())
     }
 
-    /// What removing it would lose, asked of git only once it is in place.
+    /// What removing it would lose, asked of git only once it is in place: work git tracks ([`git::keeps_work`]), then ignored files
+    /// that are not build output or caches ([`Reason::Ignored`]).
     fn work_of(&self, r: &Record) -> Result<Option<Keeps>, Reason> {
         self.in_place(r)?;
-        git::keeps_work(&r.checkout, &r.links.work).map_err(|e| Reason::of_error(&e))
+        let keeps =
+            git::keeps_work(&r.checkout, &r.links.work).map_err(|e| Reason::of_error(&e))?;
+        if keeps.is_none() && !self.needed_of(r)?.is_empty() {
+            return Err(Reason::Ignored);
+        }
+        Ok(keeps)
+    }
+
+    /// The ignored paths in `r` that would be lost ([`needed_ignored`]).
+    fn needed_of(&self, r: &Record) -> Result<Vec<String>, Reason> {
+        let entries = git::ignored_paths(&r.links.work).map_err(|e| Reason::of_error(&e))?;
+        Ok(needed_ignored(&r.links.work, &entries))
+    }
+
+    /// For a workspace left behind for `ignored`, its needed paths (for the listing); nothing otherwise.
+    fn needed_for(&self, r: &Record, state: State) -> Vec<String> {
+        match state {
+            State::LeftBehind(Reason::Ignored) => self.needed_of(r).unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 
     fn missing(r: &Record) -> bool {
@@ -652,6 +756,7 @@ impl Workspaces {
             out.push(Listed {
                 path: r.links.work.clone(),
                 branch: r.branch.clone(),
+                needed: self.needed_for(&r, state),
                 state,
                 free_since_ms: free,
                 size_bytes,
@@ -683,6 +788,7 @@ impl Workspaces {
                 path: path.clone(),
                 branch: branch.clone(),
                 action,
+                needed: Vec::new(),
             };
             if Self::missing(&r) {
                 if !how.dry_run {
@@ -750,7 +856,14 @@ impl Workspaces {
             if how.by_node && !matches!(action, Action::Removed) && !how.dry_run {
                 self.measure(&r);
             }
-            out.push(outcome(action));
+            let needed = match action {
+                Action::Kept(state) => self.needed_for(&r, state),
+                _ => Vec::new(),
+            };
+            out.push(Outcome {
+                needed,
+                ..outcome(action)
+            });
         }
         out
     }
@@ -761,11 +874,15 @@ impl Workspaces {
         let record = self.file(&r.links.work, RECORD_EXT);
         let claim = self.file(&r.links.work, CLAIM_EXT);
         agora_platform::rename_no_replace(&record, &claim).ok()?;
-        Some(Claim {
+        let c = Claim {
             record,
             claim,
             done: false,
-        })
+            stamp: Stamp::mine(),
+        };
+        // A rename keeps the record's time of last writing, which may be days old: the claim says itself when and by whom it was made.
+        let _ = self.write_claimed(&c, r);
+        Some(c)
     }
 
     /// Removes a cleanable workspace under a claim, after asking again who is in it and checking everything again.
@@ -814,6 +931,8 @@ impl Workspaces {
             return None;
         }
         self.in_place(r).ok()?;
+        // Held, so that right before each removal the worktree is checked to be the folder at its path, not a link swapped in for it.
+        let held = agora_platform::HeldFolder::open(&r.links.work).ok()?;
         let mut removed = Vec::new();
         for (marker, name) in BUILD_OUTPUT {
             let work = &r.links.work;
@@ -833,7 +952,7 @@ impl Workspaces {
             }
             // Asked again right before: still a real folder, and the worktree still at its place. `remove_dir_all` never follows a
             // link inside it.
-            if !real_dir(&dir) || self.in_place(r).is_err() {
+            if !real_dir(&dir) || !held.in_place() || self.in_place(r).is_err() {
                 continue;
             }
             if std::fs::remove_dir_all(&dir).is_ok() {
@@ -855,9 +974,10 @@ impl Workspaces {
     }
 
     fn write_claimed(&self, claim: &Claim, r: &Record) -> io::Result<()> {
-        let v = r
+        let mut v = r
             .to_json()
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+        claim.stamp.put(&mut v);
         let bytes = serde_json::to_vec(&v).map_err(io::Error::other)?;
         agora_platform::write_private(&claim.claim, &bytes)
     }
@@ -899,6 +1019,57 @@ struct Claim {
     record: PathBuf,
     claim: PathBuf,
     done: bool,
+    stamp: Stamp,
+}
+
+/// When a claim was made and by which process (its pid and start time, as ADR-0060 tells a process from a later one with its pid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    at_ms: u64,
+    /// 0: nobody (a claim found without a stamp).
+    pid: u32,
+    started: u64,
+}
+
+impl Stamp {
+    fn mine() -> Self {
+        let pid = std::process::id();
+        Self {
+            at_ms: crate::grants::now_ms(),
+            pid,
+            started: agora_platform::process_start_time(pid).unwrap_or(0),
+        }
+    }
+
+    fn nobody(at_ms: u64) -> Self {
+        Self {
+            at_ms,
+            pid: 0,
+            started: 0,
+        }
+    }
+
+    fn put(&self, v: &mut Value) {
+        if let Some(o) = v.as_object_mut() {
+            o.insert("claimed_at_ms".into(), json!(self.at_ms));
+            o.insert("claimer_pid".into(), json!(self.pid));
+            o.insert("claimer_started".into(), json!(self.started));
+        }
+    }
+
+    fn of(v: &Value) -> Option<Self> {
+        let n = |k: &str| v.get(k).and_then(Value::as_u64);
+        Some(Self {
+            at_ms: n("claimed_at_ms")?,
+            pid: u32::try_from(n("claimer_pid")?).ok()?,
+            started: n("claimer_started")?,
+        })
+    }
+
+    /// Whether the process that made the claim still runs (the same pid with the same start time).
+    fn alive(&self) -> bool {
+        self.pid != 0 && agora_platform::process_start_time(self.pid) == Some(self.started)
+    }
 }
 
 impl Claim {
@@ -933,6 +1104,84 @@ mod tests {
     use super::*;
 
     const H: u64 = HOUR_MS;
+
+    #[test]
+    fn only_build_output_and_caches_count_as_disposable() {
+        let work = std::env::temp_dir().join(format!("agora-ws-disposable-{}", std::process::id()));
+        std::fs::create_dir_all(work.join("crate")).unwrap();
+        std::fs::write(work.join("crate/Cargo.toml"), "").unwrap();
+        let entries: Vec<String> = [
+            "node_modules/",
+            "web/dist/",
+            "build/",
+            "out/",
+            ".next/",
+            ".nuxt/",
+            ".turbo/",
+            ".cache/",
+            ".parcel-cache/",
+            "coverage/",
+            "pkg/__pycache__/",
+            ".pytest_cache/",
+            ".mypy_cache/",
+            ".ruff_cache/",
+            ".gradle/",
+            "a/b.pyc",
+            "logs/run.log",
+            ".DS_Store",
+            "crate/target/",
+            // Needed:
+            ".env",
+            ".env.local",
+            "data/app.db",
+            "x.sqlite3",
+            "key.pem",
+            "id.key",
+            "notes/",
+            "target/",
+            "my.log.txt",
+            ".log",
+            "dist",
+            "logs/run.log/",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            needed_ignored(&work, &entries),
+            vec![
+                ".env",
+                ".env.local",
+                "data/app.db",
+                "x.sqlite3",
+                "key.pem",
+                "id.key",
+                "notes/",
+                "target/",
+                "my.log.txt",
+                ".log",
+                "dist",
+                "logs/run.log/",
+            ]
+        );
+        assert_eq!(DISPOSABLE_DIRS.len(), 15);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_folder_in_use_is_found_whatever_its_case() {
+        let mut u = Users::default();
+        u.busy(Path::new("/wt/Claude-1/src"));
+        assert_eq!(u.of(Path::new("/WT/claude-1")), Use::Busy);
+        let mut e = Users::default();
+        e.ended(Path::new("/WT/CLAUDE-1"), 7);
+        assert_eq!(
+            e.of(Path::new("/wt/claude-1")),
+            Use::Free {
+                last_end_ms: Some(7)
+            }
+        );
+    }
 
     #[test]
     fn in_use_wins_over_everything() {

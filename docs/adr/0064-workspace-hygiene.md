@@ -40,10 +40,18 @@ Built without a schema change (roadmap M3.7, `crates/agora-node/src/workspaces.r
   one outside the node's worktree folder, or one made before this was built is never touched. A pass a minute after the node starts
   and then every hour removes a recorded worktree when no agent runs or waits to be resumed in it (or below it), it is still a real
   folder at its recorded place, its links still hold what git wrote, git reports no uncommitted change (untracked files included),
-  no checked-out submodule and no commit that no other branch or remote has, and the grace period passed (24 hours from when the
+  no checked-out submodule and no commit that no other branch or remote has, every file git ignores there is regenerable build
+  output or a cache (below), and the grace period passed (24 hours from when the
   node first saw it free or its last agent ended, whichever is later). Removal is `git worktree remove` through the node's existing
   checks, never forced; the branch is kept. Anything else stays and is listed as left behind with its reason (`changes`,
-  `submodules`, `unmerged`, `links-moved`, `moved`, `git-failed`). Every removal is a line in `<data>/workspaces/workspaces.log`, and
+  `submodules`, `unmerged`, `ignored`, `links-moved`, `moved`, `git-failed`).
+- **Ignored files** (the maintainer's decision, 2026-11-27: "if git ignores it and it is unimportant, delete it; if it is needed, keep
+  it"). `git worktree remove` without `--force` takes files git ignores, so before removing, the node lists them (`git status
+  --ignored=matching`). Only regenerable build output and caches may go: the folders `node_modules`, `dist`, `build`, `out`, `.next`,
+  `.nuxt`, `.turbo`, `.cache`, `.parcel-cache`, `coverage`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.gradle`,
+  `target` beside a `Cargo.toml`, and the files `*.pyc`, `*.log`, `.DS_Store` (`DISPOSABLE_DIRS` and `DISPOSABLE_FILES`). Any other
+  ignored path (`.env*`, `*.db`, `*.sqlite*`, keys and certificates, notes) keeps the worktree as left behind with reason `ignored`,
+  and `agora workspaces` lists those paths. Every removal is a line in `<data>/workspaces/workspaces.log`, and
   the hub hears `WorktreeRemoved` (an existing message). An agent interrupted by a restart counts as in use while the ledger offers it
   (14 days), whether or not it can be resumed: stricter than the decision's "not resumable".
 - **Decision 3, CLI.** `agora workspaces` lists each workspace (path, state, reason, size, how long free, branch; fixed tokens for
@@ -51,7 +59,9 @@ Built without a schema change (roadmap M3.7, `crates/agora-node/src/workspaces.r
   does not wait for the grace period). It never removes work: removing a workspace that holds work stays a manual `git worktree
   remove`. While the node runs, the CLI asks it which agents run (`agent.list`) and refuses to clean when it cannot ask.
 - **Two removers at once.** A clean-up claims a workspace by renaming its record (`rename_no_replace`) before it checks it, asks again
-  who is in it after the claim, and the supervisor refuses a start or resume into a claimed workspace under its lock.
+  who is in it after the claim, and the supervisor refuses a start or resume into a claimed workspace under its lock. The claim is
+  stamped with when and by which process (pid and start time) it was made; another process gives it back only when it is over an hour
+  old and its process no longer runs.
 - **Decision 4, in part.** After the grace period, a left-behind worktree the node made has its `target/` (beside a `Cargo.toml`) and
   `node_modules/` (beside a `package.json`) removed once, only when it is a real folder at the top of the worktree that git ignores
   and holds nothing tracked.

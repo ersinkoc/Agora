@@ -57,19 +57,46 @@ fn age_token(ms: u64) -> String {
     }
 }
 
+/// A path git ignores in a workspace, as the terminal may show it: control, invisible and direction-changing characters written as
+/// visible escapes (a file name is anyone's text).
+fn shown(p: &str) -> String {
+    p.chars()
+        .map(|c| {
+            if c.is_control() || agora_core::text::is_hidden(c) {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// The ignored paths that keep a workspace, for a line or a sentence (`-` for none).
+fn needed_token(needed: &[String]) -> String {
+    if needed.is_empty() {
+        return "-".into();
+    }
+    needed
+        .iter()
+        .map(|p| shown(p))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn line(w: &Listed, now_ms: u64) -> String {
     let reason = match w.state {
         State::LeftBehind(r) => r.code(),
         _ => "-",
     };
     format!(
-        "{}\t{}\t{reason}\t{}\t{}\t{}",
+        "{}\t{}\t{reason}\t{}\t{}\t{}\t{}",
         w.path.display(),
         w.state.code(),
         size_token(w.size_bytes, w.size_truncated),
         w.free_since_ms
             .map_or_else(|| "-".to_string(), |f| age_token(now_ms.saturating_sub(f))),
-        w.branch
+        w.branch,
+        needed_token(&w.needed)
     )
 }
 
@@ -204,7 +231,11 @@ pub(crate) fn clean(say: &Say, o: &Opts) -> ExitCode {
                 kept += 1;
                 say.out(
                     key!("cli-workspaces-kept"),
-                    &[path, ("reason", r.code().into())],
+                    &[
+                        path,
+                        ("reason", r.code().into()),
+                        ("paths", needed_token(&out.needed).into()),
+                    ],
                 );
             }
             Action::Kept(_) | Action::BuildOutputRemoved(_) => {}

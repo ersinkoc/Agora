@@ -947,6 +947,7 @@ cli-workspaces-kept = { $path } çalışma alanı tutuldu: { $reason ->
         [unmerged] dalında başka hiçbir dalda olmayan ve gönderilmemiş commit'ler var
         [links-moved] Git bağlantıları değiştirilmiş, deposuna güvenilemez
         [moved] artık düğümün onu oluşturduğu yerde değil
+        [ignored] Git'in yok saydığı ama gerekebilecek dosyalar var: { $paths }
        *[other] Git onu denetleyemedi
     }
 cli-workspaces-clean-summary = { $removed } silindi, { $kept } bırakıldı (her birinin nedeni yukarıda).
