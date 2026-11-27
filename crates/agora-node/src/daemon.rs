@@ -3269,7 +3269,6 @@ fn lock_by<T>(m: &Mutex<T>, until: Instant) -> Option<std::sync::MutexGuard<'_, 
     }
 }
 
-/// `m` locked, waiting for it as long as `stop` is not set (`None` once it is and the lock is still held).
 /// ADR-0064: the first pass a minute after the node started, then every hour, or at once when a start was refused for the cap.
 const WORKSPACE_FIRST: Duration = Duration::from_secs(60);
 const WORKSPACE_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -3329,6 +3328,7 @@ fn clean_workspaces(
     }
 }
 
+/// `m` locked, waiting for it as long as `stop` is not set (`None` once it is and the lock is still held).
 fn lock_unless<'a, T>(m: &'a Mutex<T>, stop: &AtomicBool) -> Option<std::sync::MutexGuard<'a, T>> {
     loop {
         match m.try_lock() {
