@@ -84,6 +84,8 @@ fn the_typed_list_reads_the_interrupted_agent_as_the_event_says_it() {
             interrupted_at_ms: 1_700_000_600_000,
             last_state: v1::AgentState::Working as i32,
             still_running: true,
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }]
     );
 }

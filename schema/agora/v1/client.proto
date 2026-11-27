@@ -92,6 +92,9 @@ message AgentSnapshot {
   // ADR-0094: `AgentRunsInside.kind` of a running `shell` agent; empty when nothing known runs inside. Cleared by its `AgentStarted`,
   // `AgentExited` and `AgentInterrupted`, and when its node starts again.
   string runs_inside = 46;
+  // ADR-0119 decision 10: a helper started from another machine: its parent's machine and agent there (`parent_agent_id` stays empty).
+  string parent_node_id = 47;
+  string parent_node_agent_id = 48;
 }
 
 message TerminalSnapshot {

@@ -9,6 +9,9 @@ pub const TASK_HANDOFF_V1: &str = "mesh.task_handoff.v1";
 
 /// ADR-0112: the hub answers `BoardCall{tool: "fleet_status"}` (every machine and running agent of the hub, for agents).
 pub const FLEET_STATUS_V1: &str = "mesh.fleet_status.v1";
+/// ADR-0119: a helper started on another machine (`HelperStart`, `HelperStartResult`, `HelperFollow`, `HelperRelease`). Named in the
+/// schema step; no node or hub offers it until build steps 2 to 4.
+pub const MESH_SPAWN_REMOTE: &str = "mesh.spawn.remote";
 
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]

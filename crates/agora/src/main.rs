@@ -1741,6 +1741,8 @@ mod agent_list_tests {
             interrupted_at_ms: 2,
             last_state: v1::AgentState::Working as i32,
             still_running,
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }
     }
 

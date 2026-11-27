@@ -565,6 +565,8 @@ impl Entry {
             interrupted_at_ms: self.interrupted_at_ms,
             last_state: proto_state(&self.last_state) as i32,
             still_running: self.still_running(),
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }
     }
 
@@ -2421,6 +2423,9 @@ mod carry_on_tests {
                 same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
+                grant_id: String::new(),
+                parent_node_id: String::new(),
+                parent_node_agent_id: String::new(),
             }),
             now,
         );

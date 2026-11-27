@@ -77,6 +77,7 @@ mesh-rate_limited = Çok hızlı mesaj gönderiyorsunuz. Biraz sonra yeniden den
 mesh-body_too_large = Mesaj çok büyük (sınır: { $limit }). Bunun yerine bir referans gönderin.
 mesh-too_many_refs = Çok fazla referans var (sınır: { $limit }).
 mesh-too_many_asks = Yanıt bekleyen çok fazla soru var (sınır: { $limit }).
+mesh-remote_helpers_off = Bu hub'da başka bir makinede ajan başlatmak kapalı. Hub'ın sahibi bunu açabilir.
 mesh-timeout = Zamanında yanıt gelmedi.
 mesh-folder_not_allowed = Yardımcı yalnızca isteyen ajanın kendi klasöründe çalışabilir: { $folder } bunun dışında.
 mesh-helper_limit = Ajan şu anda başka bir yardımcı başlatamaz (sınır: { $limit }). { $rule ->

@@ -257,7 +257,9 @@ the node answers them itself (`agora-node::spawn`), not the broker. The caller i
   shown to the user, never covered by a grant, and a helper started there cannot ask for helpers. A helper's helper must stay
   inside. Folder rules of ADR-0052 apply. On a node that confines agents (ADR-0047), a helper of another kind whose manifest the
   owner trusts to widen confinement is refused (`node.policy_denied`, rule `sandbox.trust_manifest`). Another machine is not
-  supported yet (`protocol.capability_missing`, `mesh.spawn.remote`).
+  supported yet (`protocol.capability_missing`, `mesh.spawn.remote`): ADR-0119 (Accepted 2026-11-27) builds it with standing grants
+  and chains down to depth 3; its messages are in the schema (see `protocol.md`, "Helpers on another machine") and nothing offers the
+  capability until its steps 2 to 4 are built.
 - **Limits** (`mesh.helper_limit` with `rule`): a helper cannot start helpers unless the decision that started it allowed it, and a
   helper's helper never can (`depth`); 3 running helpers per agent (`helpers`); one start in progress or waiting for the user per
   agent (`pending`; the slot is taken before the limits are checked and held until the start ends, so concurrent calls cannot pass

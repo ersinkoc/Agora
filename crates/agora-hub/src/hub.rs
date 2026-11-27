@@ -1552,6 +1552,9 @@ mod tests {
             same_process: false,
             launch_options: Vec::new(),
             skips_permissions: false,
+            grant_id: String::new(),
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }));
         let row = spawn_audit(&view, &started).unwrap();
         assert_eq!((row.0.as_str(), row.3.as_str()), ("n1/a", "ok:n1/b"));
@@ -1582,6 +1585,9 @@ mod tests {
                 same_process: false,
                 launch_options: options.iter().map(|o| (*o).to_string()).collect(),
                 skips_permissions: skips,
+                grant_id: String::new(),
+                parent_node_id: String::new(),
+                parent_node_agent_id: String::new(),
             }))
         };
         assert!(spawn_audit(&view, &started(false, &[])).is_none());
@@ -1662,6 +1668,9 @@ mod tests {
                 same_process: false,
                 launch_options: Vec::new(),
                 skips_permissions: false,
+                grant_id: String::new(),
+                parent_node_id: String::new(),
+                parent_node_agent_id: String::new(),
             })),
         }
         .encode_to_vec()

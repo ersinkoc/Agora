@@ -89,6 +89,9 @@ fn agent(node: &str, id: &str) -> Body {
         same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
+        grant_id: String::new(),
+        parent_node_id: String::new(),
+        parent_node_agent_id: String::new(),
     })
 }
 
@@ -1627,6 +1630,9 @@ fn started(id: &str, project: &str) -> Body {
         same_process: false,
         launch_options: Vec::new(),
         skips_permissions: false,
+        grant_id: String::new(),
+        parent_node_id: String::new(),
+        parent_node_agent_id: String::new(),
     })
 }
 

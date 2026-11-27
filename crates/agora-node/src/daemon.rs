@@ -695,6 +695,9 @@ impl EventSink {
             same_process,
             launch_options: view.launch_options.clone(),
             skips_permissions: view.skips_permissions,
+            grant_id: String::new(),
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }));
         record(Body::AgentStateChanged(v1::AgentStateChanged {
             agent_id: agent.into(),
@@ -871,6 +874,9 @@ impl EventSink {
             same_process: false,
             launch_options: launch.ids.clone(),
             skips_permissions: launch.skips_permissions,
+            grant_id: String::new(),
+            parent_node_id: String::new(),
+            parent_node_agent_id: String::new(),
         }));
     }
 

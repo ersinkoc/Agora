@@ -126,6 +126,12 @@ message CommandRequest {
     PluginCatalogList plugin_catalog_list = 120;
     // ADR-0120: one screenshot of a plugin in the community catalog (plugins.proto). Answered by the hub for any signed-in person.
     PluginCatalogScreenshot plugin_catalog_screenshot = 121;
+    // ADR-0119, capability `mesh.spawn.remote` (named; no node or hub offers it until build steps 2 to 4): a helper started on another
+    // machine. Each comes only from a node's connection; the hub writes `origin` (and `from_node` on a result) from certificates.
+    HelperStart helper_start = 122;
+    HelperStartResult helper_start_result = 123;
+    HelperFollow helper_follow = 124;
+    HelperRelease helper_release = 125;
   }
 }
 
@@ -192,6 +198,9 @@ message CommandOk {
     PluginCatalogListResult plugin_catalog_list = 39;
     // ADR-0120: the answer to `PluginCatalogScreenshot`.
     PluginCatalogScreenshotResult plugin_catalog_screenshot = 40;
+    // ADR-0119: the target's first answer to a forwarded `HelperStart`, and its answer to `HelperFollow`.
+    HelperStartAccepted helper_start_accepted = 41;
+    HelperFollowResult helper_follow_result = 42;
   }
 }
 
@@ -378,6 +387,10 @@ message ApprovalResolve {
   // F(node_id) F(approval_id) F(verdict) F(agent_id) F(sha256(action)) F(sha256(detail)) F(always_label) F(always_option_id)
   // (docs/specs/protocol.md). Any other value is refused.
   ApprovalScope scope = 7;
+  // ADR-0119 decision 12, only for an approved `agent.start.remote`: the standing grant the person gives (absent or `max_running` 0:
+  // this start only). `helper_grant` and `helpers_may_start` must be 0 and false on that action. Signed over `agora-approval-start-v4`
+  // (docs/specs/protocol.md).
+  RemoteGrant remote_grant = 8;
 }
 
 // ADR-0041. Signed by a trusted device (the same ES256 scheme as ApprovalResolve) over
@@ -412,8 +425,133 @@ message GrantInfo {
   uint32 remaining = 8;
 }
 
+// ADR-0119 decision 12: a standing grant on this node for starts from another machine, listed apart from `GrantInfo` (in
+// `GrantListResult.remote_grants`) so a window from before it never reads one as a used-up local grant. `origin_node` and the root
+// are the hub's word (it writes them), `origin_agent` the asking machine's.
+message RemoteGrantInfo {
+  string grant_id = 1;
+  string signer_device_id = 2;
+  string origin_node = 3;
+  string origin_agent = 4;
+  string root_node = 5;
+  string root_agent = 6;
+  // The kind asked (any integrated kind with `any_kind`) and the folder (and below it with `below_folder`).
+  string kind = 7;
+  string folder = 8;
+  bool any_kind = 9;
+  bool below_folder = 10;
+  bool chain = 11;
+  uint32 max_running = 12;
+  uint32 running = 13;
+  uint32 starts_this_hour = 14;
+  uint64 until_ms = 15;
+}
+
+// ADR-0119 decision 12: the scope of a standing grant the person gives on an `agent.start.remote` card, signed field by field over
+// `agora-approval-start-v4`. The kind, the folder and the asker it covers are the target's own rendered request, never this message.
+message RemoteGrant {
+  // How many helpers started under the grant may run at once on the target (1..20). 0: no grant (this start only).
+  uint32 max_running = 1;
+  // Any kind the target has with an agent integration, not only the kind asked.
+  bool any_kind = 2;
+  // The folder asked and every folder below it, not only the folder asked.
+  bool below_folder = 3;
+  // Every agent of the chain the asker roots may ask under it (from any machine of the hub), not only the asking run.
+  bool chain = 4;
+  // When it ends (milliseconds since the epoch), at most 24 hours after the decision; 0: 24 hours after the decision. It also ends when
+  // the root run ends.
+  uint64 until_ms = 5;
+}
+
+// ADR-0119 decision 1: node -> hub -> target. An agent of the sending node asks another machine to start a helper.
+message HelperStart {
+  // 16 random bytes the asking node chose; names this start in the result and a release.
+  bytes start_id = 1;
+  string target_node = 2;
+  string kind = 3;
+  // A full path on the target.
+  string folder = 4;
+  string prompt = 5;
+  bool worktree = 6;
+  repeated LaunchSetting settings = 7;
+  repeated string launch_options = 8;
+  // The asking agent and its run (ADR-0109), the asking node's word.
+  string from_agent = 9;
+  bytes from_run_id = 10;
+  // The asking machine, written by the hub from the connection's certificate (whatever the node sent).
+  string origin = 11;
+  // How deep the asker is in its chain (0: a person started it; at most 3 may ask) and the chain's root. Written by the hub, like
+  // `origin`, from its own record of the cross-machine starts it carried: an asker the hub did not carry a start for is depth 0 and
+  // its own root, whatever the node sent (a local helper's depth below that is the asking node's own limit).
+  uint32 depth = 12;
+  string root_node = 13;
+  string root_agent = 14;
+  bytes root_run_id = 15;
+  // The asking agent's kind, for the card ("Claude Code on mac wants to start ..."): the asking node's word.
+  string from_agent_kind = 16;
+}
+
+// ADR-0119 decision 5: the target raised its card (or found a grant that covers the start). `granted` with `grant_id`: no card; the
+// result follows as soon as the helper runs.
+message HelperStartAccepted {
+  string approval_id = 1;
+  uint64 ttl_ms = 2;
+  bool granted = 3;
+  string grant_id = 4;
+}
+
+// ADR-0119 decision 6: target -> hub -> asking node, when the start was decided, expired or failed to launch.
+message HelperStartResult {
+  bytes start_id = 1;
+  // The asking machine (`origin` of the start).
+  string to_node = 2;
+  // The helper on the target, and its terminal; empty with `error`.
+  string agent_id = 3;
+  string terminal_id = 4;
+  ErrorInfo error = 5;
+  // The target, written by the hub from the connection's certificate.
+  string from_node = 6;
+}
+
+// ADR-0119 decision 7: asking node -> hub -> target, for `agent_wait` and `agent_output` on a helper there.
+message HelperFollow {
+  // The helper on the target.
+  string agent_id = 1;
+  string from_agent = 2;
+  bytes from_run_id = 3;
+  // The asking machine, written by the hub.
+  string origin = 4;
+  // `idle`, `working`, `blocked`, `done` or `exited`; empty: answer at once.
+  string wait_state = 5;
+  // At most 20000, so each answer fits in a forward's deadline.
+  uint32 wait_ms = 6;
+  // Lines of output wanted (0: none, at most 200).
+  uint32 lines = 7;
+}
+
+message HelperFollowResult {
+  string state = 1;
+  repeated string lines = 2;
+  // `screen` or `transcript`, when lines were asked.
+  string source = 3;
+}
+
+// ADR-0119 decision 8: asking node -> hub -> target, when the asker's call ends, the asker exits, or a person stops it.
+message HelperRelease {
+  string from_agent = 1;
+  bytes from_run_id = 2;
+  // Set: withdraw the card of this start. Empty: the asker is gone (its cards are withdrawn and its right to follow ends).
+  bytes start_id = 3;
+  // A person stopped the asker with its helpers: stop that run's helpers on the target too, and theirs.
+  bool stop_helpers = 4;
+  // The asking machine, written by the hub.
+  string origin = 5;
+}
+
 message GrantListResult {
   repeated GrantInfo grants = 1;
+  // ADR-0119: the node's standing grants for starts from other machines.
+  repeated RemoteGrantInfo remote_grants = 2;
 }
 
 message MeshPost {

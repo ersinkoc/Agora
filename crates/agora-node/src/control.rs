@@ -1837,6 +1837,13 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 result: Some(Ok_::PreviewList(v1::PreviewListResult { forwards })),
             })
         }
+        // ADR-0119: not offered until build step 2.
+        Cmd::HelperStart(_)
+        | Cmd::HelperStartResult(_)
+        | Cmd::HelperFollow(_)
+        | Cmd::HelperRelease(_) => Err(capability_missing(
+            agora_protocol::handshake::MESH_SPAWN_REMOTE,
+        )),
         other => Err(capability_missing(command_name(other))),
     }
 }
@@ -2298,6 +2305,12 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         // ADR-0085: renewal is asked of the hub, on the machine's own connection; a node never receives it (refused as unsupported).
         Cmd::Renew(_) => "enroll.renew",
         Cmd::PreviewConnect(_) => "preview.connect",
+        // ADR-0119: the cross-machine helper messages exist in the schema; the node does not offer `mesh.spawn.remote` yet, so they are
+        // refused as a missing capability.
+        Cmd::HelperStart(_) => "helper.start",
+        Cmd::HelperStartResult(_) => "helper.start_result",
+        Cmd::HelperFollow(_) => "helper.follow",
+        Cmd::HelperRelease(_) => "helper.release",
         // ADR-0082: only the local control socket answers it (in `handle_request`); anywhere else it is refused as unsupported.
         Cmd::ControlAuth(_) => "control.auth",
         // ADR-0113 decision 6: the hub answers these itself and never forwards them; a node refuses them as unsupported.
@@ -3367,6 +3380,29 @@ mod idempotency_tests {
 
     /// ADR-0108: forgetting an interrupted agent removes both of its files, empties its ring and drops its Resume offer; a batch the
     /// writer had not written yet never brings the file back.
+    /// ADR-0119 schema step: the cross-machine helper requests are named but not offered, so each is refused as `mesh.spawn.remote`.
+    #[test]
+    fn the_cross_machine_helper_requests_wait_for_their_capability() {
+        let dir = forget_dir("helpers");
+        let ledger = crate::ledger::Ledger::open(&dir.join("data"), 1).unwrap();
+        let n = Forgetting::new("helpers", bare_supervisor(), Vec::new(), ledger, dir);
+        for cmd in [
+            Cmd::HelperStart(v1::HelperStart::default()),
+            Cmd::HelperStartResult(v1::HelperStartResult::default()),
+            Cmd::HelperFollow(v1::HelperFollow::default()),
+            Cmd::HelperRelease(v1::HelperRelease::default()),
+        ] {
+            let e = execute(&n.ctx, &cmd).unwrap_err();
+            assert_eq!(e.code, ErrorCode::ProtocolCapabilityMissing, "{cmd:?}");
+            assert_eq!(
+                e.params.get("capability"),
+                Some(&agora_protocol::ParamValue::Str(
+                    agora_protocol::handshake::MESH_SPAWN_REMOTE.into()
+                ))
+            );
+        }
+    }
+
     #[test]
     fn a_forget_removes_the_conversation_and_the_resume_offer() {
         use agora_adapters::host::ChatItem;

@@ -1,0 +1,111 @@
+{
+ "about": "ADR-0119 decision 4, agora-approval-start-v4: the signed bytes of a decision on an agent.start.remote approval: the domain, one NUL, then F(node_id) F(origin_node) F(origin_agent) F(approval_id) F(verdict) F(settings) F(launch_options) F(grant_max_running) F(grant_any_kind) F(grant_below_folder) F(grant_chain) F(grant_until_ms) F(sha256(detail)), where F(x) is the decimal byte length of x, `:`, then x. `settings` and `options` are written as in v3 (length-prefixed lists), verdict and the flags as 0/1, numbers in decimal; with no grant every grant field is 0. `detail` is the request exactly as announced (hashed byte for byte, SHA-256, lowercase hex). Checked by crates/agora-protocol/tests/approval_start_v4_signing.rs now, and by the node, the web window and the terminal client when ADR-0119's steps 2 and 5 build them.",
+ "cases": [
+  {
+   "name": "approved, no grant",
+   "node": "blackview",
+   "origin_node": "mac",
+   "origin_agent": "agent-3",
+   "approval_id": "ap-7",
+   "approved": true,
+   "settings": [],
+   "options": [],
+   "grant": {
+    "max_running": 0,
+    "any_kind": false,
+    "below_folder": false,
+    "chain": false,
+    "until_ms": 0
+   },
+   "detail": "{\"node\":\"blackview\",\"origin_node\":\"mac\",\"origin_agent\":\"agent-3\",\"origin_agent_kind\":\"claude-code\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"worktree\":false,\"depth\":0,\"root_node\":\"mac\",\"root_agent\":\"agent-3\",\"grant_allowed\":true,\"prompt\":\"Write the tests for the login redirect.\",\"settings\":[],\"launch_options\":[]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d763400393a626c61636b76696577333a6d6163373a6167656e742d33343a61702d37313a31313a30313a30313a30313a30313a30313a30313a3036343a36336236333164663136373530306264303264396233663266383431366434306562636666636137613735336261323930333432353962613232333532363563"
+  },
+  {
+   "name": "approved with a standing grant for the chain, any kind, below the folder, until a time",
+   "node": "blackview",
+   "origin_node": "mac",
+   "origin_agent": "agent-3",
+   "approval_id": "ap-8",
+   "approved": true,
+   "settings": [],
+   "options": [],
+   "grant": {
+    "max_running": 6,
+    "any_kind": true,
+    "below_folder": true,
+    "chain": true,
+    "until_ms": 1795800000000
+   },
+   "detail": "{\"node\":\"blackview\",\"origin_node\":\"mac\",\"origin_agent\":\"agent-3\",\"origin_agent_kind\":\"claude-code\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"worktree\":false,\"depth\":0,\"root_node\":\"mac\",\"root_agent\":\"agent-3\",\"grant_allowed\":true,\"prompt\":\"Write the tests for the login redirect.\",\"settings\":[],\"launch_options\":[]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d763400393a626c61636b76696577333a6d6163373a6167656e742d33343a61702d38313a31313a30313a30313a36313a31313a31313a3131333a3137393538303030303030303036343a36336236333164663136373530306264303264396233663266383431366434306562636666636137613735336261323930333432353962613232333532363563"
+  },
+  {
+   "name": "approved with settings, a grant of the kind asked only",
+   "node": "blackview",
+   "origin_node": "win",
+   "origin_agent": "agent-12",
+   "approval_id": "ap-9",
+   "approved": true,
+   "settings": [
+    [
+     "model",
+     "gpt-6.1-sol"
+    ],
+    [
+     "effort",
+     "high"
+    ]
+   ],
+   "options": [],
+   "grant": {
+    "max_running": 2,
+    "any_kind": false,
+    "below_folder": false,
+    "chain": false,
+    "until_ms": 0
+   },
+   "detail": "{\"node\":\"blackview\",\"origin_node\":\"win\",\"origin_agent\":\"agent-12\",\"origin_agent_kind\":\"claude-code\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"worktree\":false,\"depth\":0,\"root_node\":\"mac\",\"root_agent\":\"agent-3\",\"grant_allowed\":true,\"prompt\":\"Write the tests for the login redirect.\",\"settings\":[{\"id\":\"model\",\"label\":\"setting-model\",\"value\":\"gpt-6.1-sol\"},{\"id\":\"effort\",\"label\":\"setting-effort\",\"value\":\"high\"}],\"launch_options\":[]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d763400393a626c61636b76696577333a77696e383a6167656e742d3132343a61702d39313a3134303a323a353a6d6f64656c3a31313a6770742d362e312d736f6c3a363a6566666f72743a343a68696768313a30313a32313a30313a30313a30313a3036343a63363834386637393165356539633362666135316439633330366339626361623638343962616535666362376337353666353533333431376566636561336631"
+  },
+  {
+   "name": "approved with an option that skips permissions (never a grant)",
+   "node": "blackview",
+   "origin_node": "mac",
+   "origin_agent": "agent-3",
+   "approval_id": "ap-10",
+   "approved": true,
+   "settings": [],
+   "options": [
+    "skip-permissions"
+   ],
+   "grant": {
+    "max_running": 0,
+    "any_kind": false,
+    "below_folder": false,
+    "chain": false,
+    "until_ms": 0
+   },
+   "detail": "{\"node\":\"blackview\",\"origin_node\":\"mac\",\"origin_agent\":\"agent-3\",\"origin_agent_kind\":\"claude-code\",\"kind\":\"codex\",\"folder\":\"/home/dev/code/login-fix\",\"worktree\":false,\"depth\":0,\"root_node\":\"mac\",\"root_agent\":\"agent-3\",\"grant_allowed\":false,\"prompt\":\"Write the tests for the login redirect.\",\"settings\":[],\"launch_options\":[{\"id\":\"skip-permissions\",\"label\":\"option-skip-permissions\",\"skips_permissions\":true}]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d763400393a626c61636b76696577333a6d6163373a6167656e742d33353a61702d3130313a31313a3032313a313a31363a736b69702d7065726d697373696f6e73313a30313a30313a30313a30313a3036343a31646333626536313830396230313537353232643263663437383139623533383330383335373735643631663739613566626139653532663837346436373465"
+  },
+  {
+   "name": "denied, a non-ASCII prompt and folder, depth 2",
+   "node": "blackview",
+   "origin_node": "mac",
+   "origin_agent": "agent-3",
+   "approval_id": "ap-11",
+   "approved": false,
+   "settings": [],
+   "options": [],
+   "grant": {
+    "max_running": 0,
+    "any_kind": false,
+    "below_folder": false,
+    "chain": false,
+    "until_ms": 0
+   },
+   "detail": "{\"node\":\"blackview\",\"origin_node\":\"mac\",\"origin_agent\":\"agent-3\",\"origin_agent_kind\":\"claude-code\",\"kind\":\"codex\",\"folder\":\"/home/dev/kod/giriş\",\"worktree\":false,\"depth\":2,\"root_node\":\"mac\",\"root_agent\":\"agent-1\",\"grant_allowed\":true,\"prompt\":\"Giriş yönlendirmesini düzelt.\",\"settings\":[],\"launch_options\":[]}",
+   "hex": "61676f72612d617070726f76616c2d73746172742d763400393a626c61636b76696577333a6d6163373a6167656e742d33353a61702d3131313a30313a30313a30313a30313a30313a30313a30313a3036343a61333534363565623733623937386330643637363761383264323235346139303463303539626535336166616636346461323231316431613833333137666534"
+  }
+ ]
+}

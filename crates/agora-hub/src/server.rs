@@ -1632,6 +1632,18 @@ fn post_for_node(
         Some(command_request::Command::BoardCall(call)) => {
             return board_for_node(hub, node_id, &rid, &call, open, answers);
         }
+        // ADR-0119: the cross-machine helper requests are in the schema, but this hub does not carry them yet (build step 3).
+        Some(
+            command_request::Command::HelperStart(_)
+            | command_request::Command::HelperStartResult(_)
+            | command_request::Command::HelperFollow(_)
+            | command_request::Command::HelperRelease(_),
+        ) => {
+            return refuse(
+                Error::new(ErrorCode::ProtocolCapabilityMissing)
+                    .with("capability", agora_protocol::handshake::MESH_SPAWN_REMOTE),
+            );
+        }
         _ => {
             return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));
         }

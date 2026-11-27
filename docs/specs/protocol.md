@@ -1588,6 +1588,52 @@ remove ID`, docs/ux/plugins.md).
   image (a `data:` address with the fixed media type). Golden fixtures: `schema/fixtures/catalog-gallery/`
   (`crates/agora-protocol/tests/catalog_gallery.rs`).
 
+## Helpers on another machine (ADR-0119)
+
+Capability `mesh.spawn.remote`, named in the schema; no node or hub offers it until ADR-0119's build steps 2 to 4, and both refuse the
+four requests below with `protocol.capability_missing` (`capability = mesh.spawn.remote`) until then. Everything is additive.
+
+- **Requests** (`CommandRequest` arms, each only from a node's connection; the hub writes `origin`, and `from_node` on a result, from the
+  connection's certificate whatever the node sent): `HelperStart` (122: `start_id` 16 random bytes, `target_node`, `kind`, `folder` a
+  full path on the target, `prompt`, `worktree`, `settings`, `launch_options`, the asking `from_agent`, `from_run_id` and `from_agent_kind`, `origin`, and
+  the chain's `depth`, `root_node`, `root_agent`, `root_run_id`, which the hub writes like `origin`, from its own record of the
+  cross-machine starts it carried: an asker it carried no start for is depth 0 and its own root whatever the node sent, so no machine
+  can claim a place in another's chain; a hub that restarted has no record and every asker is its own root, so chain grants stop
+  applying, never widen), `HelperStartResult` (123: `start_id`, `to_node`, the helper's
+  `agent_id` and `terminal_id`, or `error`; `from_node`), `HelperFollow` (124: `agent_id`, `from_agent`, `from_run_id`, `origin`,
+  `wait_state`, `wait_ms` at most 20000, `lines` at most 200) and `HelperRelease` (125: `from_agent`, `from_run_id`, `start_id` (empty:
+  the asker is gone), `stop_helpers`, `origin`).
+- **Results** (`CommandOk` arms): `HelperStartAccepted` (41: `approval_id`, `ttl_ms`; `granted` with `grant_id` when a standing grant
+  covered the start and no card was raised) and `HelperFollowResult` (42: `state`, `lines`, `source`).
+- **The approval** has the action `agent.start.remote` (never `agent.start`, so an older window never shows it as a local start). A
+  decision is `ApprovalResolve` with `helper_grant` 0 and `helpers_may_start` false (their published meanings are a local start's), and,
+  for a standing grant, `remote_grant` (field 8, `RemoteGrant`: `max_running` 1..20, `any_kind`, `below_folder`, `chain`, `until_ms` at
+  most 24 hours after the decision, 0 meaning 24 hours). It is signed over:
+
+  ```
+  agora-approval-start-v4 NUL F(node_id) F(origin_node) F(origin_agent) F(approval_id) F(verdict) F(settings) F(launch_options)
+    F(grant_max_running) F(grant_any_kind) F(grant_below_folder) F(grant_chain) F(grant_until_ms) F(sha256(detail))
+  ```
+
+  where F(x) is the decimal byte length of x, `:`, then x; `settings` and `launch_options` written as in v3; the verdict and the flags
+  `0`/`1`; numbers in decimal; with no grant every grant field `0`. The kind, folder and asker a grant covers are the target's own
+  rendered request, never taken from the decision. A start with an option that skips permissions is never granted. A denial (verdict
+  `0`) carries an all-zero grant, and a grant on any action other than `agent.start.remote` is refused, both with
+  `approval.signature_invalid`. The target judges `until_ms` by its own clock when it verifies the decision: the grant ends at
+  `now + 24 h` for `0`, else at `min(until_ms, now + 24 h)` (a value a little over 24 hours, from clock skew between the device and
+  the target, is clamped, not refused), and an `until_ms` already past is refused. A decision is single-use and valid only while its
+  card waits, so "the decision" is the moment the target verifies it. Vectors:
+  `schema/fixtures/signing/approval-start-v4.json` (checked by `crates/agora-protocol/tests/approval_start_v4_signing.rs`).
+- **Events and the snapshot**: `AgentStarted.grant_id` (32: the grant a start ran under), and `parent_node_id` and
+  `parent_node_agent_id` on `AgentStarted` (33, 34), `AgentInterrupted` (11, 12) and the client `AgentSnapshot` (47, 48): a helper from
+  another machine names its parent there and keeps `parent_agent_id` empty, so an older hub or window shows it at the top level, never
+  under an unrelated local agent.
+- **Grants**: a remote grant is listed in `GrantListResult.remote_grants` (2, `RemoteGrantInfo`: its id, signer, `origin_node`,
+  `origin_agent`, root, kind, folder, the flags, `max_running`, `running`, `starts_this_hour`, `until_ms`), apart from `grants`, so a
+  window from before it never reads one as a used-up local grant; `GrantRevoke` with its id ends it.
+- **Error code**: `mesh.remote_helpers_off` (no parameters): a hub with members carries these starts only when its owner turned
+  `remote_helpers` on.
+
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub

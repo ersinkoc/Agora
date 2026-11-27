@@ -184,6 +184,11 @@ message AgentStarted {
   // badge for the agent's whole life). Old clients ignore them. (30-39 are kept for ADR-0059.)
   repeated string launch_options = 30;
   bool skips_permissions = 31;
+  // ADR-0119: the standing grant a helper from another machine started under (empty when it was asked), and its parent there (the
+  // machine is the hub-written origin, the agent that machine's word). `parent_agent_id` stays empty for such a helper.
+  string grant_id = 32;
+  string parent_node_id = 33;
+  string parent_node_agent_id = 34;
 }
 
 message AgentStateChanged {
@@ -288,6 +293,9 @@ message AgentInterrupted {
   // Its process outlived the node (a node killed without stopping its agents) and still runs: Resume is refused until it is
   // stopped (`agent.stop` ends exactly that process), so two processes never continue one conversation.
   bool still_running = 10;
+  // ADR-0119 decision 10: as in `AgentStarted`.
+  string parent_node_id = 11;
+  string parent_node_agent_id = 12;
 }
 
 message AgentForgotten {

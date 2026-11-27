@@ -1641,6 +1641,8 @@ fn run_local_on(
             Some(command_request::Command::GrantList(_)) => {
                 return done(Ok(Ok_::GrantList(agora_protocol::v1::GrantListResult {
                     grants: g.list(now),
+                    // ADR-0119: no remote grants until its step 2.
+                    remote_grants: Vec::new(),
                 })));
             }
             Some(command_request::Command::GrantRevoke(r)) => {

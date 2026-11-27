@@ -61,10 +61,11 @@ it this task" is the next request agents make, and today it needs the person.
 
    The node then sends a new node → hub request **`HelperStart`** (a new `CommandRequest` arm):
    `{ start_id, target_node, kind, folder, prompt, worktree, settings[], launch_options[], from_agent, from_run_id, origin,
-   depth, root_node, root_agent, root_run_id }`. `start_id` is 16 random bytes the asking node chooses. `from_run_id` is the asking
+   depth, root_node, root_agent, root_run_id, from_agent_kind }`. `start_id` is 16 random bytes the asking node chooses. `from_run_id` is the asking
    agent's run (ADR-0109). `origin` is empty; the hub writes it. `depth` and `root_*` name the person-started agent the chain began
-   with (the asker itself at depth 0); the asking node writes them from its own record of how its agent was started, so they are
-   its word, like `from_agent`.
+   with (the asker itself at depth 0). The hub writes them, like `origin` (review of the schema step): from its own record of the
+   cross-machine starts it carried, so a machine cannot claim a place in another's chain; an asker it carried no start for is depth 0
+   and its own root, and after a hub restart every asker is (chain grants then stop applying; they never widen).
 
 2. **The hub carries it and widens nothing.**
    - It accepts `HelperStart` only on a node's connection. From a window it is `protocol.invalid_message`.
@@ -206,7 +207,8 @@ it this task" is the next request agents make, and today it needs the person.
 12. **Standing grants on the target** (the maintainer's "approve once, then free"). The card offers, beside Allow and Deny, "Allow
    later starts like this". Its scope, shown on the card, chosen there and signed (decision 4):
    - **who may ask:** this asking agent's run (`origin_node`, `from_agent`, `from_run_id`), and, when "its helpers may ask too" is
-     ticked, every agent of the chain it roots (`root_node`, `root_agent`, `root_run_id`) asking from any machine of this hub;
+     ticked, every agent of the chain it roots (`root_node`, `root_agent`, `root_run_id`, written by the hub from the starts it
+     carried) asking from any machine of this hub;
    - **what:** the kind asked, or any kind this node has with an agent integration (the grant rules of ADR-0057: never `shell`, a
      shell or a wrapper); settings as shown on the card (a later start with other settings is asked); never a launch option that
      skips permissions;
@@ -251,9 +253,9 @@ New threat-model rows (numbers are the next free ones when built):
   - the hub limits per asking machine (12 a minute, 8 open), and the target limits per asking machine (2 cards, 6 helpers);
   - a solo hub, or a hub whose owner turned on `remote_helpers`.
 
-  Residual: the person can be worn down by cards; `origin_agent` and the chain's `root_*` are the asking machine's word (only
-  `origin_node` is vouched by the hub), and the card says so. **Under a grant, starts happen out of the person's sight:** an agent
-  that was talked into it (T14), or a compromised machine of the hub claiming to be part of the granted chain, can start up to N
+  Residual: the person can be worn down by cards; `origin_agent` is the asking machine's word (`origin_node` and the chain's root
+  are vouched by the hub), and the card says so. **Under a grant, starts happen out of the person's sight:** an agent that was
+  talked into it (T14), or a compromised machine that really is part of the granted chain, can start up to N
   agents of the granted kinds in the granted folders on the target until the grant ends. That is the trade the maintainer chose; the
   bounds above, the indicator, the audit rows and Revoke limit it.
 - **The prompt is untrusted content** written by an agent that may have been talked into it (T14). It is shown in full and
@@ -276,8 +278,8 @@ New threat-model rows (numbers are the next free ones when built):
      `until_ms`), the only place a remote grant is given;
    - on `AgentStarted`, a `grant_id` (the grant a start ran under; empty when it was asked), and decision 10's `parent_node_id`
      and `parent_node_agent_id` on `AgentStarted`, `AgentInterrupted` and the client `AgentSnapshot`;
-   - on `GrantInfo`, a remote grant's `origin_node`, `origin_agent`, `root_node`, `root_agent`, `any_kind`, `below_folder`,
-     `chain`, `max_running`, `running`, `starts_this_hour` and `until_ms` (its `kind`, `folder` and `grant_id` as today);
+   - `RemoteGrantInfo`, listed in a new `GrantListResult.remote_grants` apart from `GrantInfo` (so an older window never reads a
+     remote grant as a used-up local one);
    - the capability `mesh.spawn.remote` (defined, advertised by no one until steps 2–4; both sides refuse the four requests with
      `protocol.capability_missing` until then), the approval action `agent.start.remote`, the error code
      `mesh.remote_helpers_off`, the v4 string and its vectors, and golden fixtures (added, never regenerated).
@@ -290,6 +292,17 @@ New threat-model rows (numbers are the next free ones when built):
 5. **The web window and the terminal client:** the card with v4 signing and its grant choices, the live-grant indicator with
    Revoke, and the tree with the machine tag. Screenshots in both themes.
 6. A changelog fragment with each user-visible step.
+
+## Status of the build
+
+1. Schema: done (2026-11-27). The four requests (122..125), the two results (41, 42), `RemoteGrant` on `ApprovalResolve` (8), the
+   new fields on `AgentStarted`, `AgentInterrupted` and `AgentSnapshot`, `RemoteGrantInfo` in `GrantListResult.remote_grants`, the capability constant (offered by no one), the
+   error code `mesh.remote_helpers_off`, the v4 vectors with their test, golden fixtures, `protocol.md` ("Helpers on another machine")
+   and threat-model row T73. Node and hub refuse the four requests with `protocol.capability_missing` until steps 2 and 3.
+2. The target node: not started.
+3. The hub: not started.
+4. The asking node: not started.
+5. The window and the terminal client: not started.
 
 ## Consequences
 

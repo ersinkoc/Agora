@@ -1,0 +1,7 @@
+{
+  "maxRunning": 1,
+  "anyKind": true,
+  "belowFolder": true,
+  "chain": true,
+  "untilMs": "1"
+}

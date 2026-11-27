@@ -1,0 +1,9 @@
+{
+  "agentId": "x",
+  "fromAgent": "x",
+  "fromRunId": "AQID",
+  "origin": "x",
+  "waitState": "x",
+  "waitMs": 1,
+  "lines": 1
+}

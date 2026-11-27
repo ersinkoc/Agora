@@ -1,0 +1,25 @@
+{
+  "startId": "AQID",
+  "targetNode": "x",
+  "kind": "x",
+  "folder": "x",
+  "prompt": "x",
+  "worktree": true,
+  "settings": [
+    {
+      "id": "x",
+      "value": "x"
+    }
+  ],
+  "launchOptions": [
+    "x"
+  ],
+  "fromAgent": "x",
+  "fromRunId": "AQID",
+  "origin": "x",
+  "depth": 1,
+  "rootNode": "x",
+  "rootAgent": "x",
+  "rootRunId": "AQID",
+  "fromAgentKind": "x"
+}

@@ -1,0 +1,15 @@
+{
+  "startId": "AQID",
+  "toNode": "x",
+  "agentId": "x",
+  "terminalId": "x",
+  "error": {
+    "code": "x",
+    "params": {
+      "x": {
+        "str": "x"
+      }
+    }
+  },
+  "fromNode": "x"
+}

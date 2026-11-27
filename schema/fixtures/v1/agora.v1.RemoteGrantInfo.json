@@ -1,0 +1,17 @@
+{
+  "grantId": "x",
+  "signerDeviceId": "x",
+  "originNode": "x",
+  "originAgent": "x",
+  "rootNode": "x",
+  "rootAgent": "x",
+  "kind": "x",
+  "folder": "x",
+  "anyKind": true,
+  "belowFolder": true,
+  "chain": true,
+  "maxRunning": 1,
+  "running": 1,
+  "startsThisHour": 1,
+  "untilMs": "1"
+}

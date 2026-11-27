@@ -772,6 +772,7 @@ impl Session {
             helpers_may_start: false,
             // ADR-0101: UNSPECIFIED for a single answer (signed over the v1 bytes, as before), ALWAYS over its own bytes.
             scope: scope as i32,
+            remote_grant: None,
         });
         self.command(node, cmd, Duration::from_secs(15))
     }
