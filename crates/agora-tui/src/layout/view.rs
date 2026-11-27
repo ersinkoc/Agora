@@ -241,6 +241,7 @@ pub fn draws(panel: &str) -> Draws {
         "tasks" => Draws::Elsewhere(key!("tui-layout-panel-tasks")),
         "messages" => Draws::Elsewhere(key!("tui-layout-panel-messages")),
         "usage" => Draws::Elsewhere(key!("tui-layout-panel-usage")),
+        "preview" => Draws::Elsewhere(key!("tui-layout-panel-preview")),
         "theme" => Draws::Elsewhere(key!("tui-layout-panel-theme")),
         p if p.starts_with("plugin.") => Draws::Elsewhere(key!("tui-layout-panel-plugin")),
         _ => Draws::Unknown,

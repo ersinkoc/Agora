@@ -1,5 +1,6 @@
 //! A user manager that stops answering after the node checked it: an agent whose start through `systemd-run` fails at once is started
 //! again as before (outside a scope), never left failing. A test binary of its own, since it puts a stand-in `systemd-run` first on PATH.
+#![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::path::Path;
 use std::process::Command;
@@ -29,9 +30,6 @@ fn git(dir: &Path, args: &[&str]) {
 
 #[test]
 fn a_start_systemd_run_refuses_runs_again_outside_a_scope() {
-    if !cfg!(target_os = "linux") {
-        return;
-    }
     let dir = std::env::temp_dir().join(format!("agora-scope-fallback-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let bin = dir.join("bin");
