@@ -488,6 +488,8 @@ pub struct Workspaces {
     settings: Mutex<Settings>,
     /// Set when a start was refused for the cap: the node's pass runs at once.
     wake: AtomicBool,
+    /// Claims this process found with no stamp on its last pass ([`Self::release_stale_claims`]).
+    unstamped: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 impl Workspaces {
@@ -505,6 +507,7 @@ impl Workspaces {
             root: std::path::absolute(worktree_root).unwrap_or_else(|_| worktree_root.into()),
             settings: Mutex::new(Settings::default()),
             wake: AtomicBool::new(false),
+            unstamped: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -624,8 +627,11 @@ impl Workspaces {
     }
 
     /// Gives back claims left by a process that ended mid-way: stamped over an hour ago by a process that no longer runs. A claim with no
-    /// stamp yet (its holder is between the rename and the stamp, or ended there) is stamped now as nobody's, so it goes in an hour.
+    /// stamp (its holder ended between the rename and the stamp) is stamped as nobody's only when this process saw it unstamped on an
+    /// earlier pass too, so a holder that is between the two steps right now is never overwritten; it then goes an hour later.
     fn release_stale_claims(&self, now_ms: u64) {
+        let mut seen = self.unstamped.lock().unwrap_or_else(|e| e.into_inner());
+        let before = std::mem::take(&mut *seen);
         for c in self.files(CLAIM_EXT) {
             let Ok(bytes) = agora_platform::read_small_regular_file_no_follow(&c, RECORD_MAX)
             else {
@@ -640,11 +646,14 @@ impl Workspaces {
                         give_back(&c, &c.with_extension(RECORD_EXT));
                     }
                 }
-                None => {
+                None if before.contains(&c) => {
                     Stamp::nobody(now_ms).put(&mut v);
                     if let Ok(bytes) = serde_json::to_vec(&v) {
                         let _ = agora_platform::write_private(&c, &bytes);
                     }
+                }
+                None => {
+                    seen.insert(c);
                 }
             }
         }
@@ -1066,9 +1075,16 @@ impl Stamp {
         })
     }
 
-    /// Whether the process that made the claim still runs (the same pid with the same start time).
+    /// Whether the process that made the claim still runs: the same pid with the same start time, or, where its start time could not be
+    /// read when it claimed, any process with that pid (weaker, but never "gone" while it runs).
     fn alive(&self) -> bool {
-        self.pid != 0 && agora_platform::process_start_time(self.pid) == Some(self.started)
+        if self.pid == 0 {
+            return false;
+        }
+        match agora_platform::process_start_time(self.pid) {
+            Some(now) => self.started == 0 || now == self.started,
+            None => false,
+        }
     }
 }
 

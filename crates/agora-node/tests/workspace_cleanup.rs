@@ -404,19 +404,13 @@ fn a_claimed_workspace_refuses_starts_and_is_not_acted_on_twice() {
     assert!(!rig.ws.removing(&rig.top.join("elsewhere")));
     assert_eq!(rig.clean(&rig.ended(T0), T0 + 1000 * H, false), vec![]);
     assert!(rig.work.is_dir());
-    // A claim left by a process that ended mid-way is given back after an hour.
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
-    fs::File::options()
-        .write(true)
-        .open(&claim)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    assert_eq!(rig.clean(&rig.ended(T0), now, false), vec![Action::Removed]);
+    // A claim left unstamped by a process that ended mid-way: stamped as nobody's on the second sighting, given back an hour later.
+    let at = T0 + 1001 * H;
+    assert_eq!(rig.clean(&rig.ended(T0), at, false), vec![]);
+    assert_eq!(
+        rig.clean(&rig.ended(T0), at + H, false),
+        vec![Action::Removed]
+    );
 }
 
 #[test]
@@ -647,17 +641,24 @@ fn a_claim_held_by_a_running_process_is_never_given_back() {
 }
 
 #[test]
-fn a_claim_with_no_stamp_is_kept_for_an_hour_then_given_back() {
+fn a_claim_with_no_stamp_is_kept_until_seen_twice_and_an_hour_more() {
     let rig = Rig::new("claim-unstamped");
     let now = wall_now();
     // The file is two days old, but nothing says when it was claimed: it counts from when a pass first saw it.
     let claim = write_claim(&rig, None);
     let busy = Users::default();
+    let half = 30 * 60 * 1000;
+    // First seen: left as it is (its holder may be writing its stamp right now).
     rig.clean(&busy, now, true);
     assert!(claim.exists());
-    rig.clean(&busy, now + 30 * 60 * 1000, true);
+    let first: serde_json::Value = serde_json::from_slice(&fs::read(&claim).unwrap()).unwrap();
+    assert!(first.get("claimed_at_ms").is_none());
+    // Seen again: stamped as nobody's, from now.
+    rig.clean(&busy, now + half, true);
     assert!(claim.exists());
-    rig.clean(&busy, now + H, true);
+    rig.clean(&busy, now + half + half, true);
+    assert!(claim.exists());
+    rig.clean(&busy, now + half + H, true);
     assert!(!claim.exists());
     assert!(!rig.ws.removing(&rig.work));
 }
