@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,6 +67,82 @@ pub fn default_sources(home: &std::path::Path) -> Vec<PortSource> {
 /// What an open, a close or the clock changed, for `PreviewChanged` (the indicator and the audit trail: the port, never the content).
 pub type Changed = Vec<v1::PreviewForward>;
 
+/// At most this many connections are relayed to one forward at a time; one more is ended at once with `BUDGET` (the maintainer's
+/// choice, 2026-11-27: no new error code). A browser opens six to ten for a page.
+pub const MAX_CONNECTIONS_PER_FORWARD: usize = 32;
+/// At most this many connections are relayed by the node at a time, all forwards together (each runs two threads).
+pub const MAX_CONNECTIONS: usize = 64;
+/// How often, at most, a connection's port is probed again for a hub's certificate (the file-based check runs at every connect).
+const REPROBE: Duration = Duration::from_secs(5);
+
+/// What a connection is held to (`PreviewConnectResult`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// The largest `PREVIEW_DATA` payload either side may send.
+    pub chunk: u32,
+    /// The credit each side starts with, in bytes.
+    pub window: u32,
+    /// Bytes per second on one connection, both directions together; 0 is no limit.
+    pub rate: u32,
+    /// Bytes over one forward's life, every connection and both directions together; 0 is no limit.
+    pub total: u64,
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Self {
+            chunk: 16_384,
+            window: 262_144,
+            rate: 0,
+            total: 0,
+        }
+    }
+}
+
+/// What the live connections of one forward share: whether it ended (and why), how many connections it has, and its bytes so far.
+#[derive(Debug, Default)]
+pub struct Live {
+    /// 0 while the forward is open; otherwise the `PreviewCloseReason` it ended with.
+    ended: std::sync::atomic::AtomicI32,
+    connections: std::sync::atomic::AtomicUsize,
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Live {
+    /// Why the forward ended, `None` while it is open.
+    pub fn ended(&self) -> Option<v1::PreviewCloseReason> {
+        match self.ended.load(Ordering::Acquire) {
+            0 => None,
+            r => Some(
+                v1::PreviewCloseReason::try_from(r).unwrap_or(v1::PreviewCloseReason::Unspecified),
+            ),
+        }
+    }
+
+    /// Counts `n` more bytes; whether the forward is still within `total` (0: no limit).
+    pub fn count(&self, n: u64, total: u64) -> bool {
+        let now = self.bytes.fetch_add(n, Ordering::AcqRel).saturating_add(n);
+        total == 0 || now <= total
+    }
+}
+
+/// The right to relay one connection to a forward; the counts go down when it is dropped.
+pub struct Lease {
+    pub port: u16,
+    pub live: Arc<Live>,
+    pub budgets: Budgets,
+    /// Over [`MAX_CONNECTIONS_PER_FORWARD`] or [`MAX_CONNECTIONS`]: the connection is accepted and ended at once with `BUDGET`.
+    pub over_budget: bool,
+    all: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.live.connections.fetch_sub(1, Ordering::AcqRel);
+        self.all.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// One forward the table holds.
 #[derive(Debug, Clone)]
 struct Forward {
@@ -73,9 +150,23 @@ struct Forward {
     opened_at_ms: u64,
     expires_at_ms: u64,
     creator: String,
+    live: Arc<Live>,
+    /// When the port was last probed for a hub's certificate.
+    probed: std::time::Instant,
 }
 
 impl Forward {
+    /// Its view as it ends, and the live connections told why.
+    fn end(
+        &self,
+        id: &str,
+        state: v1::PreviewState,
+        reason: v1::PreviewCloseReason,
+    ) -> v1::PreviewForward {
+        self.live.ended.store(reason as i32, Ordering::Release);
+        self.view(id, state, reason)
+    }
+
     fn view(
         &self,
         id: &str,
@@ -94,6 +185,18 @@ impl Forward {
     }
 }
 
+impl Table {
+    /// The error for an id that is not open: `preview.expired` when it ended by expiry lately, `preview.unknown` otherwise.
+    fn missing(&self, forward_id: &str) -> Error {
+        let code = if self.expired.iter().any(|id| id == forward_id) {
+            ErrorCode::PreviewExpired
+        } else {
+            ErrorCode::PreviewUnknown
+        };
+        Error::new(code).with("forward_id", forward_id)
+    }
+}
+
 #[derive(Default)]
 struct Table {
     open: BTreeMap<String, Forward>,
@@ -107,6 +210,9 @@ struct Table {
 pub struct Previews {
     table: Mutex<Table>,
     sources: Mutex<Vec<PortSource>>,
+    budgets: Mutex<Budgets>,
+    /// Connections relayed now, all forwards together.
+    connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Previews {
@@ -114,7 +220,68 @@ impl Previews {
         Self {
             table: Mutex::new(Table::default()),
             sources: Mutex::new(sources),
+            budgets: Mutex::new(Budgets::default()),
+            connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// The budgets new connections are held to (tests use small ones).
+    pub fn set_budgets(&self, budgets: Budgets) {
+        *self.budgets.lock().unwrap_or_else(|e| e.into_inner()) = budgets;
+    }
+
+    /// The right to relay one connection to `forward_id`: `preview.expired` or `preview.unknown` when it is not open. The port is
+    /// checked again first (the node's own ports at every connect, a hub's certificate at most every [`REPROBE`]): a forward whose
+    /// port became one of the node's own ends with `POLICY` and the connect is `preview.port_refused {reason: node_port}`. What
+    /// changed comes back whatever the outcome, so an expiry or that end is always announced.
+    pub fn connect(&self, forward_id: &str, now_ms: u64) -> (Result<Lease, Error>, Changed) {
+        let mut changed = self.sweep(now_ms);
+        let found = {
+            let t = self.table();
+            match t.open.get(forward_id) {
+                Some(f) => Ok((f.port, f.probed.elapsed() >= REPROBE)),
+                None => Err(t.missing(forward_id)),
+            }
+        };
+        let (port, probe_due) = match found {
+            Ok(x) => x,
+            Err(e) => return (Err(e), changed),
+        };
+        let own = self.own_ports().contains(&port) || (probe_due && self.is_a_hub(port));
+        let mut t = self.table();
+        let Some(f) = t.open.get_mut(forward_id) else {
+            // Closed while the port was checked.
+            let e = t.missing(forward_id);
+            return (Err(e), changed);
+        };
+        if probe_due {
+            f.probed = std::time::Instant::now();
+        }
+        if own {
+            if let Some(f) = t.open.remove(forward_id) {
+                changed.push(f.end(
+                    forward_id,
+                    v1::PreviewState::Closed,
+                    v1::PreviewCloseReason::Policy,
+                ));
+            }
+            let e = Error::new(ErrorCode::PreviewPortRefused)
+                .with("port", i64::from(port))
+                .with("reason", "node_port");
+            return (Err(e), changed);
+        }
+        let live = Arc::clone(&f.live);
+        drop(t);
+        let mine = live.connections.fetch_add(1, Ordering::AcqRel) + 1;
+        let all = self.connections.fetch_add(1, Ordering::AcqRel) + 1;
+        let lease = Lease {
+            port,
+            live,
+            budgets: *self.budgets.lock().unwrap_or_else(|e| e.into_inner()),
+            over_budget: mine > MAX_CONNECTIONS_PER_FORWARD || all > MAX_CONNECTIONS,
+            all: Arc::clone(&self.connections),
+        };
+        (Ok(lease), changed)
     }
 
     /// Adds places where the node's own ports are written (the binary knows its home's real layout).
@@ -175,6 +342,8 @@ impl Previews {
             opened_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(u64::from(seconds) * 1000),
             creator: creator.to_string(),
+            live: Arc::new(Live::default()),
+            probed: std::time::Instant::now(),
         };
         let view = f.view(
             &id,
@@ -203,7 +372,7 @@ impl Previews {
         };
         for id in ids {
             if let Some(f) = t.open.remove(&id) {
-                changed.push(f.view(
+                changed.push(f.end(
                     &id,
                     v1::PreviewState::Closed,
                     v1::PreviewCloseReason::Closed,
@@ -231,19 +400,15 @@ impl Previews {
         (open, changed)
     }
 
-    /// The port of an open forward, for a connection to it: `preview.expired` when its expiry passed, `preview.unknown` otherwise.
-    pub fn target(&self, forward_id: &str, now_ms: u64) -> Result<(u16, Changed), Error> {
+    /// The port of an open forward: `preview.expired` when its expiry passed, `preview.unknown` otherwise; with what changed.
+    pub fn target(&self, forward_id: &str, now_ms: u64) -> (Result<u16, Error>, Changed) {
         let changed = self.sweep(now_ms);
         let t = self.table();
-        if let Some(f) = t.open.get(forward_id) {
-            return Ok((f.port, changed));
-        }
-        let code = if t.expired.iter().any(|id| id == forward_id) {
-            ErrorCode::PreviewExpired
-        } else {
-            ErrorCode::PreviewUnknown
+        let r = match t.open.get(forward_id) {
+            Some(f) => Ok(f.port),
+            None => Err(t.missing(forward_id)),
         };
-        Err(Error::new(code).with("forward_id", forward_id))
+        (r, changed)
     }
 
     /// Ends every forward whose expiry has passed; what ended. The node calls it on a timer so an expiry is announced even when
@@ -259,7 +424,7 @@ impl Previews {
         let mut changed = Vec::new();
         for id in gone {
             if let Some(f) = t.open.remove(&id) {
-                changed.push(f.view(
+                changed.push(f.end(
                     &id,
                     v1::PreviewState::Expired,
                     v1::PreviewCloseReason::Expired,
@@ -279,7 +444,7 @@ impl Previews {
         std::mem::take(&mut t.open)
             .into_iter()
             .map(|(id, f)| {
-                f.view(
+                f.end(
                     &id,
                     v1::PreviewState::Closed,
                     v1::PreviewCloseReason::NodeStopped,
@@ -781,17 +946,17 @@ mod tests {
         let (_l, port) = listener();
         let p = Previews::new(Vec::new());
         let (f, _) = p.open(u32::from(port), 60, "owner", 1_000).unwrap();
-        assert_eq!(p.target(&f.forward_id, 60_999).unwrap().0, port);
+        assert_eq!(p.target(&f.forward_id, 60_999).0.unwrap(), port);
         let ended = p.sweep(61_000);
         assert_eq!(ended.len(), 1);
         assert_eq!(ended[0].state, v1::PreviewState::Expired as i32);
         assert!(p.sweep(61_001).is_empty(), "announced once");
         assert_eq!(
-            code(&p.target(&f.forward_id, 61_001).unwrap_err()),
+            code(&p.target(&f.forward_id, 61_001).0.unwrap_err()),
             "preview.expired"
         );
         assert_eq!(
-            code(&p.target("fwd-77", 61_001).unwrap_err()),
+            code(&p.target("fwd-77", 61_001).0.unwrap_err()),
             "preview.unknown"
         );
         assert_eq!(

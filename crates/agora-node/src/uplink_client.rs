@@ -944,6 +944,24 @@ where
                         let _ = answers_tx.send(misplaced(req.request_id));
                         continue;
                     }
+                    // ADR-0088: this link does not carry a preview connection's frames toward the node yet (step 2b-ii), so a
+                    // connection would run one way only; refused as the capability it needs, which this node does not offer yet.
+                    if matches!(
+                        req.command,
+                        Some(command_request::Command::PreviewConnect(_))
+                    ) {
+                        let _ = answers_tx.send(CommandResponse {
+                            request_id: req.request_id,
+                            result: Some(command_response::Result::Err(
+                                agora_protocol::Error::new(
+                                    agora_protocol::ErrorCode::ProtocolCapabilityMissing,
+                                )
+                                .with("capability", "preview.v1")
+                                .to_info(),
+                            )),
+                        });
+                        continue;
+                    }
                     // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
                     // a refused subscription included (the grant is judged on the relay's own thread, off this loop).
                     let alive = Arc::new(AtomicBool::new(true));

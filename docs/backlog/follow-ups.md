@@ -73,8 +73,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   cover it.
 - The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
   them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
-- A bound on concurrent connections per forward for the relay step (a browser opens several); the spec names none, so a refusal code
-  for it would be a schema change.
+- The default budgets are "no limit" for the rate and the forward's total (only the chunk, the window and the connection caps hold):
+  choose real defaults once previews run against real dev servers.
 
 ## OS shutdown notices (**decision**)
 

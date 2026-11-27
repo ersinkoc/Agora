@@ -448,3 +448,291 @@ fn a_used_signature_stays_used_after_the_node_restarts() {
         "approval.signature_invalid"
     );
 }
+
+// ---- relayed connections (step 2b) ----
+
+use agora_protocol::frame::STREAM_CLOSE;
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A server that echoes what it reads and counts the connections it accepted.
+fn echo() -> (u32, Arc<AtomicUsize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = u32::from(l.local_addr().unwrap().port());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            count.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = s.read(&mut buf) {
+                    if n == 0 || s.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (port, accepted)
+}
+
+fn opened(e: &Env, port: u32) -> String {
+    forward(&local(e, open(port, 0))).forward_id
+}
+
+fn client(e: &Env) -> Client {
+    Client::connect(&e.dir.join("c.sock")).unwrap()
+}
+
+fn connect(c: &mut Client, stream: u32, forward_id: &str) -> CommandResponse {
+    let req = CommandRequest {
+        request_id: format!("connect-{stream}"),
+        command: Some(Cmd::PreviewConnect(v1::PreviewConnect {
+            forward_id: forward_id.into(),
+        })),
+        ..Default::default()
+    };
+    c.request_on(stream, &req, Duration::from_secs(10)).unwrap()
+}
+
+/// Frames on `stream` until `until` holds for the last one or 10 s pass.
+fn frames(c: &mut Client, stream: u32, until: impl Fn(&Frame) -> bool) -> Vec<Frame> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut out = Vec::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(Some(f)) = c.read_frame(Some(Duration::from_millis(100))) {
+            if f.stream_id == stream {
+                let stop = until(&f);
+                out.push(f);
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn data(fs: &[Frame]) -> Vec<u8> {
+    fs.iter()
+        .filter(|f| f.kind == kinds::PREVIEW_DATA)
+        .flat_map(|f| f.payload.clone())
+        .collect()
+}
+
+fn end_of(fs: &[Frame]) -> v1::PreviewEnd {
+    let f = fs
+        .iter()
+        .find(|f| f.kind == kinds::PREVIEW_END)
+        .expect("a PREVIEW_END");
+    v1::PreviewEnd::decode(f.payload.as_slice()).unwrap()
+}
+
+fn is_close(f: &Frame) -> bool {
+    f.kind == STREAM_CLOSE
+}
+
+#[test]
+fn a_connection_carries_bytes_both_ways_unchanged_and_reaches_only_its_port() {
+    let e = env("relay", "");
+    let _n = node(&e);
+    let (port, accepted) = echo();
+    let (other, others) = echo();
+    let id = opened(&e, port);
+    // The open looked once whether the port answers; that connection is not the relayed one.
+    let probed = accepted.load(Ordering::SeqCst);
+    let mut c = client(&e);
+    let r = connect(&mut c, 3, &id);
+    match &r.result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(Ok_::PreviewConnect(p)),
+        })) => assert_eq!((p.max_chunk_bytes, p.window_bytes), (16_384, 262_144)),
+        other => panic!("not a connect: {other:?}"),
+    }
+    // A request naming another host and port, even absolutely: the bytes go to the forward's port as they are.
+    let request = format!("GET http://127.0.0.1:{other}/ HTTP/1.1\r\nHost: 127.0.0.1:{other}\r\nOrigin: http://127.0.0.1:{other}\r\n\r\n");
+    c.send_frame(3, kinds::PREVIEW_DATA, request.clone().into_bytes())
+        .unwrap();
+    let want = request.len();
+    let fs = {
+        let mut all = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while data(&all).len() < want && std::time::Instant::now() < deadline {
+            all.extend(frames(&mut c, 3, |f| f.kind == kinds::PREVIEW_DATA));
+        }
+        all
+    };
+    assert_eq!(data(&fs), request.as_bytes(), "echoed unchanged");
+    assert_eq!(accepted.load(Ordering::SeqCst), probed + 1);
+    assert_eq!(
+        others.load(Ordering::SeqCst),
+        0,
+        "the other port saw nothing"
+    );
+    // The window ends it; the node says nothing back and the program's connection closes.
+    c.send_frame(
+        3,
+        kinds::PREVIEW_END,
+        v1::PreviewEnd::default().encode_to_vec(),
+    )
+    .unwrap();
+    // The stream can carry a new connection once the old one is over.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+}
+
+#[test]
+fn the_program_closing_delivers_its_last_bytes_then_says_target_gone() {
+    let e = env("gone", "");
+    let _n = node(&e);
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = u32::from(l.local_addr().unwrap().port());
+    // Every connection hears "bye" and is closed (the open's own look at the port included).
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { return };
+            let _ = s.write_all(b"bye");
+        }
+    });
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+    let fs = frames(&mut c, 3, is_close);
+    assert_eq!(data(&fs), b"bye");
+    let end = end_of(&fs);
+    assert_eq!(end.reason, v1::PreviewCloseReason::TargetGone as i32);
+    assert_eq!((end.bytes_from_target, end.bytes_to_target), (3, 0));
+    assert!(is_close(fs.last().unwrap()), "STREAM_CLOSE comes last");
+}
+
+#[test]
+fn a_frame_over_the_chunk_ends_the_connection_for_breaking_the_rules() {
+    let e = env("chunk", "");
+    let _n = node(&e);
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+    c.send_frame(3, kinds::PREVIEW_DATA, vec![b'x'; 16_385])
+        .unwrap();
+    let fs = frames(&mut c, 3, is_close);
+    assert_eq!(end_of(&fs).reason, v1::PreviewCloseReason::Protocol as i32);
+}
+
+#[test]
+fn closing_the_forward_ends_its_live_connections() {
+    let e = env("close-live", "");
+    let _n = node(&e);
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+    let closed = local(
+        &e,
+        Cmd::PreviewClose(v1::PreviewClose {
+            forward_id: id.clone(),
+            all: false,
+        }),
+    );
+    assert_eq!(code(&closed), "ok");
+    let fs = frames(&mut c, 3, is_close);
+    assert_eq!(end_of(&fs).reason, v1::PreviewCloseReason::Closed as i32);
+    assert_eq!(code(&connect(&mut c, 5, &id)), "preview.unknown");
+}
+
+#[test]
+fn over_the_forwards_total_the_connection_ends_with_budget() {
+    let e = env("total", "");
+    let n = node(&e);
+    n.previews.set_budgets(agora_node::preview::Budgets {
+        total: 10,
+        ..Default::default()
+    });
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+    c.send_frame(3, kinds::PREVIEW_DATA, b"0123456789A".to_vec())
+        .unwrap();
+    let fs = frames(&mut c, 3, is_close);
+    assert_eq!(end_of(&fs).reason, v1::PreviewCloseReason::Budget as i32);
+}
+
+#[test]
+fn one_connection_over_the_cap_is_answered_then_ended_with_budget() {
+    let e = env("cap", "");
+    let _n = node(&e);
+    let (port, accepted) = echo();
+    let id = opened(&e, port);
+    let probed = accepted.load(Ordering::SeqCst);
+    let mut c = client(&e);
+    let cap = agora_node::preview::MAX_CONNECTIONS_PER_FORWARD as u32;
+    for i in 0..cap {
+        assert_eq!(code(&connect(&mut c, 3 + i, &id)), "ok", "{i}");
+    }
+    let over = 3 + cap;
+    assert_eq!(code(&connect(&mut c, over, &id)), "ok");
+    let fs = frames(&mut c, over, is_close);
+    let end = end_of(&fs);
+    assert_eq!(end.reason, v1::PreviewCloseReason::Budget as i32);
+    assert_eq!((end.bytes_to_target, end.bytes_from_target), (0, 0));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        probed + cap as usize,
+        "the one over the cap never reached the program"
+    );
+}
+
+#[test]
+fn a_port_that_became_the_nodes_own_ends_the_forward_at_the_next_connect() {
+    let e = env("became-own", "");
+    let n = node(&e);
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    std::fs::create_dir_all(e.dir.join("hub")).unwrap();
+    std::fs::write(e.dir.join("hub/listen"), format!("127.0.0.1:{port}")).unwrap();
+    let mut c = client(&e);
+    let r = connect(&mut c, 3, &id);
+    assert_eq!(
+        (code(&r).as_str(), reason(&r).as_str()),
+        ("preview.port_refused", "node_port")
+    );
+    assert!(listed(&e).is_empty());
+    let last = changed(&n).pop().unwrap();
+    assert_eq!(last.close_reason, v1::PreviewCloseReason::Policy as i32);
+}
+
+#[test]
+fn an_unknown_forward_takes_no_connection() {
+    let e = env("unknown", "");
+    let _n = node(&e);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, "fwd-9")), "preview.unknown");
+}
+
+#[test]
+fn the_window_going_over_the_byte_rate_ends_the_connection_with_budget() {
+    let e = env("rate", "");
+    let n = node(&e);
+    n.previews.set_budgets(agora_node::preview::Budgets {
+        rate: 8,
+        ..Default::default()
+    });
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    let r = connect(&mut c, 3, &id);
+    match &r.result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(Ok_::PreviewConnect(p)),
+        })) => assert_eq!(p.rate_bytes_per_second, 8),
+        other => panic!("not a connect: {other:?}"),
+    }
+    c.send_frame(3, kinds::PREVIEW_DATA, b"123456789".to_vec())
+        .unwrap();
+    let fs = frames(&mut c, 3, is_close);
+    assert_eq!(end_of(&fs).reason, v1::PreviewCloseReason::Budget as i32);
+}

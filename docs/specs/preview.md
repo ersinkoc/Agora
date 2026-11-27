@@ -1,10 +1,11 @@
 # Preview: an agent's local web server in the window (ADR-0088)
 
-Status: the node keeps forwards. The messages, codes, frame kinds and signing domain exist (`schema/agora/v1/preview.proto`,
-`docs/specs/protocol.md` "Preview"). A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`, checks every rule below and records
-`PreviewChanged` (`crates/agora-node/src/preview.rs`); it does not relay a connection yet (`PreviewConnect` is still refused as
-unsupported), and no hub or window sends these messages. Capability `preview.v1` is not offered yet; the node offers it once it relays
-connections, and the hub step (3) adds it.
+Status: the node keeps forwards and relays their connections on its control socket. The messages, codes, frame kinds and signing
+domain exist (`schema/agora/v1/preview.proto`, `docs/specs/protocol.md` "Preview"). A node answers `PreviewOpen`, `PreviewClose` and
+`PreviewList`, checks every rule below, records `PreviewChanged`, and relays `PreviewConnect` on a dynamic stream of its control socket
+(`crates/agora-node/src/preview.rs`, `preview_relay.rs`). Its hub link does not carry a connection's frames yet (a routed
+`PreviewConnect` is refused with `capability` = `preview.v1`), and no hub or window sends these messages. Capability `preview.v1` is not
+offered yet; the node offers it once its hub link carries connections, and the hub step (3) adds it.
 
 ## What it is
 A **forward** is a named, owner-approved path from the window to one port on the **loopback** of one node (`127.0.0.1` or `::1`), for a limited time. The window
@@ -46,8 +47,13 @@ it would hand the window that trust; that is why those ports are refused even fo
   grant never stands in for the signature.
 - Through the hub, an open needs a device signature over `preview-action-v1` (protocol.md: length-prefixed fields, a single-use nonce kept until its expiry, at most 5 minutes ahead), verified by the node, never by the hub. A suggestion never opens anything.
 - `PreviewClose` with `all` and a `forward_id`, or with neither, is `protocol.invalid_message {field: forward_id}`.
-- Stream budgets: `max_chunk_bytes` 16384, `window_bytes` 262144 of credit per direction, optional rate and total ceilings; over any of
-  them the stream ends with `PreviewEnd.reason`. Preview bytes are the lowest priority and never delay terminal bytes (ADR-0022).
+- Stream budgets: `max_chunk_bytes` 16384, `window_bytes` 262144 of credit per direction, optional rate and total ceilings (none by
+  default); over any of them the stream ends with `PreviewEnd.reason`. Preview bytes are the lowest priority and never delay terminal
+  bytes (ADR-0022).
+- Connections: one per `PreviewConnect`, to the forward's port on `127.0.0.1` or `::1` only, whatever the bytes name. At most 32 at a
+  time per forward and 64 for the node; one more is answered `ok` and ended at once with `BUDGET` (it never reaches the program). At
+  every connect the node's own ports are checked again (a hub's certificate at most every 5 s): a forward whose port became one of them
+  ends with `POLICY`. Closing, expiry and the node's stop end the live connections with `CLOSED`, `EXPIRED` and `NODE_STOPPED`.
 
 ## The hub's part (not built)
 The hub relays preview streams without parsing them, gives each forward an origin of its own (a per-forward host name, or a separate

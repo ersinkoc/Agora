@@ -968,8 +968,10 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
 
 ### Preview (ADR-0088)
 
-`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design. A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`
-and records `PreviewChanged` (build step 2, `crates/agora-node/src/preview.rs`); it does not relay a connection yet, and no hub relays one.
+`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design. A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`,
+records `PreviewChanged`, and relays `PreviewConnect` on its own control socket (build step 2, `crates/agora-node/src/preview.rs` and
+`preview_relay.rs`); its hub link does not carry a connection yet (it answers a routed `PreviewConnect` with `capability` = `preview.v1`),
+and no hub relays one.
 All additions; nothing published changed. Capability `preview.v1` is **not offered yet**: the node offers it once it relays
 `PreviewConnect` (the rest of build step 2) and the hub relay (step 3) adds it, and a hub never sends a preview command to a node that did
 not offer it. **Older peers refuse, they do not drop:** until then every peer answers `protocol.capability_missing`. The hub answers
@@ -1000,7 +1002,12 @@ either as "previews are not available here" and never assumes an open worked fro
   Each side starts with `window_bytes` (default 262144) of credit toward the other and sends no `PREVIEW_DATA` beyond the credit it
   holds; the receiver grants more with `PREVIEW_CREDIT` as it drains. A frame over `max_chunk_bytes`, or data beyond the credit, ends the
   stream with reason `PROTOCOL`. `rate_bytes_per_second` and `total_bytes_limit` (0 = none) are ceilings the node enforces; going over
-  ends the stream with reason `BUDGET`. Preview frames are the lowest priority (section 6): they never delay terminal bytes, and input
+  ends the stream with reason `BUDGET`. So does a connection over the node's connection caps (32 at a time per forward, 64 for the node):
+its `PreviewConnect` is still answered `ok`, and the stream ends at once with `BUDGET` and no bytes either way, so `BUDGET` also means
+"over the connection budget" (the maintainer's choice, 2026-11-27, instead of a new error code). A side that receives `PREVIEW_END`
+or `STREAM_CLOSE` from the other says nothing back; there is no half-close (an end ends both directions). The node writes every byte
+it read from the program before it says `TARGET_GONE`, and the `PREVIEW_END` counters are the bytes relayed each way. The node never
+reads or changes the bytes (`Host`, `Origin` and every header reach the program as sent). Preview frames are the lowest priority (section 6): they never delay terminal bytes, and input
   outranks them. `PreviewCloseReason`: `CLOSED`, `EXPIRED`, `NODE_STOPPED`, `TARGET_GONE`, `BUDGET`, `PROTOCOL`, `POLICY`. Constants:
   `agora_protocol::frame::kinds::{PREVIEW_DATA, PREVIEW_CREDIT, PREVIEW_END}`.
 - **Signing: `preview-action-v1`.** Through the hub a `PreviewOpen` carries a `PreviewAuthorization { device_id, nonce, expires_at_ms,

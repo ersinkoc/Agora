@@ -648,6 +648,66 @@ fn preview_open(ctx: &ControlContext, o: &v1::PreviewOpen) -> Result<v1::Command
     })
 }
 
+/// What runs once an answer is written (ADR-0088: a relayed connection starts, or is ended over its budget, after its answer).
+type AfterAnswer = Box<dyn FnOnce()>;
+
+/// ADR-0088: accepts one relayed connection to `c.forward_id` on `stream_id`: the forward must be open and its port still allowed,
+/// and something must answer on it. The answer, and what to do once it is written (start the relay, or, over the connection caps, end
+/// the stream at once with `BUDGET`: the answer is still `ok`, the maintainer's choice of 2026-11-27). The stream's inbox is
+/// registered here, before the answer goes out, so a frame the client sends right after the answer is kept.
+fn preview_connect(
+    ctx: &ControlContext,
+    c: &v1::PreviewConnect,
+    stream_id: u32,
+    writer: &SharedWriter,
+    alive: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
+    previews: &mut HashMap<u32, Arc<crate::preview_relay::Inbox>>,
+) -> Result<(v1::CommandOk, AfterAnswer), Error> {
+    let Some(_running) = ctx.admit() else {
+        return Err(Error::new(ErrorCode::NodeOffline).with("node_id", ctx.node_id.as_str()));
+    };
+    let (lease, changed) = ctx.previews.connect(&c.forward_id, crate::daemon::now_ms());
+    preview_changed(ctx, changed);
+    let lease = lease?;
+    let ok = v1::CommandOk {
+        result: Some(v1::command_ok::Result::PreviewConnect(
+            crate::preview_relay::connect_result(&lease.budgets),
+        )),
+    };
+    let inbox = Arc::new(crate::preview_relay::Inbox::new(&lease.budgets));
+    let out: crate::preview_relay::Send = {
+        let w = Arc::clone(writer);
+        Arc::new(move |kind, payload| send(&w, stream_id, kind, payload))
+    };
+    if lease.over_budget {
+        return Ok((
+            ok,
+            Box::new(move || {
+                crate::preview_relay::refuse_over_budget(&inbox, &out);
+                drop(lease);
+            }),
+        ));
+    }
+    let Some(tcp) = crate::preview_relay::dial(lease.port) else {
+        return Err(Error::new(ErrorCode::PreviewPortRefused)
+            .with("port", i64::from(lease.port))
+            .with("reason", "not_loopback"));
+    };
+    previews.insert(stream_id, Arc::clone(&inbox));
+    let (alive, stop) = (Arc::clone(alive), Arc::clone(stop));
+    Ok((
+        ok,
+        Box::new(move || {
+            if crate::preview_relay::start(lease, tcp, Arc::clone(&inbox), out, alive, stop)
+                .is_err()
+            {
+                inbox.gone();
+            }
+        }),
+    ))
+}
+
 /// Records `PreviewChanged` for every forward that opened or ended (the port, never the content).
 pub(crate) fn preview_changed(ctx: &ControlContext, changed: crate::preview::Changed) {
     if let Some(events) = &ctx.events {
@@ -2230,8 +2290,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PairDeny(_) => "pair.deny",
         Cmd::PairRequest(_) => "pair.request",
         Cmd::PairReveal(_) => "pair.reveal",
-        // ADR-0088: open, close and list are answered (`execute`); a connection is not relayed yet (build step 2b), so
-        // `preview.connect` is refused as unsupported.
+        // ADR-0088: open, close and list are answered by `execute`; a connection (`PreviewConnect`) only on a dynamic stream, in
+        // `handle_request`, so `execute` never sees one.
         Cmd::PreviewOpen(_) => "preview.open",
         Cmd::PreviewClose(_) => "preview.close",
         Cmd::PreviewList(_) => "preview.list",
@@ -2388,6 +2448,8 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
     let mut buf = vec![0u8; 16 * 1024];
     // ADR-0082: a node that requires the token answers nothing but `ControlAuth` until it succeeded on this connection.
     let mut authed = ctx.control_token.is_none();
+    // ADR-0088: the relayed preview connections of this connection, by stream, for the frames the client sends on them.
+    let mut previews: HashMap<u32, Arc<crate::preview_relay::Inbox>> = HashMap::new();
     'conn: while !stop.load(Ordering::Acquire) {
         match reader.read(&mut buf) {
             Ok(0) => break,
@@ -2405,10 +2467,28 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
         loop {
             match decoder.next_frame() {
                 Ok(Some(frame)) => {
-                    if frame.kind == KIND_REQUEST
-                        && !handle_request(&frame, ctx, &writer, &alive, stop, &mut authed)
+                    if frame.kind == KIND_REQUEST {
+                        if !handle_request(
+                            &frame,
+                            ctx,
+                            &writer,
+                            &alive,
+                            stop,
+                            &mut authed,
+                            &mut previews,
+                        ) {
+                            break 'conn;
+                        }
+                    } else if authed
+                        && frame.stream_id >= agora_protocol::frame::FIRST_DYNAMIC_STREAM
                     {
-                        break 'conn;
+                        // ADR-0088: data, credit and the end of a relayed preview connection.
+                        if let Some(inbox) = previews.get(&frame.stream_id) {
+                            inbox.push(frame.kind, &frame.payload);
+                        }
+                        if frame.kind == agora_protocol::frame::STREAM_CLOSE {
+                            previews.remove(&frame.stream_id);
+                        }
                     }
                 }
                 Ok(None) => break,
@@ -2417,6 +2497,9 @@ fn handle_connection(stream: LocalStream, ctx: &Arc<ControlContext>, stop: &Arc<
         }
     }
     alive.store(false, Ordering::Release);
+    for inbox in previews.values() {
+        inbox.gone();
+    }
     let _ = writer.lock().map(|w| w.shutdown());
 }
 
@@ -2436,6 +2519,7 @@ fn handle_request(
     alive: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
     authed: &mut bool,
+    previews: &mut HashMap<u32, Arc<crate::preview_relay::Inbox>>,
 ) -> bool {
     let Ok(req) = v1::CommandRequest::decode(frame.payload.as_slice()) else {
         return true;
@@ -2512,6 +2596,32 @@ fn handle_request(
             let _ = std::thread::Builder::new()
                 .name("agora-control-term".into())
                 .spawn(move || pump(&writer, stream_id, history, &snap, &sub, &alive, &stop));
+        }
+        return true;
+    }
+
+    // ADR-0088: one relayed connection to a preview forward, on the stream the request arrived on.
+    if let Cmd::PreviewConnect(c) = cmd {
+        previews.retain(|_, i| !i.finished());
+        let outcome = if previews.contains_key(&frame.stream_id) {
+            // A stream still carrying a connection takes no second one.
+            Err(invalid("stream_id"))
+        } else {
+            preview_connect(ctx, c, frame.stream_id, writer, alive, stop, previews)
+        };
+        let (result, after) = match outcome {
+            Ok((ok, after)) => (Ok(ok), Some(after)),
+            Err(e) => (Err(e), None),
+        };
+        let _ = send(
+            writer,
+            STREAM_COMMANDS,
+            KIND_RESPONSE,
+            response(&req.request_id, result).encode_to_vec(),
+        );
+        // After the answer, so the stream's first frame never comes before it.
+        if let Some(after) = after {
+            after();
         }
         return true;
     }
@@ -2868,6 +2978,19 @@ impl Client {
                 self.pending.push_back(frame);
             }
         }
+    }
+
+    /// Sends one frame that is not a request on `stream_id`: the data, credit and end of a relayed preview connection (ADR-0088).
+    pub fn send_frame(&mut self, stream_id: u32, kind: u8, payload: Vec<u8>) -> io::Result<()> {
+        let bytes = Frame {
+            stream_id,
+            kind,
+            seq: None,
+            payload,
+        }
+        .encode(DEFAULT_MAX_PAYLOAD)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+        self.stream.write_all(&bytes)
     }
 
     fn send_request(&mut self, stream_id: u32, req: &v1::CommandRequest) -> io::Result<()> {
