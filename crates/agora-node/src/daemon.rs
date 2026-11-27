@@ -1777,6 +1777,14 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         p.problems.push(line.chars().take(80).collect());
                     }
                 },
+                // ADR-0122: only `allow` allows; anything else forbids (a typo never widens) and anything but `forbid` is a line not
+                // understood.
+                "share.mcp_urls" => {
+                    p.share.mcp_urls = v.trim() == "allow";
+                    if !matches!(v.trim(), "allow" | "forbid") {
+                        p.problems.push(line.chars().take(80).collect());
+                    }
+                }
                 "share.mcp_commands" => {
                     p.share.mcp_commands = Some(
                         v.split(',')

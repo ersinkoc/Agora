@@ -40,6 +40,9 @@ const NEWEST_FILE: &str = "newest";
 pub struct SharePolicy {
     pub on: bool,
     pub mcp_commands: Option<BTreeSet<String>>,
+    /// Whether a shared MCP server at a URL may be given here (`share.mcp_urls = allow | forbid`, default allow). It runs nothing on
+    /// this machine, but it is still a channel: an agent sends it repository content as tool arguments and reads its results.
+    pub mcp_urls: bool,
 }
 
 impl Default for SharePolicy {
@@ -47,6 +50,7 @@ impl Default for SharePolicy {
         Self {
             on: true,
             mcp_commands: None,
+            mcp_urls: true,
         }
     }
 }
@@ -124,6 +128,14 @@ pub fn judge(
             if !allowed.contains(cmd) {
                 return Err(refusal("share.refused", "command_not_allowed"));
             }
+        }
+        let url = w
+            .item
+            .as_ref()
+            .and_then(|i| i.mcp.as_ref())
+            .is_some_and(|m| !m.url.is_empty());
+        if url && !policy.mcp_urls {
+            return Err(refusal("share.refused", "url_not_allowed"));
         }
     }
     Ok(())
@@ -297,6 +309,9 @@ impl SharedItems {
             }
             st.next_poll = Some(now + POLL);
         }
+        // agora-ac's review of 7874ffba: a signer the owner untrusted or limited here stops counting at the next poll, not at the
+        // item's next version.
+        self.rejudge();
         let back = Arc::clone(&self.from_link);
         link.request(
             command_request::Command::ShareItemList(v1::ShareItemList {
@@ -380,6 +395,42 @@ impl SharedItems {
         }
     }
 
+    /// Judges every item in use again with today's trust and policy: one whose signer no longer holds here (untrusted, out of its
+    /// term, limited to projects) or that the policy no longer allows is unloaded and said (`signer_untrusted`, or the policy's
+    /// reason). Called at every poll, and before a launch hands items out (step 3b).
+    pub fn rejudge(&self) {
+        let now_ms = crate::daemon::now_ms();
+        let mut st = self.st();
+        let words: Vec<ShareItemSigned> = st.used.values().cloned().collect();
+        for w in words {
+            let newest = st.newest.get(&w.name).copied();
+            let Err(r) = judge(&w, newest, &st.policy, |signer, message, signature| {
+                (self.vouch)(signer, message, signature, now_ms)
+            }) else {
+                continue;
+            };
+            let reason = if r.code == "approval.signature_invalid" {
+                "signer_untrusted"
+            } else {
+                r.reason
+            };
+            st.used.remove(&w.name);
+            let _ = std::fs::remove_file(self.dir.join(format!("{}.pb", w.name)));
+            self.out
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Body::ShareItemRefused(v1::ShareItemRefused {
+                    node_id: self.node_id.clone(),
+                    name: w.name.clone(),
+                    item_hash: w.item_hash.clone(),
+                    code: "share.refused".to_string(),
+                    reason: reason.to_string(),
+                }));
+            // Said once: a later list naming the same version does not fetch it again.
+            st.refused.insert((w.name, w.item_hash));
+        }
+    }
+
     /// Judges a word with this node's trust and policy; uses it, ends what it removes, or says why not (once per version).
     fn take(&self, w: ShareItemSigned) {
         let now_ms = crate::daemon::now_ms();
@@ -409,7 +460,10 @@ impl SharedItems {
                 // A word this node cannot trust (its signature, its bytes, an older date) changes nothing here: acting on it would let
                 // whoever passes it on take an item away. Only the owner's newer, trusted word that this node's policy will not run
                 // ends the version in use (the owner replaced it; the old one is not run instead).
-                if matches!(r.reason, "policy_off" | "command_not_allowed") {
+                if matches!(
+                    r.reason,
+                    "policy_off" | "command_not_allowed" | "url_not_allowed"
+                ) {
                     st.used.remove(&w.name);
                     let _ = std::fs::remove_file(self.dir.join(format!("{}.pb", w.name)));
                 }
@@ -517,15 +571,15 @@ mod tests {
         // This node's policy is the ceiling.
         let off = SharePolicy {
             on: false,
-            mcp_commands: None,
+            ..SharePolicy::default()
         };
         assert_eq!(
             judge(&w, None, &off, trusted).unwrap_err().reason,
             "policy_off"
         );
         let only_uvx = SharePolicy {
-            on: true,
             mcp_commands: Some(["uvx".to_string()].into()),
+            ..SharePolicy::default()
         };
         assert_eq!(
             judge(&w, None, &only_uvx, trusted).unwrap_err().reason,
@@ -627,8 +681,8 @@ mod tests {
         let s2 = open(
             &temp("policy"),
             SharePolicy {
-                on: true,
                 mcp_commands: Some(["npx".to_string()].into()),
+                ..SharePolicy::default()
             },
         );
         s2.take(word(
@@ -647,10 +701,60 @@ mod tests {
         // Turning the policy off gives no item at all.
         s.set_policy(SharePolicy {
             on: false,
-            mcp_commands: None,
+            ..SharePolicy::default()
         });
         assert!(s.for_launch("p", "claude-code").is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A signer the owner untrusts here stops counting at the next look, not at the item's next version.
+    #[test]
+    fn an_item_whose_signer_is_no_longer_trusted_is_unloaded_and_said() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let d = temp("untrust");
+        let trust = Arc::new(AtomicBool::new(true));
+        let t = Arc::clone(&trust);
+        let s = SharedItems::open_with(
+            &d,
+            "blackview",
+            Box::new(move |signer, m, sig, _| t.load(Ordering::SeqCst) && trusted(signer, m, sig)),
+            SharePolicy::default(),
+        );
+        s.take(word(
+            "db",
+            Some(item("db", "npx", "")),
+            20,
+            ShareScope::default(),
+        ));
+        s.rejudge();
+        assert_eq!(s.for_launch("p", "codex").len(), 1, "still trusted");
+        assert!(s.take_events().is_empty());
+        trust.store(false, Ordering::SeqCst);
+        s.rejudge();
+        assert!(s.for_launch("p", "codex").is_empty());
+        let said = s.take_events();
+        assert!(matches!(&said[..], [Body::ShareItemRefused(r)] if r.reason == "signer_untrusted"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_node_can_forbid_shared_servers_at_a_url() {
+        let no_urls = SharePolicy {
+            mcp_urls: false,
+            ..SharePolicy::default()
+        };
+        let remote = word(
+            "docs",
+            Some(item("docs", "", "https://mcp.example.com")),
+            10,
+            ShareScope::default(),
+        );
+        assert_eq!(
+            judge(&remote, None, &no_urls, trusted).unwrap_err().reason,
+            "url_not_allowed"
+        );
+        let program = word("db", Some(item("db", "npx", "")), 10, ShareScope::default());
+        assert_eq!(judge(&program, None, &no_urls, trusted), Ok(()));
     }
 
     /// The hub can only narrow: a name it stops listing is dropped here.

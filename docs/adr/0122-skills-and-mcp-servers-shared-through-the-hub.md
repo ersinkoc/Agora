@@ -110,7 +110,9 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    device this node trusts, in its term, not limited to projects), the content hash, the rules, the newest `issued_ms` it ever saw for
    the name (kept in `<data>/shared-items/newest`, so a replay is refused after a restart too) and its policy (`share.items = on|off`,
    default on, anything else off and a line not understood; `share.mcp_commands = a, b`, the only programs a shared MCP server may run
-   here). A word it cannot trust changes nothing it uses; only the owner's newer, trusted word its policy will not run ends the version
+   here; `share.mcp_urls = allow|forbid`, default allow, anything but `allow` forbids: a URL server runs nothing here but is a
+   channel for the repository's content and for untrusted text into the agent). The items in use are judged again at every poll, so
+   a signer untrusted or limited here stops counting within 60 s (`signer_untrusted`). A word it cannot trust changes nothing it uses; only the owner's newer, trusted word its policy will not run ends the version
    in use. A name the hub stops listing is dropped (the hub can only narrow). Each refusal is said once per version
    (`ShareItemRefused`), and the node offers `share.items` while its policy gives items. End to end: `crates/agora/tests/hub_dial.rs`
    `a_machine_uses_only_the_shared_items_a_device_it_trusts_signed`. Step 3b (giving the items to agents at launch, filling secrets,
