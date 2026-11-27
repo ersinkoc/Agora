@@ -94,10 +94,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   10 s, so that connection's other waiting calls (asks, `inbox_wait`, `agent_wait`) and a `notifications/cancelled` for it are not seen
   meanwhile. Make it a waiting call like `agent_wait` (the link's answer through the spawner's queue, answered by the session's poll,
   dropped on cancel, within the per-connection cap).
-- **A person's input ends an `inbox_wait`** (the maintainer's decision relayed by agora-ac, 2026-11-27): when the node writes a person's
-  input (a window's or the terminal client's `TerminalInput`, not a mesh-typed prompt) into an agent's terminal while that agent's mesh
-  connection has an `inbox_wait` open, answer the wait at once with `[]` so the agent's turn ends and the prompt is read. Needs a signal
-  from the supervisor's input path to the agent's mesh connections; until then the person interrupts the call (Esc).
 
 ## Previews (ADR-0088)
 

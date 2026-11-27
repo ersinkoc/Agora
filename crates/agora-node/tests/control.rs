@@ -731,6 +731,46 @@ fn decode_tool(v: &serde_json::Value) -> (serde_json::Value, bool) {
     )
 }
 
+/// The maintainer's decision (2026-11-27): a person typing into an agent's terminal ends the `inbox_wait` that agent has open, at
+/// once, so its turn ends and it reads what was typed.
+#[test]
+fn a_person_typing_into_an_agent_ends_its_inbox_wait() {
+    if !sh_on_path() {
+        return;
+    }
+    use agora_core::AgentId;
+    use serde_json::json;
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    let e = env("typed-wait");
+    let n = node(&e, NodeLimits::default());
+    let mut c = Client::connect(n.socket().unwrap()).unwrap();
+    let s = started(ok(c.call(start_cmd("shell"))));
+    let mut m = Mcp::connect(&n.mesh.socket_path(&AgentId::new(&s.agent_id)));
+    let wait = m.send(
+        "tools/call",
+        json!({"name": "inbox_wait", "arguments": {"timeout_s": 120}}),
+    );
+    // The wait is open (the call reached the endpoint before the input: a ping on the same connection is answered after it).
+    assert!(m.rpc("ping", json!({}))["result"].is_object());
+    let typed = std::time::Instant::now();
+    ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+        terminal_id: s.terminal_id.clone(),
+        data: b"echo hi\n".to_vec(),
+    })));
+    let answer = m.read();
+    assert_eq!(answer["id"], wait);
+    assert!(
+        typed.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        typed.elapsed()
+    );
+    let (items, err) = decode_tool(&answer);
+    assert!(!err, "{items}");
+    assert_eq!(items, json!([]));
+}
+
 #[test]
 fn agents_on_one_node_coordinate_through_their_own_mesh_endpoints() {
     if !sh_on_path() {

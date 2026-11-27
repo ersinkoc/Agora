@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,7 +56,6 @@ const MONO_OFFSET_MS: u64 = 1 << 40;
 /// and the wall-clock time since the start, so a laptop that slept past a lease's TTL finds the lease ended, as the hub did, and
 /// does not take it back. A wall clock set forward makes leases end early on the node (they are then not renewed), never late.
 fn mono_ms() -> u64 {
-    use std::sync::atomic::AtomicU64;
     static BASE: std::sync::OnceLock<(Instant, u64)> = std::sync::OnceLock::new();
     static LAST: AtomicU64 = AtomicU64::new(0);
     let (base, wall) = *BASE.get_or_init(|| (Instant::now(), now_ms()));
@@ -969,6 +968,9 @@ struct AgentServer {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     path: PathBuf,
+    /// How many times a person typed into the agent or prompted it ([`MeshServer::person_input`]); its connections' `inbox_wait`
+    /// calls end when it moves.
+    typed: Arc<AtomicU64>,
 }
 
 /// The longest `task_id`, `sender_node` or `sender_agent_id` a durable handoff may carry, as for an
@@ -1817,7 +1819,9 @@ impl MeshServer {
         self.renewals.lock().adopt(&id, &project);
         self.renewals.changed();
         let stop = Arc::new(AtomicBool::new(false));
+        let typed = Arc::new(AtomicU64::new(0));
         let thread = {
+            let typed = Arc::clone(&typed);
             let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
@@ -1848,6 +1852,7 @@ impl MeshServer {
                                     std::thread::sleep(POLL);
                                     continue;
                                 };
+                                let typed = Arc::clone(&typed);
                                 let (mesh, stop, agent, remote, allowed, shares, fleet, renewals) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
@@ -1874,6 +1879,7 @@ impl MeshServer {
                                                 renewals: &renewals,
                                                 fleet: &fleet,
                                                 helpers,
+                                                typed: &typed,
                                             },
                                             &stop,
                                         )
@@ -1900,9 +1906,24 @@ impl MeshServer {
                     stop,
                     thread: Some(thread),
                     path: path.clone(),
+                    typed,
                 },
             );
         Ok(path)
+    }
+
+    /// A person typed into the agent's terminal or prompted it (a window's or the terminal client's `TerminalInput` or `AgentPrompt`,
+    /// never a mesh-typed prompt): every `inbox_wait` its connections have open ends at once, with what its inbox holds (`[]` when
+    /// nothing), so the agent's turn ends and it reads what the person wrote (the maintainer's decision, 2026-11-27).
+    pub fn person_input(&self, agent: &AgentId) {
+        if let Some(a) = self
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent)
+        {
+            a.typed.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// The agent ended: it leaves the mesh (its tasks, leases and asks are given back) and its endpoint closes.
@@ -2081,6 +2102,8 @@ struct InboxWait {
     since: Option<String>,
     limit: usize,
     deadline_ms: u64,
+    /// [`AgentServer::typed`] when the call began: once it moves, a person wrote to the agent and the wait ends.
+    typed: u64,
 }
 
 /// Answers `inbox_wait` calls that have a message now, or whose time ran out (with an empty list).
@@ -2088,6 +2111,7 @@ fn poll_inbox(
     waits: &mut Vec<InboxWait>,
     mesh: &Mutex<Mesh>,
     conn: &McpConnection,
+    typed: u64,
     mut reply: impl FnMut(&Message) -> io::Result<()>,
 ) -> io::Result<()> {
     if waits.is_empty() {
@@ -2103,7 +2127,7 @@ fn poll_inbox(
                 &w.request_id,
                 w.since.as_deref(),
                 w.limit,
-                now >= w.deadline_ms,
+                now >= w.deadline_ms || typed != w.typed,
             ) {
                 Some(msg) => {
                     answers.push(msg);
@@ -2150,6 +2174,8 @@ struct Links<'a> {
     renewals: &'a LeaseRenewals,
     fleet: &'a Fleet,
     helpers: Option<Arc<dyn Helpers>>,
+    /// [`AgentServer::typed`].
+    typed: &'a AtomicU64,
 }
 
 /// The longest `agent_wait`, and the one used when none is given.
@@ -2595,6 +2621,7 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
                 since,
                 limit,
                 deadline_ms,
+                typed: links.typed.load(Ordering::Acquire),
             });
             Step::Waits
         }
@@ -2816,9 +2843,13 @@ fn serve(
         {
             return;
         }
-        if poll_inbox(&mut s.inbox_waits, s.owned.mesh, &s.conn, |msg| {
-            deliver(&mut writer, batches, msg)
-        })
+        if poll_inbox(
+            &mut s.inbox_waits,
+            s.owned.mesh,
+            &s.conn,
+            links.typed.load(Ordering::Acquire),
+            |msg| deliver(&mut writer, batches, msg),
+        )
         .is_err()
         {
             return;
@@ -4805,6 +4836,50 @@ mod tests {
         assert_eq!(rpc_error_code(refused), -32602, "{refused}");
         assert_eq!(refused["error"]["data"]["field"], "batch");
         assert!(answers.iter().any(|a| a["id"] == 21));
+        done(server, dir);
+    }
+
+    /// The maintainer's decision (2026-11-27): a person's input ends the agent's `inbox_wait` at once, with what its inbox holds, so its
+    /// turn ends and it reads what the person wrote. Another agent's input does not; a wait begun after the input waits as before.
+    #[test]
+    fn a_persons_input_ends_the_agents_inbox_wait_at_once() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, _) = two_agents("typedwait");
+        let mut ca = Wire::open(&a);
+        ca.initialize("2025-06-18");
+        ca.send(&json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"timeout_s": 60}}}).to_string());
+        assert!(
+            ca.next(Duration::from_millis(300)).is_none(),
+            "answered before any input"
+        );
+        server.person_input(&AgentId::new("b1"));
+        assert!(
+            ca.next(Duration::from_millis(400)).is_none(),
+            "another agent's input ended it"
+        );
+        let typed = std::time::Instant::now();
+        server.person_input(&AgentId::new("a1"));
+        let got = ca.next(Duration::from_secs(5)).unwrap();
+        assert!(
+            typed.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            typed.elapsed()
+        );
+        assert_eq!(got["id"], 9);
+        assert_eq!(
+            agora_mesh::mcp::tool_result_value(&got["result"]).unwrap(),
+            json!([])
+        );
+        // The next wait starts after the input: it waits again.
+        ca.send(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"timeout_s": 60}}}).to_string());
+        assert!(
+            ca.next(Duration::from_millis(400)).is_none(),
+            "an earlier input ended a later wait"
+        );
+        server.person_input(&AgentId::new("a1"));
+        assert_eq!(ca.next(Duration::from_secs(5)).unwrap()["id"], 10);
         done(server, dir);
     }
 

@@ -1436,6 +1436,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         }
         Cmd::AgentPrompt(a) => {
             let id = AgentId::new(a.agent_id.clone());
+            // A person's prompt ends the agent's `inbox_wait`, so its turn ends and the prompt is read (a mesh-typed prompt never
+            // comes this way: `task_dispatch` types it).
+            person_input(ctx, &id);
             let sup = ctx.sup();
             if sup.terminal(&id).is_none() {
                 // An adapter agent takes prompts through its adapter; the request is part of its conversation.
@@ -1530,6 +1533,9 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             control.write_input(&t.data).map_err(|_| {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", t.terminal_id.as_str())
             })?;
+            if let Some(id) = agent_of_terminal(&t.terminal_id) {
+                person_input(ctx, &id);
+            }
             Ok(ok_empty())
         }
         Cmd::TerminalResize(t) => {
@@ -2235,6 +2241,14 @@ fn agent_worktree(ctx: &ControlContext, worktree_id: &str) -> Result<PathBuf, Er
         return Err(invalid("worktree_id"));
     }
     Ok(wt)
+}
+
+/// A person wrote to the agent (typed into its terminal or prompted it): its mesh connections' `inbox_wait` calls end at once
+/// ([`crate::mesh_server::MeshServer::person_input`]).
+fn person_input(ctx: &ControlContext, agent: &AgentId) {
+    if let Some(mesh) = &ctx.mesh {
+        mesh.person_input(agent);
+    }
 }
 
 fn with_terminal<R>(

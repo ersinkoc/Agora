@@ -37,9 +37,11 @@ ends, is dropped and nothing is kept for it.
 
 **It is opt-in** (the maintainer, 2026-11-27: "do the most sensible"). The standing instructions and the tool's description say to
 wait on it only when the person or the agent's task asked it to stay reachable for other agents, between tasks, and that a person's
-prompt always comes first. Waiting has three costs: each `[]` at the timeout is one more model turn; while the call is open the agent's
-screen shows a running tool, so it reads as working, never idle or finished (the Finished mark and idle-based waits do not fire); and
-a person typing into its terminal queues behind the call until they interrupt it (a person's input ending the wait is a follow-up).
+prompt always comes first. Waiting has two costs: each `[]` at the timeout is one more model turn; and while the call is open the agent's screen shows a running
+tool, so it reads as working, never idle or finished (the Finished mark and idle-based waits do not fire). **A person's input ends
+it:** when a window or the terminal client types into the agent's terminal (`TerminalInput`) or prompts it (`AgentPrompt`), every
+`inbox_wait` the agent has open is answered at once with what its inbox holds (`[]` when nothing), so its turn ends and it reads what
+the person wrote. A prompt another agent gives it (a dispatched task) does not end it; a wait begun after the input waits as before.
 It reads exactly what `inbox` reads and the content is the same untrusted data.
 
 ## Safety rules

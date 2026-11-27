@@ -43,7 +43,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
 - [ ] **M8.2 The board drives the work** (ADR-0095): the Review column and subtasks (M3.2, **schema**); dispatch to an agent on any
   machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
   open task it is allowed (an automation rule: **decision**, ADR first)
-- [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (follow-up); a reply keeps its link across machines (M3.6,
+- [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**, ADR first): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
