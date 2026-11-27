@@ -8,8 +8,9 @@
 //! - **Heads:** each relayed connection carries one request (point 8): the hub reads its head (at most 16 KiB, strict HTTP/1.1),
 //!   checks this port's token, strips every `agora_preview_*` cookie, passes on only this forward's partitioned cookies with their
 //!   prefix removed, rewrites `Host` to `localhost:<port>`, and asks for `Connection: close` unless it is a WebSocket upgrade
-//!   ([`rewrite_request`]). On the way back it reads response heads up to the first that is not `1xx` and renames and caps each
-//!   `Set-Cookie` ([`rewrite_response`]). Bodies are never read.
+//!   ([`rewrite_request`]). On the way back it reads response heads up to the first that is not `1xx`, renames and caps each
+//!   `Set-Cookie` and makes the final answer say `Connection: close` ([`rewrite_response`]); the relay passes nothing more from the
+//!   browser after that answer, so no second request ever goes by unread. Bodies are never read.
 use std::collections::HashMap;
 
 /// The most a request or response head may take, request line or status line included (point 3; more is answered 431).
@@ -133,6 +134,18 @@ pub fn parse_request(head: &[u8]) -> Result<Head, HeadError> {
     {
         return Err(HeadError::Malformed);
     }
+    // Where the body ends must be the same for the hub and the program: one `Content-Length` at most, and never with a
+    // `Transfer-Encoding` (review of 5fd9df56).
+    let lengths = h.values("content-length").count();
+    if lengths > 1 || (lengths == 1 && h.values("transfer-encoding").next().is_some()) {
+        return Err(HeadError::Malformed);
+    }
+    // And a length is digits only (`4, 5` or `+4` could be read two ways).
+    if h.values("content-length")
+        .any(|v| v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(HeadError::Malformed);
+    }
     Ok(h)
 }
 
@@ -165,9 +178,10 @@ pub struct Partition {
 }
 
 impl Partition {
-    /// `p<port><tag>_`: the prefix this forward's cookies carry in the browser.
+    /// `p<port>-<tag>_`: the prefix this forward's cookies carry in the browser. The `-` can occur in neither part, so two forwards'
+    /// prefixes never run into each other (port 7451 with tag `2a` is not port 74512 with tag `a`).
     pub fn prefix(&self) -> String {
-        format!("p{}{}_", self.port, self.tag)
+        format!("p{}-{}_", self.port, self.tag)
     }
     /// The cookie this port's forward token is carried in.
     pub fn token_cookie(&self) -> String {
@@ -345,9 +359,24 @@ pub fn rewrite_response(
                     value: v,
                 });
             }
+        } else if status >= 200
+            && (x.name.eq_ignore_ascii_case("connection")
+                || x.name.eq_ignore_ascii_case("keep-alive")
+                || x.name.eq_ignore_ascii_case("proxy-connection"))
+        {
+            // Replaced below: the final answer always closes the connection.
         } else {
             out.push(x);
         }
+    }
+    // A browser never reuses a connection whose final answer says `close`; a reused one would carry its next request past the gate
+    // unread, with the token and every forward's cookies (review of 5fd9df56). A `101` keeps its `Connection: Upgrade`, and an
+    // interim `1xx` is left as it is (the final answer follows it).
+    if status >= 200 {
+        out.push(Header {
+            name: "Connection".into(),
+            value: "close".into(),
+        });
     }
     h.headers = out;
     Ok((status, h.encode()))
@@ -550,8 +579,8 @@ mod tests {
     #[test]
     fn a_request_goes_on_with_only_this_forwards_cookies_and_never_a_token() {
         let raw = b"GET /app HTTP/1.1\r\nHost: hub.example:7450\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\
-Cookie: agora_preview_7450=tok; agora_preview_7451=other; p7450f3a_session=s1; p7451zzz_session=s2; p7450old_x=1; plain=1\r\n\
-Cookie: p7450f3a_theme=dark\r\nAccept: text/html\r\n\r\n";
+Cookie: agora_preview_7450=tok; agora_preview_7451=other; p7450-f3a_session=s1; p7451-zzz_session=s2; p7450-old_x=1; plain=1\r\n\
+Cookie: p7450-f3a_theme=dark\r\nAccept: text/html\r\n\r\n";
         let r = rewrite_request(raw, &p()).unwrap();
         let head = text(&r.head);
         assert_eq!(r.token.as_deref(), Some("tok"));
@@ -609,22 +638,26 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         assert_eq!(status, 200);
         let head = text(&head);
         assert!(
-            head.contains("Set-Cookie: p7450f3a_session=abc; Max-Age=3600; Path=/; HttpOnly\r\n"),
+            head.contains("Set-Cookie: p7450-f3a_session=abc; Max-Age=3600; Path=/; HttpOnly\r\n"),
             "{head}"
         );
         assert!(!head.contains("Domain"));
         assert!(
-            head.contains("p7450f3a_long=1; Max-Age=3600\r\n"),
+            head.contains("p7450-f3a_long=1; Max-Age=3600\r\n"),
             "capped: {head}"
         );
-        assert!(head.contains("p7450f3a_short=1; Max-Age=60\r\n"), "{head}");
+        assert!(head.contains("p7450-f3a_short=1; Max-Age=60\r\n"), "{head}");
         assert!(
-            head.contains("p7450f3a_dated=1; Max-Age=600\r\n"),
+            head.contains("p7450-f3a_dated=1; Max-Age=600\r\n"),
             "Expires read: {head}"
         );
-        assert!(head.contains("p7450f3a_late=1; Max-Age=3600\r\n"), "{head}");
+        assert!(
+            head.contains("p7450-f3a_late=1; Max-Age=3600\r\n"),
+            "{head}"
+        );
         assert!(!head.contains("nameless"));
         assert!(head.contains("Content-Type: text/html"));
+        assert!(head.ends_with("Connection: close\r\n\r\n"), "{head}");
         assert_eq!(
             rewrite_response(
                 b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
@@ -695,5 +728,57 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         pool.release(7451);
         assert_eq!(pool.take("n", "fwd-c", |_| true), Some(7451));
         assert_eq!(pool.all(), &[7450, 7451, 7452]);
+    }
+
+    #[test]
+    fn a_final_answer_always_closes_the_connection_and_a_101_stays_an_upgrade() {
+        let close = |raw: &[u8]| text(&rewrite_response(raw, &p(), 0, 1).unwrap().1);
+        let h = close(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n");
+        assert!(h.ends_with("Connection: close\r\n\r\n"), "added: {h}");
+        let h = close(b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nProxy-Connection: keep-alive\r\n\r\n");
+        assert_eq!(
+            h, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+            "replaced"
+        );
+        let h = close(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+        assert!(
+            h.contains("Connection: Upgrade") && !h.contains("close"),
+            "{h}"
+        );
+        let h = close(b"HTTP/1.1 100 Continue\r\n\r\n");
+        assert_eq!(h, "HTTP/1.1 100 Continue\r\n\r\n");
+    }
+
+    #[test]
+    fn two_forwards_prefixes_never_run_into_each_other() {
+        let a = Partition {
+            port: 7451,
+            tag: "2a".into(),
+            node_port: 1,
+        };
+        let b = Partition {
+            port: 74,
+            tag: "512a".into(),
+            node_port: 1,
+        };
+        assert_eq!(a.prefix(), "p7451-2a_");
+        assert_ne!(a.prefix(), b.prefix());
+        assert!(!a.prefix().starts_with(&b.prefix()) && !b.prefix().starts_with(&a.prefix()));
+    }
+
+    #[test]
+    fn a_body_whose_end_the_hub_and_the_program_could_read_differently_is_refused() {
+        for bad in [
+            &b"POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+            b"POST / HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: 4\r\ncontent-length: 5\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: 4, 5\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: +4\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: \r\n\r\n",
+        ] {
+            assert_eq!(parse_request(bad), Err(HeadError::Malformed), "{bad:?}");
+        }
+        assert!(parse_request(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n").is_ok());
+        assert!(parse_request(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n").is_ok());
     }
 }

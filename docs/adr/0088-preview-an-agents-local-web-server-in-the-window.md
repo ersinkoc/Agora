@@ -113,9 +113,11 @@ changes decision 4's "the hub does not parse them" for one thing only: the head 
    - **One request per relayed connection.** The hub adds `Connection: close` to each request head (a WebSocket upgrade keeps its
      `Upgrade`), reads that one request head and the response heads up to the first that is not `1xx` (or a `101`, after which the
      connection is opaque bytes), and relays everything else unread. It never tracks body lengths, so no head on a connection goes by
-     unread. This replaces "keep-alive included" in point 3.
-   - **The partition carries the forward too.** A renamed cookie is `p<port><tag>_<name>`, where `<tag>` is short and random per
-     forward, and its lifetime (`Max-Age`, `Expires`) is capped at the forward's end. A forward that gets a port another one used
+     unread: the program's final answer always goes back with `Connection: close` (so the browser never reuses the connection), the
+     hub relays nothing more from the browser once that answer went back, and a request head with two `Content-Length`s or one
+     beside a `Transfer-Encoding` is refused (review of the first slice). This replaces "keep-alive included" in point 3.
+   - **The partition carries the forward too.** A renamed cookie is `p<port>-<tag>_<name>`, where `<tag>` is short and random per
+     forward (the `-` keeps two forwards' prefixes apart), and its lifetime (`Max-Age`, `Expires`) is capped at the forward's end. A forward that gets a port another one used
      starts with an empty jar.
    - **`Host` is rewritten** to `localhost:<port>` (the forward's port on the node) before the head goes on, because development
      servers refuse a host name they do not know. `Origin` and `Referer` are left as the browser sent them.
