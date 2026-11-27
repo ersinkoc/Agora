@@ -97,20 +97,20 @@ changes decision 4's "the hub does not parse them" for one thing only: the head 
    phone and tablet sizes, and the forward's end time. The frame is `sandbox="allow-scripts allow-forms allow-same-origin
    allow-popups"` on the preview's own origin, which is safe there because that origin is not the window's; without
    `allow-popups-to-escape-sandbox`, so a popup the previewed app opens stays sandboxed (open in a new tab goes through the entry flow).
-6. **The programs behind different forwards share one cookie jar** (decide (a) or (b)). Cookies ignore the port, so app A's
+6. **The programs behind different forwards share one cookie jar**; the maintainer chose (a) on 2026-11-27. Cookies ignore the port, so app A's
    `session=` goes with every request to app B's port; B can also set cookies over A's names, or set so many that every preview's
    head goes over 16 KiB (431). Two forwards may front different programs (another project, an agent's server).
-   - **(a) Proposed: partition the jar.** On a response head, `Set-Cookie: n=v` becomes `p<port>_n=v`; on a request head, only this
+   - **(a) Chosen: partition the jar.** On a response head, `Set-Cookie: n=v` becomes `p<port>_n=v`; on a request head, only this
      port's `p<port>_*` cookies go on, with the prefix taken off. The hub then reads response heads too (a second, equally bounded
      exception to "does not parse"; bodies still never), and a page's `document.cookie` sees prefixed names (a script that reads its
      own cookies by name breaks; most dev servers set `HttpOnly` session cookies and are unaffected).
-   - **(b)** Keep the jar shared, say so plainly in the window and the threat model (cookies are shared among the previews open on
+   - (b), not chosen: keep the jar shared, say so plainly in the window and the threat model (cookies are shared among the previews open on
      one hub), and leave per-forward host names as the real fix.
 7. **Suggestions and changes** go to the opener only (`PreviewSuggested` to the project's owner and the person who started the agent
    that suggested it, `PreviewChanged` to the opener), until a wider rule is decided.
 
-Threat-model rows to add: cookies across previews (shared by the browser across ports; the hub strips its own, and point 6 decides
-whether it also partitions the apps' cookies), a leaked entry ticket (single use, 60 s, opener only, no referrer, not logged), and
+Threat-model rows to add: cookies across previews (shared by the browser across ports; the hub strips its own and partitions the apps'
+cookies by port, point 6), a leaked entry ticket (single use, 60 s, opener only, no referrer, not logged), and
 the head parser (bounded, rejects malformed heads, never reads bodies).
 
 ## Status of the build
