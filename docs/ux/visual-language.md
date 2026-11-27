@@ -108,7 +108,9 @@ draw it in neutral ink (the agent list) switch over as they adopt the kit.
   provider logos for model providers).
 - Each agent *instance* gets a stable generated accent and short name ("claude · amber", "codex · teal") so
   several agents of the same kind are distinguishable at a glance. The accent is drawn as the agent's avatar (a soft square with a ring
-  and the kind's first letter) beside its name, never as a coloured edge of a tile or row.
+  and the kind's mark, or its first letter when the window has no mark for it) beside its name, never as a coloured edge of a tile or row.
+  The marks are the tools' own one-colour icons from the ACP registry (vendored with it, ADR-0092), drawn in the text colour so they
+  follow the theme; `manifests/agents/icons.json` names the icon of each kind that is not a registry kind (Claude Code, Codex, opencode).
 
 ### Signature visuals
 - **Live tiles:** fleet tiles show a miniature live preview of the agent's terminal or latest chat line,

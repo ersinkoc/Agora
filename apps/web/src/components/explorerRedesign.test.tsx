@@ -57,7 +57,7 @@ describe('an Agents-list row', () => {
     const row = host.querySelector<HTMLElement>('[data-agent-row="laptop/a1"]') as HTMLElement;
     const avatar = row.firstElementChild as HTMLElement;
     expect(avatar.classList.contains('kit-avatar')).toBe(true);
-    expect(avatar.textContent?.startsWith('C')).toBe(true);
+    expect(avatar.querySelector('.kit-avatar__icon')).not.toBeNull(); // claude's mark
     expect(avatar.style.getPropertyValue('--avatar')).toBe('var(--agent-amber)');
     expect(avatar.querySelector('.kit-avatar__dot')).not.toBeNull(); // needs you
     const delta = row.querySelector('[data-files-changed]') as HTMLElement;
@@ -69,7 +69,7 @@ describe('an Agents-list row', () => {
     expect(row.getAttribute('aria-pressed')).toBe('true');
     // A kind the node did not report comes from the name; the bolt is a bare icon (no chip), still one sign with its meaning as its name.
     const other = host.querySelector<HTMLElement>('[data-agent-row="laptop/a2"]') as HTMLElement;
-    expect(other.querySelector('.kit-avatar')?.textContent).toBe('C');
+    expect(other.querySelector('.kit-avatar__icon')).not.toBeNull();
     const bolt = other.querySelector('[data-no-ask]') as HTMLElement;
     expect(bolt.className).toContain('text-risk');
     expect(bolt.className).not.toContain('ide-chip');
@@ -85,7 +85,7 @@ describe('an Agents-list row', () => {
     expect(clear.classList.contains('kit-btn--ghost')).toBe(true);
     expect(clear.getAttribute('aria-label')).toBe('Clear closed');
     const closed = host.querySelector('section[aria-label="Closed"] li button') as HTMLElement;
-    expect(closed.querySelector('.kit-avatar')?.textContent).toBe('G');
+    expect(closed.querySelector('.kit-avatar__icon')).not.toBeNull();
     expect(closed.querySelector('.kit-tone-danger')).not.toBeNull(); // ended with an error: the one red (ADR-0102)
   });
 

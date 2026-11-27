@@ -7,7 +7,7 @@ import { AgentAvatar, Button, Callout, Card, CopyChip, EmptyState, KeyValue, Lis
 
 // The widget kit in every state, for the gallery (one per theme panel). Demo data only; nothing here is sent anywhere.
 const VARIANTS: ButtonVariant[] = ['primary', 'secondary', 'ghost', 'danger', 'danger-ghost'];
-const KINDS = ['claude', 'codex', 'gemini', 'wrongstack', 'opencode', 'aider', 'goose'];
+const KINDS = ['claude-code', 'codex', 'gemini', 'wrongstack', 'opencode', 'aider', 'goose'];
 const GROUPS = ['machine', 'project', 'kind', 'state'] as const;
 type Group = (typeof GROUPS)[number];
 

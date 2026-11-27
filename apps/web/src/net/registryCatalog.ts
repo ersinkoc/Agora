@@ -31,6 +31,8 @@ export function safeLink(raw: unknown): string | undefined {
 
 const icons = import.meta.glob('../../../../manifests/agents/registry/icons/*.svg', { eager: true, query: '?url', import: 'default' }) as Record<string, string>;
 const iconOf = (id: string): string | undefined => icons[`../../../../manifests/agents/registry/icons/${id}.svg`];
+/** The URL of the vendored registry icon `id`, when there is one (also the built-in kinds' marks, `kindIcons.ts`). */
+export const registryIcon = iconOf;
 
 const str = (v: unknown, max: number): string | undefined => (typeof v === 'string' && v.trim() ? plainText(v, max) : undefined);
 

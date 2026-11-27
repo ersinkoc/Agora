@@ -2,7 +2,7 @@ import { useId, useRef, type KeyboardEvent } from 'react';
 import { t } from '../i18n';
 import { isRegistryKind, runsAs } from '../net/agentKinds';
 import { visible } from '../net/hidden';
-import { registryInfo } from '../net/registryCatalog';
+import { kindIcon } from '../net/kindIcons';
 import { AgentAvatar, Tag } from './kit';
 import type { KindChoice } from './StartAgent';
 
@@ -20,7 +20,7 @@ export function kindOrder(kinds: readonly KindChoice[]): { installed: KindChoice
   };
 }
 
-// "Agent" in the start window: one card per kind (its letter, its name, Terminal or Chat), a radio group with one tab stop. The arrow keys
+// "Agent" in the start window: one card per kind (its mark or letter, its name, Terminal or Chat), a radio group with one tab stop. The arrow keys
 // move and choose (mirrored in a right-to-left page), Home and End go to the ends. A kind the machine cannot find is still a card, dashed
 // and under "Not installed" (said to assistive tech in its description): choosing it shows why it cannot start, and the window does not
 // start it. A card's name is the kind's name
@@ -59,7 +59,7 @@ export function KindCards({ kinds, value, onChange, disabled, label }: {
         aria-label={shown} aria-describedby={`${id}-${i}`} disabled={disabled} data-kind={k.kind} data-selected={on ? '' : undefined}
         className={`kit-card kit-card--dense flex min-w-0 items-center gap-2.5 disabled:opacity-50 ${k.installed ? '' : 'border-dashed'}`}
         onClick={() => onChange(k.kind)}>
-        <AgentAvatar accent={NO_COLOUR} kind={shown || visible(k.kind)} icon={registryInfo(k.kind)?.icon} />
+        <AgentAvatar accent={NO_COLOUR} kind={shown || visible(k.kind)} icon={kindIcon(k.kind)} />
         <span className="grid min-w-0 gap-0.5">
           <span className={`truncate font-medium ${k.installed ? 'text-ink' : 'text-muted'}`}>{shown}</span>
           <span id={`${id}-${i}`} className="flex flex-wrap gap-1"><Tag>{t(how)}</Tag>{isRegistryKind(k.kind) && <Tag>{t('agents-untested')}</Tag>}{!k.installed && <span className="sr-only">{t('start-not-installed')}</span>}</span>

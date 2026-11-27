@@ -66,7 +66,7 @@ describe('the start window, agent cards', () => {
     expect(said(card('Claude Code'))).toBe('Chat');
     expect(said(card('Gemini CLI'))).toBe('Terminalnot installed');
     expect(card('Gemini CLI').className).toContain('border-dashed');
-    expect(card('Codex').querySelector('.kit-avatar')?.textContent).toBe('C');
+    expect(card('Codex').querySelector('.kit-avatar__icon')).not.toBeNull(); // Codex's mark
     // The first installed kind is chosen, as before; the chosen card is the accent-ringed kit card.
     expect(checked('Which agent')).toBe(card('Codex'));
     expect(card('Codex').hasAttribute('data-selected')).toBe(true);
@@ -272,7 +272,7 @@ describe('the start window, machine, preview and errors', () => {
   it('previews the new agent\'s name with its avatar, by its kind, and says its colour comes when it starts', async () => {
     await open();
     const preview = () => win().querySelector('[data-start-preview]') as HTMLElement | null;
-    expect(preview()?.textContent).toBe('CWill appear as codex · …, with a colour picked when it starts.');
+    expect(preview()?.textContent).toBe('Will appear as codex · …, with a colour picked when it starts.');
     expect(preview()?.querySelector('strong')?.textContent).toBe('codex · …');
     expect(preview()?.querySelector('.kit-avatar')).not.toBeNull();
     click(card('Claude Code'));
@@ -280,7 +280,7 @@ describe('the start window, machine, preview and errors', () => {
     // The words follow the language (the window re-renders on the next change); the name keeps its order inside the sentence.
     setLanguage('tr');
     click(document.querySelector('[data-kind="codex"]'));
-    expect(document.querySelector('[role=dialog] [data-start-preview]')?.textContent).toBe('Ccodex · … olarak görünecek; rengi başlarken seçilir.');
+    expect(document.querySelector('[role=dialog] [data-start-preview]')?.textContent).toBe('codex · … olarak görünecek; rengi başlarken seçilir.');
   });
 
   it('makes the raw kind id visible in the agent name preview', async () => {

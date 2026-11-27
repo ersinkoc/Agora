@@ -45,7 +45,7 @@ afterEach(() => {
 describe('a tile without a stripe', () => {
   it('shows who the agent is as an avatar beside its name and its state as a pill, with no colour on its edge', () => {
     const out = html(<AgentTile agent={agent('a', { preview: 'Running cargo test' })} context={ctx} />);
-    expect(out).toMatch(/<span class="tile__head"><span class="kit-avatar" style="--avatar:var\(--agent-teal\)" aria-hidden="true">C<\/span><span class="tile__name">claude · a<\/span><span class="kit-pill kit-tone-working">/);
+    expect(out).toMatch(/<span class="tile__head"><span class="kit-avatar" style="--avatar:var\(--agent-teal\)" aria-hidden="true"><span class="kit-avatar__icon" style="[^"]*"><\/span><\/span><span class="tile__name">claude · a<\/span><span class="kit-pill kit-tone-working">/);
     expect(out).not.toContain('--tile-accent');
     expect(out).toContain('<span class="tile__activity" dir="auto">Running cargo test</span>');
     // The gallery's plain tile too.

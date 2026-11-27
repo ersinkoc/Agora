@@ -3,6 +3,7 @@ import { t } from '../i18n';
 import type { MachineModel } from '../net/view';
 import { ago } from '../net/time';
 import { groupKinds, isRegistryKind, kindAccent, kindChoices, plainText, readKnown, runsAs, writeKnown, type KindInfo, type KnownKinds } from '../net/agentKinds';
+import { kindIcon } from '../net/kindIcons';
 import { registryInfo, type RegistryInfo } from '../net/registryCatalog';
 import { Icon } from './Icon';
 import { AgentAvatar, KeyValue, Pill, SegmentedControl, Tag, Tooltip } from './kit';
@@ -125,7 +126,7 @@ function KindCard({ k }: { k: KindInfo }) {
     <li className={`set-kind${k.installed ? '' : ' set-kind--missing'}`}>
       <details>
         <summary className="set-kind__face">
-          <AgentAvatar accent={kindAccent(k.kind)} kind={name} icon={reg?.icon} />
+          <AgentAvatar accent={kindAccent(k.kind)} kind={name} icon={kindIcon(k.kind)} />
           <span className="set-kind__name"><span className="set-kind__title">{name}</span><span className="set-kind__caption">{caption}</span></span>
           {skips && (
             <Tooltip text={t('agents-offers-skip')}>

@@ -312,7 +312,7 @@ describe('Agents', () => {
     // Hand-made kinds first, the ACP registry's (untested) after them, in each group; the ones it cannot find under "Add an agent".
     expect(cards().map((c) => c.querySelector('.set-kind__title')?.textContent)).toEqual(['Antigravity', 'Claude Code', 'Codex', 'Fake chat agent', 'WrongStack', 'Qwen Code', 'opencode', 'goose', 'Kiro CLI']);
     const claude = cards()[1]!;
-    expect(claude.querySelector('.kit-avatar')?.textContent).toBe('C');
+    expect(claude.querySelector('.kit-avatar__icon')).not.toBeNull(); // Claude Code's mark
     const bolt = claude.querySelector('[role="img"]')!;
     expect(bolt.getAttribute('aria-label')).toContain('skips permission questions');
     expect(cards()[0]!.querySelector('[role="img"]')).toBeNull();

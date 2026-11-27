@@ -159,7 +159,7 @@ describe('command palette', () => {
     // Agents come second although they are listed last (after the themes), as the headings' order says.
     expect(groups.map((g) => document.getElementById(g.getAttribute('aria-labelledby') ?? '')?.textContent)).toEqual(['Go to', 'Agents', 'Actions', 'Appearance']);
     const agent = $$('[role="option"]').find((o) => o.textContent?.includes('claude')) as HTMLElement;
-    expect(agent.querySelector('.kit-avatar')?.textContent).toBe('C');
+    expect(agent.querySelector('.kit-avatar')?.querySelector('.kit-avatar__icon')).not.toBeNull(); // codex's mark
     expect(agent.querySelector('.palette__icon')).toBeNull();
     const next = document.getElementById('palette-next') as HTMLElement;
     expect(next.querySelector('.palette__icon svg')).toBeTruthy();

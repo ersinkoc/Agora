@@ -57,15 +57,26 @@ describe('widget kit', () => {
   });
 
   it('an avatar shows the kind letter in the agent colour; decorative beside a name, named when it stands alone', () => {
-    render(<><AgentAvatar accent="var(--agent-teal)" kind="codex" /><AgentAvatar accent="var(--agent-amber)" kind="claude" label="claude · amber" needsYou size="l" /></>);
+    render(<><AgentAvatar accent="var(--agent-teal)" kind="aider" /><AgentAvatar accent="var(--agent-amber)" kind="claude" label="claude · amber" needsYou size="l" /></>);
     const [a, b] = Array.from(host.querySelectorAll<HTMLElement>('.kit-avatar'));
-    expect(a?.textContent).toBe('C');
+    expect(a?.textContent).toBe('A');
     expect(a?.getAttribute('aria-hidden')).toBe('true');
     expect(a?.style.getPropertyValue('--avatar')).toBe('var(--agent-teal)');
     expect(b?.getAttribute('role')).toBe('img');
     expect(b?.getAttribute('aria-label')).toBe('claude · amber');
     expect(b?.querySelector('.kit-avatar__dot')).not.toBeNull();
     expect(b?.className).toContain('kit-avatar--l');
+  });
+  it("shows a kind's mark instead of its letter, as a mask and never as markup", () => {
+    render(<><AgentAvatar accent="var(--agent-teal)" kind="codex" /><AgentAvatar accent="var(--agent-teal)" kind="claude-code" /><AgentAvatar accent="var(--agent-teal)" kind="shell" /></>);
+    const [codex, claude, shell] = Array.from(host.querySelectorAll<HTMLElement>('.kit-avatar'));
+    for (const a of [codex, claude]) {
+      const icon = a?.querySelector<HTMLElement>('.kit-avatar__icon');
+      expect(icon?.style.getPropertyValue('--icon')).toMatch(/^url\("(data:image\/svg\+xml,|\/).+"\)$/);
+      expect(a?.textContent).toBe('');
+      expect(a?.querySelector('svg, img')).toBeNull();
+    }
+    expect(shell?.textContent).toBe('S');
   });
   it('makes an avatar letter visible when hidden text leads the kind', () => {
     render(<AgentAvatar accent="var(--agent-teal)" kind={'\u3164\u2800codex'} label="agent" />);

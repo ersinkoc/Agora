@@ -708,12 +708,12 @@ describe('words', () => {
 // Redesign PR 12: the turn's avatar is the agent's own (its colour and kind, as on its tile), the person's bubble is the accent tint and a
 // request that waits is the needs tint (two low-chroma tints that sit together).
 describe('the chat look', () => {
-  it("draws each turn beside the agent's avatar in its own colour, with its kind's letter", () => {
+  it("draws each turn beside the agent's avatar in its own colour, with its kind's mark", () => {
     mount([L(1, { role: 'user', text: 'go' }), L(2, { text: 'done' })], agent({ name: 'codex · teal', kind: 'codex', accent: 'var(--agent-teal)' }));
     const avatar = host.querySelector<HTMLElement>('[data-turn] .kit-avatar')!;
     expect(avatar).not.toBeNull();
     expect(avatar.style.getPropertyValue('--avatar')).toBe('var(--agent-teal)');
-    expect(avatar.textContent).toBe('C');
+    expect(avatar.querySelector('.kit-avatar__icon')).not.toBeNull(); // its kind's mark
     expect(avatar.getAttribute('aria-hidden')).toBe('true'); // the turn already says the name
   });
   it('tints the bubble with the accent and a pending request with the needs tint', () => {

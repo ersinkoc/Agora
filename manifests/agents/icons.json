@@ -1,0 +1,16 @@
+{
+  "format": 1,
+  "about": "The window's mark for each agent kind that is not a registry kind (those carry their own): a kind id here names an icon in registry/icons/ (the ACP registry's own, vendored and reviewed with it, ADR-0092). The bundled kinds first, then the usual ids of hand-made manifests for the same tools. A kind with no line here shows its first letter.",
+  "kinds": {
+    "claude-code": "claude-acp",
+    "codex": "codex-acp",
+    "opencode-acp": "opencode",
+    "claude": "claude-acp",
+    "claude-acp": "claude-acp",
+    "codex-acp": "codex-acp",
+    "opencode": "opencode",
+    "gemini": "gemini",
+    "gemini-cli": "gemini",
+    "goose": "goose"
+  }
+}

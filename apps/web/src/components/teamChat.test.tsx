@@ -47,7 +47,7 @@ describe('team chat rows', () => {
     act(() => root.render(<TeamChat messages={[msg({ body: long })]} fleet={[teal]} now={NOW} />));
     const row = rows()[0] as HTMLButtonElement;
     expect(row.querySelector('.kit-avatar')?.getAttribute('style')).toContain('var(--agent-teal)');
-    expect(row.querySelector('.kit-avatar')?.textContent).toBe('C');
+    expect(row.querySelector('.kit-avatar__icon')).not.toBeNull();
     expect(row.querySelector('.team-msg__from')?.textContent).toBe('codex · teal');
     expect(row.querySelector('.team-msg__to')?.textContent).toContain('to');
     expect(row.querySelector('.team-msg__to')?.textContent).toContain('claude · plum');
