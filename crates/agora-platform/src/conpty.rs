@@ -27,7 +27,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     JOB_OBJECT_LIMIT_PROCESS_TIME,
 };
-use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
+use windows_sys::Win32::System::Pipes::{CreatePipe, GetNamedPipeInfo, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, TerminateProcess,
@@ -529,7 +529,14 @@ impl TerminalHandle {
         };
         let (input, output) = (value(1)?, value(9)?);
         // SAFETY: GetFileType only reads the handle's type; a value that is no handle of this process gives FILE_TYPE_UNKNOWN.
-        let pipe = |h: HANDLE| unsafe { GetFileType(h) } == FILE_TYPE_PIPE;
+        let pipe = |h: HANDLE| {
+            // SAFETY: both only read; a value that is no pipe of this process fails GetNamedPipeInfo (a socket also says PIPE to
+            // GetFileType).
+            unsafe {
+                GetFileType(h) == FILE_TYPE_PIPE
+                    && GetNamedPipeInfo(h, null_mut(), null_mut(), null_mut(), null_mut()) != 0
+            }
+        };
         if input == output || !pipe(input) || !pipe(output) {
             return Err(invalid());
         }
@@ -1085,17 +1092,26 @@ struct HeldPtyShared {
     done: AtomicBool,
     /// The node's read end of the agent's output.
     output: Handle,
+    /// The reader thread (this process's own duplicate of its handle), for `CancelSynchronousIo`.
+    thread: Mutex<Option<Handle>>,
 }
 
 impl HeldPtyShared {
-    /// Stops the read and waits (at most 2 s) for the reader to end, so no read of this node's copy outlives it: a copy that kept
-    /// reading would take output meant for the next node.
+    /// Stops the read and waits until the reader has ended, so no read of this node's copy outlives it: a copy that kept reading would
+    /// take output meant for the next node. The reader never blocks in a send (it retries while it may) and a read in flight is
+    /// cancelled, on the handle and on the thread, until it ends.
     fn stop_reading(&self) {
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
         self.stop.store(true, Ordering::Release);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !self.done.load(Ordering::Acquire) && std::time::Instant::now() < end {
+        while !self.done.load(Ordering::Acquire) {
             // SAFETY: a live pipe handle (owned by `self`); cancels the read in flight on it, from any thread.
             unsafe { CancelIoEx(self.output.0, null()) };
+            if let Ok(t) = self.thread.lock() {
+                if let Some(t) = t.as_ref() {
+                    // SAFETY: this process's duplicate of the reader thread's handle (THREAD_TERMINATE access, as duplicated).
+                    unsafe { CancelSynchronousIo(t.0) };
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
@@ -1125,6 +1141,7 @@ pub fn held_pty(
         stop: AtomicBool::new(false),
         done: AtomicBool::new(false),
         output,
+        thread: Mutex::new(None),
     });
     let (tx, rx) = sync_channel::<Vec<u8>>(HELD_QUEUE);
     let reading = Arc::clone(&shared);
@@ -1144,12 +1161,38 @@ pub fn held_pty(
                         null_mut(),
                     )
                 };
-                if ok == 0 || n == 0 || tx.send(buf[..n as usize].to_vec()).is_err() {
+                if ok == 0 || n == 0 {
                     break;
+                }
+                // Never blocks for ever: a full queue is tried again while the node still reads. A chunk still queued (or this one) when
+                // the node lets go is lost to the next node, as on Unix: it was out of the pipe already.
+                let mut chunk = buf[..n as usize].to_vec();
+                loop {
+                    match tx.try_send(chunk) {
+                        Ok(()) => break,
+                        Err(std::sync::mpsc::TrySendError::Full(back))
+                            if !reading.stop.load(Ordering::Acquire) =>
+                        {
+                            chunk = back;
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Err(_) => {
+                            reading.done.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
                 }
             }
             reading.done.store(true, Ordering::Release);
         })?;
+    {
+        use std::os::windows::io::AsRawHandle;
+        if let Ok(copy) = duplicate_here(reader.as_raw_handle().cast()) {
+            if let Ok(mut t) = shared.thread.lock() {
+                *t = Some(copy);
+            }
+        }
+    }
     Ok(Box::new(HeldPty {
         input: Arc::new(Mutex::new(input)),
         pid,
@@ -1253,9 +1296,7 @@ impl Drop for HeldPty {
         self.output = sync_channel(1).1;
         self.shared.detach();
         if let Some(r) = self.reader.take() {
-            if r.is_finished() {
-                let _ = r.join();
-            }
+            let _ = r.join();
         }
     }
 }

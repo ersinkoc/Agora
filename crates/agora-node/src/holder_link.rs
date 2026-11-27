@@ -80,6 +80,9 @@ pub enum LinkError {
     Malformed(&'static str),
     /// The peer closed the link.
     Closed,
+    /// What answered is not this user's holder (M2.6): the process serving the endpoint is not the one its `HelloOk` named, or runs as
+    /// someone else.
+    NotHolder,
 }
 
 impl From<io::Error> for LinkError {
@@ -95,6 +98,7 @@ impl std::fmt::Display for LinkError {
             Self::Refused(r, v) => write!(f, "holder link: refused ({r:?}, holder version {v})"),
             Self::Malformed(w) => write!(f, "holder link: malformed {w}"),
             Self::Closed => write!(f, "holder link: closed"),
+            Self::NotHolder => write!(f, "holder link: not this user's holder"),
         }
     }
 }
@@ -1150,12 +1154,21 @@ impl Client {
                 version: spoken,
                 holder_pid,
                 holder_start,
-            } if spoken == version => Ok(Self {
-                stream,
-                holder_pid,
-                holder_start,
-                version: spoken,
-            }),
+            } if spoken == version => {
+                // M2.6: before anything else is trusted, the endpoint must be served by the holder `HelloOk` names and by this user. A
+                // Windows pipe name is global: another user could have created it first and claim anyone's process. The node then pins
+                // that process by its start time (`ProcessWatch::open(holder_pid, holder_start)`) on the handle it keeps.
+                let server = stream.server()?;
+                if server.pid != holder_pid || !server.same_user {
+                    return Err(LinkError::NotHolder);
+                }
+                Ok(Self {
+                    stream,
+                    holder_pid,
+                    holder_start,
+                    version: spoken,
+                })
+            }
             Reply::Refused {
                 code,
                 holder_version,
@@ -1418,5 +1431,60 @@ mod budget_tests {
             panic!("an unchanged timeout is not set again")
         });
         assert!(r.is_ok());
+    }
+}
+
+/// M2.6 (review finding 1): the node trusts nothing from an endpoint that is not served by the holder its `HelloOk` names and by this
+/// user. The "holder" here is this test process, answering on a thread; it claims a pid in `HelloOk`.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod holder_identity_tests {
+    use super::*;
+
+    /// Serves one connection at a fresh endpoint: reads the `Hello`, answers `HelloOk` naming `claimed`. Returns the endpoint.
+    fn fake_holder(name: &str, claimed: u32) -> (std::path::PathBuf, std::thread::JoinHandle<()>) {
+        let dir = std::env::temp_dir().join(format!("agora-hl-id-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hold.sock");
+        let listener = agora_platform::local_listen(&path).unwrap();
+        let serve = std::thread::spawn(move || {
+            let mut s = listener.accept().unwrap();
+            let (payload, _) = read_frame(&mut s, Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+            let Request::Hello { version } = Request::decode(&payload).unwrap() else {
+                panic!("not a hello");
+            };
+            let ok = Reply::HelloOk {
+                version,
+                holder_pid: claimed,
+                holder_start: 1,
+            };
+            write_frame(&mut s, &ok.encode(), None).unwrap();
+            // Keep the connection until the client is done with it.
+            let _ = read_frame(&mut s, Duration::from_secs(2));
+        });
+        (path, serve)
+    }
+
+    #[test]
+    fn an_endpoint_whose_server_is_not_the_holder_it_names_is_refused() {
+        let me = std::process::id();
+        let (path, serve) = fake_holder("other", me.wrapping_add(1));
+        let got = Client::connect_with_version(&path, LINK_VERSION);
+        assert!(matches!(got, Err(LinkError::NotHolder)), "{:?}", got.err());
+        drop(got);
+        let _ = serve.join();
+    }
+
+    #[test]
+    fn an_endpoint_served_by_the_holder_it_names_is_taken() {
+        let me = std::process::id();
+        let (path, serve) = fake_holder("same", me);
+        let c = Client::connect_with_version(&path, LINK_VERSION).unwrap();
+        assert_eq!(c.holder_pid, me);
+        drop(c);
+        let _ = serve.join();
     }
 }

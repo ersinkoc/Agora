@@ -1278,6 +1278,25 @@ impl LocalStream {
         }
     }
 
+    /// On a connection this process made, the process serving the other end and whether it runs as this user (M2.6). Unix: the
+    /// kernel's peer credentials, as [`Self::peer`] (the holder's socket is in an owner-only folder anyway). Windows: the pipe's server
+    /// process (`GetNamedPipeServerProcessId`) and its token's user: a pipe name is global, so another user could have created it
+    /// first.
+    pub fn server(&self) -> io::Result<Peer> {
+        #[cfg(unix)]
+        {
+            unixhold::peer_of(std::os::fd::AsRawFd::as_raw_fd(&self.inner))
+        }
+        #[cfg(windows)]
+        {
+            let pid = self.inner.server_pid()?;
+            Ok(Peer {
+                pid,
+                same_user: winconfine::process_runs_as_this_user(pid),
+            })
+        }
+    }
+
     /// One send of `bytes` with `terminal` (a master from [`HeldTerminal::handle`]) attached when given; returns how many bytes went.
     /// The terminal goes with the first byte that does: send the rest with `write`. Unix `SCM_RIGHTS`.
     pub fn send_with_terminal(
@@ -2405,8 +2424,7 @@ pub fn spawn_detached_unbound(
 ) -> io::Result<Detached> {
     #[cfg(windows)]
     {
-        let out = open_append_private(log)?;
-        winproc::spawn_detached_strict(cmd, &out)
+        winhold::start_holder(cmd, log).map(|pid| Detached { pid, in_job: false })
     }
     #[cfg(not(windows))]
     {

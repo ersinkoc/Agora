@@ -89,6 +89,8 @@ fn terminals_inside_the_frame_keep_their_encoding() {
     }
 }
 
+/// The bound is checked where these frames decode at all (terminals inside the frame, Windows); elsewhere every such frame is
+/// `Malformed` anyway, so the first half holds on every system and the bound itself is tested on Windows.
 #[test]
 fn a_reference_past_its_bound_or_empty_is_refused() {
     for terminal in [vec![], vec![7u8; agora_platform::TERMINAL_REF_MAX + 1]] {

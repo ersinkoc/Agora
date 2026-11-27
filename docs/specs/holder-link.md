@@ -403,8 +403,9 @@ true on Windows, false on Unix. The link version does not change: no older Windo
 ### Frames
 Holder to node: `StartedRef`(73: agent, pid, `terminal: bytes`) and `TerminalRef`(74: agent, pid, state, buffer-dropped flag, buffer,
 `terminal: bytes`). They are `Started` and `Terminal` with the terminal reference as one more field.
-- On Windows a frame that hands a terminal over is always one of these. `Started`(67) is never sent there, and `Terminal`(69) only for an
-  ended agent, whose frame carries no terminal (as on Unix).
+- On Windows a frame that hands a terminal over is always one of these. `Started`(67) is never sent there. `Terminal`(69) goes only
+  without a terminal: for an ended agent (as on Unix), and for a running agent whose terminal the holder could not duplicate (as on Unix,
+  where its frame then carries no descriptor; the node cannot take that agent's terminal).
 - A node whose terminals travel beside the frame (Unix) refuses 73 and 74 as `Malformed`, as it would an unknown tag, and closes the link.
 - `terminal` is opaque to the link: 1 to `TERMINAL_REF_MAX` (64) bytes, refused as `Malformed` before anything reads it when empty or
   longer. Its layout is the platform's own. On Windows it is a version byte (1) and the two handle values in the node (the input's write
@@ -412,11 +413,15 @@ Holder to node: `StartedRef`(73: agent, pid, `terminal: bytes`) and `TerminalRef
 - Golden fixtures: `started-ref`, `terminal-ref`.
 
 ### Handles on every path
+- **Who answers.** A Windows pipe name is global, so another user could create the holder's pipe first. Right after `HelloOk`, before
+  anything else is trusted, the node asks who serves the endpoint (`LocalStream::server`: `GetNamedPipeServerProcessId`, the kernel's
+  peer credentials on Unix). It goes on only when that is the process `HelloOk` names and runs as this user (`LinkError::NotHolder`
+  otherwise), then pins that process by its start time (`ProcessWatch`). Threat model T79.
 - **The holder** duplicates both ends into the node through the handle it opened and checked by start time when it admitted that node
   (decision 5; `TerminalHandle::export_to`). If the frame does not go out (a send fails, the link drops first), it closes both duplicates
   in the node again (`DUPLICATE_CLOSE_SOURCE`), so nothing of an undelivered frame stays there. Once the frame went out, they are the node's.
 - **The node** imports a reference only after checking it: the exact length and version, two nonzero and different values, both of them
-  pipes (`TerminalHandle::import`). A reference that fails is `Malformed` and closes the link. Nothing of it is closed, since its values
+  pipes the named-pipe calls accept (`GetFileType` and `GetNamedPipeInfo`; `TerminalHandle::import`). A reference that fails is `Malformed` and closes the link. Nothing of it is closed, since its values
   may name handles the node holds for something else; a wrong reference is a holder fault, and the holder was admitted by pid and start
   time.
 - **What can still be lost:** a frame that went out but that the node never reads, from a node that keeps running (it closed the link

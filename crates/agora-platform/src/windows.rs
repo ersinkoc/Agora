@@ -34,8 +34,8 @@ use windows_sys::Win32::System::Console::{
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE,
@@ -812,6 +812,17 @@ impl Stream {
         let mut pid = 0u32;
         // SAFETY: a live pipe handle and a valid out pointer.
         if unsafe { GetNamedPipeClientProcessId(self.handle.0, &mut pid) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(pid)
+    }
+
+    /// M2.6: on a connection this process made, the process id of the server at the other end. A pipe name is global on a machine, so
+    /// whoever created it first serves it: the node checks this against the holder it expects before trusting anything from it.
+    pub(crate) fn server_pid(&self) -> io::Result<u32> {
+        let mut pid = 0u32;
+        // SAFETY: a live pipe handle and a valid out pointer.
+        if unsafe { GetNamedPipeServerProcessId(self.handle.0, &mut pid) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(pid)
@@ -2643,5 +2654,35 @@ mod machine_tests {
             std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into())
         );
         assert!(d[0].mount.eq_ignore_ascii_case(&system), "{d:?}");
+    }
+}
+
+/// M2.6 (review finding 1): who serves a pipe this process connected to, and whether a process runs as this user.
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod server_identity_tests {
+    #[test]
+    fn a_pipe_names_its_server_and_that_server_is_this_user() {
+        let dir = std::env::temp_dir().join(format!("agora-srv-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.sock");
+        let listener = crate::local_listen(&path).unwrap();
+        let client = crate::local_connect(&path).unwrap();
+        let _served = listener.accept().unwrap();
+        let server = client.server().unwrap();
+        assert_eq!(server.pid, std::process::id());
+        assert!(server.same_user);
+    }
+
+    #[test]
+    fn the_system_process_is_not_this_user() {
+        assert!(crate::winconfine::process_runs_as_this_user(
+            std::process::id()
+        ));
+        // The System process (pid 4) runs as SYSTEM; its token cannot be read here, which counts as another user.
+        assert!(!crate::winconfine::process_runs_as_this_user(4));
+        // No such process.
+        assert!(!crate::winconfine::process_runs_as_this_user(0xFFFF_FFF0));
     }
 }

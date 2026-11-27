@@ -1207,10 +1207,34 @@ impl Drop for Confinement {
 
 /// The SID of the user this process runs as, as text.
 pub(crate) fn current_user_sid_text() -> io::Result<String> {
+    // SAFETY: the pseudo handle of this process needs no closing.
+    user_sid_text_of(unsafe { GetCurrentProcess() })
+}
+
+/// Whether process `pid` runs as the user this process runs as (M2.6: the node checks that the pipe it reached is served by its own
+/// user's holder). A process whose token cannot be read (another user's, as a rule) does not.
+pub(crate) fn process_runs_as_this_user(pid: u32) -> bool {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain call; the handle is closed below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let theirs = user_sid_text_of(process);
+    // SAFETY: opened above, closed once.
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
+    match (theirs, current_user_sid_text()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The SID of the user `process` runs as, as text.
+fn user_sid_text_of(process: HANDLE) -> io::Result<String> {
     use windows_sys::Win32::Security::{TokenUser, TOKEN_USER};
     let mut own: HANDLE = null_mut();
-    // SAFETY: the pseudo handle of this process and an out pointer.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut own) } == 0 {
+    // SAFETY: a process handle with PROCESS_QUERY_LIMITED_INFORMATION (or this process's pseudo handle) and an out pointer.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut own) } == 0 {
         return Err(last_error());
     }
     let own = Token(own);

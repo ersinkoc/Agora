@@ -40,19 +40,20 @@ const HELLO_WAIT: Duration = Duration::from_secs(1);
 /// once) slows the node by at most this many checks and can never starve it, a reap or a watch.
 const MAX_ACCEPTS: usize = 16;
 
-/// M2.6: the frame that carries a terminal inside it in place of `reply` (`Started`, `Terminal`); any other reply carries none.
-fn with_terminal(reply: &Reply, terminal: &[u8]) -> Reply {
+/// M2.6: the frame that carries a terminal inside it in place of `reply`: `StartedRef` for `Started`, `TerminalRef` for `Terminal`.
+/// `None` for any other reply, which never carries a terminal.
+fn with_terminal(reply: &Reply, terminal: &[u8]) -> Option<Reply> {
     match reply {
-        Reply::Started { agent, pid } => Reply::StartedRef {
+        Reply::Started { agent, pid } => Some(Reply::StartedRef {
             agent: agent.clone(),
             pid: *pid,
             terminal: terminal.to_vec(),
-        },
-        Reply::Terminal(info) => Reply::TerminalRef {
+        }),
+        Reply::Terminal(info) => Some(Reply::TerminalRef {
             info: info.clone(),
             terminal: terminal.to_vec(),
-        },
-        other => other.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -523,14 +524,17 @@ impl Holder {
             // M2.6 (Windows): the terminal goes inside the frame, duplicated into the node this holder admitted and watches. The
             // duplicates are the node's only once the frame went out; a frame that did not go closes them there again.
             Some(t) if agora_platform::TERMINAL_IN_BAND => match t.export_to(&n.watch) {
-                Ok(export) => {
-                    let framed = with_terminal(reply, export.bytes());
-                    let ok = write_frame(&mut n.stream, &framed.encode(), None).is_ok();
-                    if ok {
-                        export.delivered();
+                // Only `Started` and `Terminal` carry a terminal; for anything else the export is dropped, which closes its duplicates.
+                Ok(export) => match with_terminal(reply, export.bytes()) {
+                    Some(framed) => {
+                        let ok = write_frame(&mut n.stream, &framed.encode(), None).is_ok();
+                        if ok {
+                            export.delivered();
+                        }
+                        ok
                     }
-                    ok
-                }
+                    None => false,
+                },
                 Err(_) => false,
             },
             _ => write_frame(&mut n.stream, &reply.encode(), terminal).is_ok(),
