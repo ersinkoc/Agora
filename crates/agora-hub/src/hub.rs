@@ -1915,6 +1915,7 @@ mod tests {
         }));
         assert_eq!(spawn_audit(&view, &refused).unwrap().3, "mesh.helper_limit");
         let started = at(Body::AgentStarted(AgentStarted {
+            shared_items: Vec::new(),
             launch_settings: Vec::new(),
             run_id: Vec::new(),
             agent_id: "b".into(),
@@ -1949,6 +1950,7 @@ mod tests {
         };
         let started = |skips, options: &[&str]| {
             at(Body::AgentStarted(AgentStarted {
+                shared_items: Vec::new(),
                 launch_settings: Vec::new(),
                 run_id: Vec::new(),
                 agent_id: "c".into(),
@@ -2034,6 +2036,7 @@ mod tests {
             seq,
             at_ms: seq,
             body: Some(Body::AgentStarted(AgentStarted {
+                shared_items: Vec::new(),
                 launch_settings: Vec::new(),
                 run_id: Vec::new(),
                 agent_id: id.into(),

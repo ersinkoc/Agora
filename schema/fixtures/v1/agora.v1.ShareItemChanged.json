@@ -1,0 +1,12 @@
+{
+  "name": "x",
+  "kind": "SHARE_ITEM_KIND_MCP_SERVER",
+  "itemHash": "x",
+  "scope": {
+    "projectId": "x",
+    "kinds": [
+      "x"
+    ]
+  },
+  "issuedMs": "1"
+}

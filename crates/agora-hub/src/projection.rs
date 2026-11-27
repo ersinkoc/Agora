@@ -494,6 +494,9 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         // holds its node) are the hub's own facts.
         Body::NodeLink(_) => return Err("node_link"),
         Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
+        // ADR-0122: the hub's word on a shared item; a node speaks only for itself when it refuses one.
+        Body::ShareItemChanged(_) => return Err("share_item_changed"),
+        Body::ShareItemRefused(e) => &e.node_id,
         Body::NodeForgotten(_) => return Err("node_forgotten"),
         Body::AgentForgotten(_) => return Err("agent_forgotten"),
         Body::NodeOnline(e) => &e.node_id,
@@ -1326,6 +1329,8 @@ impl View {
                 }
             }
             Body::TaskHandoffDeliveryChanged(_) => {}
+            // ADR-0122: nothing kept in the view yet (the hub's store keeps the items; build step 2).
+            Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => {}
             Body::TaskChanged(t) => {
                 // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
                 let owner = match (
@@ -1667,6 +1672,7 @@ mod tests {
 
     fn started(id: &str) -> Body {
         Body::AgentStarted(AgentStarted {
+            shared_items: Vec::new(),
             launch_settings: Vec::new(),
             run_id: Vec::new(),
             agent_id: id.into(),

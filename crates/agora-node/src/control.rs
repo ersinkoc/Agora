@@ -1867,6 +1867,11 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
         | Cmd::HelperRelease(_) => Err(capability_missing(
             agora_protocol::handshake::MESH_SPAWN_REMOTE,
         )),
+        // ADR-0122: the hub's (a node asks for an item on its hub link); not offered until the build steps.
+        Cmd::ShareItemPublish(_)
+        | Cmd::ShareItemList(_)
+        | Cmd::ShareItemRemove(_)
+        | Cmd::ShareItemGet(_) => Err(capability_missing(agora_protocol::handshake::SHARE_ITEMS)),
         other => Err(capability_missing(command_name(other))),
     }
 }
@@ -2357,6 +2362,10 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PluginCatalogList(_) => "plugin_catalog.list",
         Cmd::PluginCatalogScreenshot(_) => "plugin_catalog.screenshot",
         Cmd::AcknowledgeTaskHandoff(_) => "task_handoff.acknowledge",
+        Cmd::ShareItemPublish(_) => "share_item.publish",
+        Cmd::ShareItemList(_) => "share_item.list",
+        Cmd::ShareItemRemove(_) => "share_item.remove",
+        Cmd::ShareItemGet(_) => "share_item.get",
         // ADR-0113 decision 6 (step 4): a person's settings are the hub's; a node never receives them (refused as unsupported).
         Cmd::UserSettingsGet(_) => "user_settings.get",
         Cmd::UserSettingsSet(_) => "user_settings.set",

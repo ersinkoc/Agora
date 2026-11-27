@@ -10,6 +10,7 @@ import "agora/v1/pairing.proto";
 import "agora/v1/plugins.proto";
 import "agora/v1/preview.proto";
 import "agora/v1/settings.proto";
+import "agora/v1/share.proto";
 
 // Commands flow client -> hub -> node (docs/specs/protocol.md section 4). Every request has a request_id
 // and an idempotency_key; the response is Ok or Err.
@@ -134,6 +135,12 @@ message CommandRequest {
     HelperRelease helper_release = 125;
     // ADR-0121: the signed-in owner clears an unresolved reservation on the hub.
     AcknowledgeTaskHandoff acknowledge_task_handoff = 126;
+    // ADR-0122, capability `share.items` (named; offered by no one until the build steps): shared skills and MCP servers. The first
+    // three are the hub's (publish and remove owner only, each signed by the owner's device); the fourth comes only from a node.
+    ShareItemPublish share_item_publish = 127;
+    ShareItemList share_item_list = 128;
+    ShareItemRemove share_item_remove = 129;
+    ShareItemGet share_item_get = 130;
   }
 }
 
@@ -203,6 +210,9 @@ message CommandOk {
     // ADR-0119: the target's first answer to a forwarded `HelperStart`, and its answer to `HelperFollow`.
     HelperStartAccepted helper_start_accepted = 41;
     HelperFollowResult helper_follow_result = 42;
+    // ADR-0122: the answers to `ShareItemList` and `ShareItemGet`.
+    ShareItemListResult share_item_list = 43;
+    ShareItemGetResult share_item_get = 44;
   }
 }
 

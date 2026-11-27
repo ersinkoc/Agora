@@ -1,0 +1,107 @@
+{
+ "about": "ADR-0122, agora-share-item-v1. An item's content hash is SHA-256 (lowercase hex) of `agora-share-item-content-v1`, one NUL, then F(kind) F(name) and, for kind `mcp_server`, F(command) F(list(args)) F(pairs(env sorted by name)) F(url) F(pairs(headers sorted by name)); for kind `skill`, F(description) F(pairs(files sorted by path, each (path, sha256 hex of its content)))). The signed bytes are `agora-share-item-v1`, one NUL, then F(action) F(name) F(item_hash) F(project_id) F(list(kinds)) F(issued_ms), action `publish` or `remove` (a removal has an empty item_hash). F(x) is the decimal byte length of x, `:`, then x; list(x) is the count then `:<len>:<id>` per id in the order given, pairs(x) the count then `:<len>:<a>:<len>:<b>` per pair (both as in ADR-0059/0066). Numbers in decimal. Checked by crates/agora-protocol/tests/share_item_signing.rs, and by the hub, the node and the web window when ADR-0122 is built.",
+ "cases": [
+  {
+   "name": "an MCP server program for every project, with a secret reference",
+   "action": "publish",
+   "item": {
+    "name": "db-tools",
+    "kind": "mcp_server",
+    "mcp": {
+     "command": "npx",
+     "args": [
+      "-y",
+      "@example/db-mcp",
+      "--readonly"
+     ],
+     "env": [
+      [
+       "DB_URL",
+       "{secret:DB_URL}"
+      ],
+      [
+       "APP_ENV",
+       "dev"
+      ]
+     ]
+    }
+   },
+   "project_id": "",
+   "kinds": [],
+   "issued_ms": 1764245000000,
+   "content_hex": "61676f72612d73686172652d6974656d2d636f6e74656e742d76310031303a6d63705f736572766572383a64622d746f6f6c73333a6e707833393a333a323a2d793a31353a406578616d706c652f64622d6d63703a31303a2d2d726561646f6e6c7934353a323a373a4150505f454e563a333a6465763a363a44425f55524c3a31353a7b7365637265743a44425f55524c7d303a313a30",
+   "item_hash": "c5c882981a65c2384993763faefc1f41b35ed86a9aaad80a5e2cffe342cd258d",
+   "hex": "61676f72612d73686172652d6974656d2d763100373a7075626c697368383a64622d746f6f6c7336343a63356338383239383161363563323338343939333736336661656663316634316233356564383661396161616438306135653263666665333432636432353864303a313a3031333a31373634323435303030303030",
+   "item_name": "db-tools"
+  },
+  {
+   "name": "a remote MCP server for one project and two kinds",
+   "action": "publish",
+   "item": {
+    "name": "docs-search",
+    "kind": "mcp_server",
+    "mcp": {
+     "url": "https://mcp.example.com/sse",
+     "headers": [
+      [
+       "Authorization",
+       "Bearer {secret:DOCS_TOKEN}"
+      ]
+     ]
+    }
+   },
+   "project_id": "github.com/example/web",
+   "kinds": [
+    "claude-code",
+    "codex"
+   ],
+   "issued_ms": 1764245100000,
+   "content_hex": "61676f72612d73686172652d6974656d2d636f6e74656e742d76310031303a6d63705f73657276657231313a646f63732d736561726368303a313a30313a3032373a68747470733a2f2f6d63702e6578616d706c652e636f6d2f73736534383a313a31333a417574686f72697a6174696f6e3a32363a426561726572207b7365637265743a444f43535f544f4b454e7d",
+   "item_hash": "85a16e906f42922bf8448f8784946898ffaf07ec7b1d8a739e108b04675101f8",
+   "hex": "61676f72612d73686172652d6974656d2d763100373a7075626c69736831313a646f63732d73656172636836343a3835613136653930366634323932326266383434386638373834393436383938666661663037656337623164386137333965313038623034363735313031663832323a6769746875622e636f6d2f6578616d706c652f77656232343a323a31313a636c617564652d636f64653a353a636f64657831333a31373634323435313030303030",
+   "item_name": "docs-search"
+  },
+  {
+   "name": "a skill with two files, non-ASCII text included",
+   "action": "publish",
+   "item": {
+    "name": "review-checklist",
+    "kind": "skill",
+    "skill": {
+     "description": "How we review a change",
+     "files": [
+      {
+       "path": "SKILL.md",
+       "content": "# Review\nRead the diff first.\n"
+      },
+      {
+       "path": "notes/tr.md",
+       "content": "Değişikliği önce okuyun.\n"
+      }
+     ]
+    }
+   },
+   "project_id": "",
+   "kinds": [
+    "claude-code"
+   ],
+   "issued_ms": 1764245200000,
+   "content_hex": "61676f72612d73686172652d6974656d2d636f6e74656e742d763100353a736b696c6c31363a7265766965772d636865636b6c69737432323a486f77207765207265766965772061206368616e67653136333a323a383a534b494c4c2e6d643a36343a306230396161376339613633623030343930666635663661313130643863303962383438643833363232663462343633346131633766346238656130323837663a31313a6e6f7465732f74722e6d643a36343a30643165643239386434353665643865393861383361363537356331376361303366653561373632323632623634313333323936376165306339333262656432",
+   "item_hash": "08359e7751beee8103280839304b8e15da4c6dd3a5f2dcc90cf8a5b3594137a1",
+   "hex": "61676f72612d73686172652d6974656d2d763100373a7075626c69736831363a7265766965772d636865636b6c69737436343a30383335396537373531626565653831303332383038333933303462386531356461346336646433613566326463633930636638613562333539343133376131303a31363a313a31313a636c617564652d636f646531333a31373634323435323030303030",
+   "item_name": "review-checklist"
+  },
+  {
+   "name": "a removal of a name",
+   "action": "remove",
+   "item": null,
+   "project_id": "",
+   "kinds": [],
+   "issued_ms": 1764246000000,
+   "content_hex": "",
+   "item_hash": "",
+   "hex": "61676f72612d73686172652d6974656d2d763100363a72656d6f7665383a64622d746f6f6c73303a303a313a3031333a31373634323436303030303030",
+   "item_name": "db-tools"
+  }
+ ]
+}

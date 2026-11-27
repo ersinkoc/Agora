@@ -699,6 +699,7 @@ impl EventSink {
             .map(|e| (e.parent_node_id, e.parent_node_agent_id))
             .unwrap_or_default();
         record(Body::AgentStarted(v1::AgentStarted {
+            shared_items: Vec::new(),
             launch_settings: settings_of(&view.launch_settings),
             run_id: view.run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.into(),
@@ -895,6 +896,7 @@ impl EventSink {
         remote: Option<&RemoteParent>,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
+            shared_items: Vec::new(),
             launch_settings: settings_of(&launch.settings),
             run_id: run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.as_str().to_string(),

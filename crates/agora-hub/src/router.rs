@@ -861,7 +861,12 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::PairRequest(_)
             | command_request::Command::PairReveal(_)
             // ADR-0085: a machine asks the hub for its own certificate on its own connection; a client has no such thing to forward.
-            | command_request::Command::Renew(_),
+            | command_request::Command::Renew(_)
+            // ADR-0122: shared items are the hub's (and a node asks for one on its own connection); never forwarded to a node.
+            | command_request::Command::ShareItemPublish(_)
+            | command_request::Command::ShareItemList(_)
+            | command_request::Command::ShareItemRemove(_)
+            | command_request::Command::ShareItemGet(_),
         ) => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command")),
         Some(_) if req.target_node.is_empty() => {
             Err(Error::new(ErrorCode::NodeUnknown).with("node_id", ""))

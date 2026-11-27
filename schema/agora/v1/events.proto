@@ -4,6 +4,7 @@ package agora.v1;
 
 import "agora/v1/common.proto";
 import "agora/v1/preview.proto";
+import "agora/v1/share.proto";
 
 // Events are immutable facts (docs/specs/protocol.md section 3). Each producer numbers its events;
 // the receiver applies a (producer_id, seq) at most once.
@@ -71,6 +72,9 @@ message Event {
     HandoffCreated handoff_created = 64;
     // ADR-0121: only the hub writes delivery outcomes for the shared board.
     TaskHandoffDeliveryChanged task_handoff_delivery_changed = 91;
+    // ADR-0122: the hub says a shared item changed; a node says it will not give one to its agents.
+    ShareItemChanged share_item_changed = 92;
+    ShareItemRefused share_item_refused = 93;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -201,6 +205,8 @@ message AgentStarted {
   // ADR-0123: the ADR-0066 launch settings the agent was started with, as the node applied them (at most 8, each value at most 64
   // bytes); re-stated by a resume. Old clients ignore them.
   repeated LaunchSetting launch_settings = 35;
+  // ADR-0122: the shared skills and MCP servers the agent was started with (at most 32).
+  repeated SharedItemRef shared_items = 36;
 }
 
 message AgentStateChanged {

@@ -1,0 +1,32 @@
+{
+  "name": "x",
+  "kind": "SHARE_ITEM_KIND_MCP_SERVER",
+  "mcp": {
+    "command": "x",
+    "args": [
+      "x"
+    ],
+    "env": [
+      {
+        "name": "x",
+        "value": "x"
+      }
+    ],
+    "url": "x",
+    "headers": [
+      {
+        "name": "x",
+        "value": "x"
+      }
+    ]
+  },
+  "skill": {
+    "description": "x",
+    "files": [
+      {
+        "path": "x",
+        "content": "AQID"
+      }
+    ]
+  }
+}

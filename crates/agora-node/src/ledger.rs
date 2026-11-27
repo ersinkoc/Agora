@@ -2532,6 +2532,7 @@ mod carry_on_tests {
     fn agent(l: &Ledger, id: &str, now: u64) {
         l.observe(
             &Body::AgentStarted(v1::AgentStarted {
+                shared_items: Vec::new(),
                 launch_settings: Vec::new(),
                 run_id: Vec::new(),
                 agent_id: id.into(),

@@ -1,0 +1,19 @@
+{
+  "command": "x",
+  "args": [
+    "x"
+  ],
+  "env": [
+    {
+      "name": "x",
+      "value": "x"
+    }
+  ],
+  "url": "x",
+  "headers": [
+    {
+      "name": "x",
+      "value": "x"
+    }
+  ]
+}

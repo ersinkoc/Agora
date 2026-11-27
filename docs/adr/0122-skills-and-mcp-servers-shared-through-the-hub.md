@@ -84,3 +84,15 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
 3. The node: fetch, verify, policy, secret filling, per-launch injection for MCP servers (Claude Code, Codex, WrongStack manifests).
 4. The window: Settings → Shared, publish and sign, per-machine refusals, the agent's started-with list.
 5. Skills: the `[skills]` manifest section per kind once checked on a real version.
+
+## Status of the build
+
+1. Schema: done (2026-11-27). `schema/agora/v1/share.proto` (commands 127..130, results 43..44, events 92..93,
+   `AgentStarted.shared_items` 36, `AgentSnapshot.shared_items` 53), capability `share.items` (offered by no one; node and hub refuse
+   the commands), error codes `share.refused`, `share.secret_missing`, `share.unknown`, the `agora-share-item-v1` vectors with their
+   test, golden fixtures, `protocol.md` "Shared skills and MCP servers" and threat-model row T75. The signed word carries
+   `issued_ms`, and a removal is signed too, so an old signature cannot bring back what a newer word replaced or removed.
+2. The hub: not started.
+3. The node: not started.
+4. The window: not started.
+5. Skills per kind: not started.

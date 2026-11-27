@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package agora.v1;
+
+// ADR-0122: skills and MCP server definitions the owner publishes through the hub. Each publish and each removal is signed by the
+// owner's device (`agora-share-item-v1`, docs/specs/protocol.md "Shared skills and MCP servers"); the hub stores and serves them and
+// cannot make one up or widen one, because every node checks the signature against its own trusted devices and its own policy
+// (`share.items`, `share.mcp_commands`). Capability `share.items` (named; offered by no one until the build steps).
+
+enum ShareItemKind {
+  SHARE_ITEM_KIND_UNSPECIFIED = 0;
+  SHARE_ITEM_KIND_MCP_SERVER = 1;
+  SHARE_ITEM_KIND_SKILL = 2;
+}
+
+// One environment variable or header of an MCP server. A secret is written as a reference, `{secret:NAME}`, filled on each node from
+// its own secret store (ADR-0084); the hub never sees a secret's value.
+message ShareValue {
+  string name = 1;
+  string value = 2;
+}
+
+// An MCP server: either a program (`command`, `args`, `env`) or a remote server (`url`, `headers`), never both.
+message McpServerDef {
+  string command = 1;
+  repeated string args = 2;
+  repeated ShareValue env = 3;
+  string url = 4;
+  repeated ShareValue headers = 5;
+}
+
+// One file of a skill: a path inside the skill's folder (no `..`, no absolute path, no link) and its UTF-8 text.
+message SkillFile {
+  string path = 1;
+  bytes content = 2;
+}
+
+// A skill: a short description and its files (at most 64 files and 1 MiB in all).
+message SkillDef {
+  string description = 1;
+  repeated SkillFile files = 2;
+}
+
+// What is shared. `name` is `[a-z0-9-]`, at most 64; a change is a new version of the same name.
+message ShareItem {
+  string name = 1;
+  ShareItemKind kind = 2;
+  McpServerDef mcp = 3;
+  SkillDef skill = 4;
+}
+
+// Who gets it: every project (empty `project_id`) or one; every kind (empty `kinds`) or only those listed.
+message ShareScope {
+  string project_id = 1;
+  repeated string kinds = 2;
+}
+
+// The owner's signed word on one name: publish this content with this scope, or (with no `item`) remove the name. `issued_ms` orders
+// the words on one name: a node keeps the newest it has seen and refuses an older one, so an old signature cannot bring back what a
+// newer one replaced or removed.
+message ShareItemSigned {
+  ShareItem item = 1;
+  ShareScope scope = 2;
+  uint64 issued_ms = 3;
+  // The SHA-256 of the item's content as the signature names it (lowercase hex); empty for a removal.
+  string item_hash = 4;
+  string signer_device_id = 5;
+  bytes signature = 6;
+}
+
+// ---- requests ----
+
+// Command 127, hub-only, owner only: publish or change an item (`signed.item` set) with its scope.
+message ShareItemPublish {
+  ShareItemSigned signed = 1;
+}
+
+// Command 128, hub-only: the items the hub keeps (their content omitted unless `with_content`).
+message ShareItemList {
+  bool with_content = 1;
+}
+
+// Command 129, hub-only, owner only: remove a name; `signed` is a signed removal (no `item`).
+message ShareItemRemove {
+  ShareItemSigned signed = 1;
+}
+
+// Command 130, from a node's connection only: the item by its name and hash, to verify and install at the next launches.
+message ShareItemGet {
+  string name = 1;
+  string item_hash = 2;
+}
+
+// ---- results ----
+
+// One item as the hub lists it, with what each machine said of it.
+message ShareItemInfo {
+  string name = 1;
+  ShareItemKind kind = 2;
+  string item_hash = 3;
+  ShareScope scope = 4;
+  uint64 issued_ms = 5;
+  string signer_device_id = 6;
+  // Set only for `ShareItemList.with_content`.
+  ShareItemSigned signed = 7;
+  // The machines that refused it, and why (`ShareItemRefused`).
+  repeated ShareItemRefused refused = 8;
+}
+
+// CommandOk 43.
+message ShareItemListResult {
+  repeated ShareItemInfo items = 1;
+}
+
+// CommandOk 44: the signed word for `ShareItemGet`.
+message ShareItemGetResult {
+  ShareItemSigned signed = 1;
+}
+
+// ---- events ----
+
+// Event 92, hub-written: an item was published, changed or removed (no content: the name, kind, hash, scope and time).
+message ShareItemChanged {
+  string name = 1;
+  ShareItemKind kind = 2;
+  // Empty when removed.
+  string item_hash = 3;
+  ShareScope scope = 4;
+  uint64 issued_ms = 5;
+}
+
+// Event 93, node-written: this node will not give an item to its agents. `code` is a stable error code (`share.refused` with its
+// `reason`, `share.secret_missing` with the secret's name, `approval.signature_invalid`, ...); never the item's content.
+message ShareItemRefused {
+  string node_id = 1;
+  string name = 2;
+  string item_hash = 3;
+  string code = 4;
+  string reason = 5;
+}
+
+// One item an agent was started with (`AgentStarted.shared_items`, `AgentSnapshot.shared_items`).
+message SharedItemRef {
+  string name = 1;
+  string item_hash = 2;
+}

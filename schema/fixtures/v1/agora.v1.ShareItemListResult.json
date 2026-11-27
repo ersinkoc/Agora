@@ -1,0 +1,52 @@
+{
+  "items": [
+    {
+      "name": "x",
+      "kind": "SHARE_ITEM_KIND_MCP_SERVER",
+      "itemHash": "x",
+      "scope": {
+        "projectId": "x",
+        "kinds": [
+          "x"
+        ]
+      },
+      "issuedMs": "1",
+      "signerDeviceId": "x",
+      "signed": {
+        "item": {
+          "name": "x",
+          "kind": "SHARE_ITEM_KIND_MCP_SERVER",
+          "mcp": {
+            "command": "x",
+            "args": [
+              "x"
+            ],
+            "url": "x"
+          },
+          "skill": {
+            "description": "x"
+          }
+        },
+        "scope": {
+          "projectId": "x",
+          "kinds": [
+            "x"
+          ]
+        },
+        "issuedMs": "1",
+        "itemHash": "x",
+        "signerDeviceId": "x",
+        "signature": "AQID"
+      },
+      "refused": [
+        {
+          "nodeId": "x",
+          "name": "x",
+          "itemHash": "x",
+          "code": "x",
+          "reason": "x"
+        }
+      ]
+    }
+  ]
+}

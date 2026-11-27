@@ -414,6 +414,8 @@ impl Scope {
             Body::LeaseReleased(e) => self.lease_visible(node, &e.agent_id),
             // The shared board spans machines, so no single grant covers it.
             Body::TaskChanged(_) | Body::TaskHandoffDeliveryChanged(_) => false,
+            // ADR-0122: shared items are the owner's (they reach every agent on every machine).
+            Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.
             Body::TaskDispatched(e) => self.granted(self.agents.get(&q(&e.agent_id))),
         }
@@ -605,6 +607,7 @@ mod tests {
         ev(
             node,
             Body::AgentStarted(v1::AgentStarted {
+                shared_items: Vec::new(),
                 launch_settings: Vec::new(),
                 run_id: Vec::new(),
                 agent_id: id.into(),

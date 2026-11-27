@@ -12,6 +12,9 @@ pub const FLEET_STATUS_V1: &str = "mesh.fleet_status.v1";
 /// ADR-0119: a helper started on another machine (`HelperStart`, `HelperStartResult`, `HelperFollow`, `HelperRelease`). Named in the
 /// schema step; no node or hub offers it until build steps 2 to 4.
 pub const MESH_SPAWN_REMOTE: &str = "mesh.spawn.remote";
+/// ADR-0122: shared skills and MCP servers (`ShareItemPublish`, `ShareItemList`, `ShareItemRemove`, `ShareItemGet`). Named in the
+/// schema step; no node or hub offers it until the build steps.
+pub const SHARE_ITEMS: &str = "share.items";
 
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]

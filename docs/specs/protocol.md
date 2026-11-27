@@ -1660,6 +1660,25 @@ four requests below with `protocol.capability_missing` (`capability = mesh.spawn
   their target in the envelope's `target_node`. Audit rows: `agent.start.remote.asked` and `.released` (`who` is the asking machine),
   `agent.start.remote.result` (`who` is the target that answered).
 
+## Shared skills and MCP servers (ADR-0122)
+
+Schema only so far: capability `share.items` is named and offered by no one; node and hub refuse the commands.
+
+- **Messages** (`schema/agora/v1/share.proto`): `ShareItem { name, kind, mcp | skill }` (an MCP server is a program `command`/`args`/`env`
+  or a remote `url`/`headers`; secrets as `{secret:NAME}`; a skill is a description and its text files), `ShareScope { project_id,
+  kinds }`, and the owner's signed word `ShareItemSigned { item?, scope, issued_ms, item_hash, signer_device_id, signature }` (no item:
+  a removal). Commands `ShareItemPublish` (127), `ShareItemList` (128), `ShareItemRemove` (129) are the hub's (publish and remove owner
+  only); `ShareItemGet` (130) comes only from a node's connection. Results `ShareItemListResult` (CommandOk 43) and `ShareItemGetResult`
+  (44). Events `ShareItemChanged` (92, hub-written, no content) and `ShareItemRefused` (93, a node about itself, a code and a reason).
+  `AgentStarted.shared_items` (36) and `AgentSnapshot.shared_items` (53) name the items an agent was started with.
+- **Content hash:** SHA-256 (lowercase hex) of `agora-share-item-content-v1`, NUL, then F(kind) F(name) and, for `mcp_server`,
+  F(command) F(list(args)) F(pairs(env sorted by name)) F(url) F(pairs(headers sorted by name)); for `skill`, F(description)
+  F(pairs(files sorted by path: path and the SHA-256 hex of its content))). F, list and pairs as in ADR-0059/0066.
+- **Signed bytes:** `agora-share-item-v1`, NUL, then F(action) F(name) F(item_hash) F(project_id) F(list(kinds)) F(issued_ms),
+  action `publish` or `remove` (an empty hash). Vectors: `schema/fixtures/signing/share-item-v1.json`, checked by
+  `crates/agora-protocol/tests/share_item_signing.rs`. A node keeps the newest `issued_ms` per name and refuses an older word.
+- **Codes:** `share.refused` (`reason`), `share.secret_missing` (`secret`), `share.unknown` (`name`).
+
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub

@@ -4,6 +4,7 @@ package agora.v1;
 
 import "agora/v1/common.proto";
 import "agora/v1/events.proto";
+import "agora/v1/share.proto";
 
 // ADR-0027: what a client receives from the hub. The snapshot tables mirror the hub's view field for field; entity ids
 // are hub-wide keys `<node>/<local id>`. (The ADR calls these tables NodeState, AgentState, ...; AgentState is already the
@@ -104,6 +105,8 @@ message AgentSnapshot {
   repeated SessionConfigOption config = 51;
   // ADR-0123: `AgentStarted.launch_settings`.
   repeated LaunchSetting launch_settings = 52;
+  // ADR-0122: `AgentStarted.shared_items`.
+  repeated SharedItemRef shared_items = 53;
 }
 
 message TerminalSnapshot {
