@@ -196,8 +196,11 @@ fn check_mcp(m: &McpServerDef) -> Result<(), &'static str> {
             if m.command.len() > MAX_COMMAND || !plain(&m.command) || !m.headers.is_empty() {
                 return Err("command");
             }
+            // A secret is never put on a command line (every user of the machine can read it, /proc/<pid>/cmdline).
             if m.args.len() > MAX_ARGS
-                || m.args.iter().any(|a| a.len() > MAX_ARG || a.contains('\0'))
+                || m.args
+                    .iter()
+                    .any(|a| a.len() > MAX_ARG || a.contains('\0') || a.contains("{secret:"))
             {
                 return Err("args");
             }
@@ -333,6 +336,13 @@ mod tests {
             },
         ];
         assert_eq!(check_item(&env), Err("env"), "a name twice");
+        let mut on_the_command_line = mcp("npx", "");
+        on_the_command_line.mcp.as_mut().unwrap().args = vec!["--token={secret:T}".into()];
+        assert_eq!(
+            check_item(&on_the_command_line),
+            Err("args"),
+            "a secret on a command line"
+        );
         assert_eq!(check_item(&skill(&["SKILL.md", "notes/tr.md"])), Ok(()));
         for p in ["../x", "/etc/passwd", "a//b", "a/./b", "a\\b", "", "a b"] {
             assert_eq!(check_item(&skill(&[p])), Err("files"), "{p:?}");

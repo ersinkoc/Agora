@@ -116,14 +116,18 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    in use. A name the hub stops listing is dropped (the hub can only narrow). Each refusal is said once per version
    (`ShareItemRefused`), and the node offers `share.items` while its policy gives items. End to end: `crates/agora/tests/hub_dial.rs`
    `a_machine_uses_only_the_shared_items_a_device_it_trusts_signed`. Step 3b done too: at each launch the supervisor asks for the
-   servers in the agent's scope (`SharedItems::servers_for`, judged again first), fills `{secret:NAME}` from the node's own store
-   (a server whose secret is missing is left out and said once, `share.secret_missing`), writes them to
+   servers in the agent's scope (`SharedItems::servers_for`, judged again first), writes them to
    `<data>/shared-items/agents/<agent>.json` (outside the worktree, readable by this user only; a confined agent may read it) and adds
    the manifest's `[mcp] shared_flag` (engine 7; Claude Code: a second `--mcp-config`, checked with `claude --help` on 2.1.332).
    `AgentStarted.shared_items` names what it got; the file goes when the agent ends, gives up or is stopped. A kind without
    `shared_flag` gets no shared server: Codex takes MCP servers only as `-c` overrides, which would put a secret on its command line
    (visible to other processes), so it waits (follow-ups). The same test then starts an agent and checks its arguments, the file,
-   its mode and its removal. **The node is the authority, the hub only the first gate**: before it uses any item (a shared MCP server
+   its mode and its removal. **Secrets are not given yet** (agora-ac's review of afafe8f3): a secret must never sit in a file the
+   agent can read, because whatever an agent reads may go to its model's provider. A server that names `{secret:NAME}` (in its
+   environment or headers) is left out and said once (`share.refused`, `secret_needs_launcher`) until a node launcher puts the secret
+   only into the server's own environment (and, for a URL server, a small bridge adds the headers), so the file holds names only;
+   `{secret:}` in a server's arguments is refused by the rules (a command line is readable by every user of the machine). Even then
+   a same-user agent could read its child's environment, the residual ADR-0084 already accepts. **The node is the authority, the hub only the first gate**: before it uses any item (a shared MCP server
    is a program it would start in agents), the node verifies the signed word itself against its own trusted devices (ADR-0061, not
    the hub's list), the content hash and the rules in `agora_protocol::share`, keeps the newest `issued_ms` per name itself, and
    applies `share.items` and `share.mcp_commands` (the hub cannot widen node policy).

@@ -306,14 +306,15 @@ impl SharedItems {
     }
 
     /// ADR-0122 step 3b: the shared MCP servers an agent of `kind` in `project` gets at its launch, judged again first with today's
-    /// trust and policy, their `{secret:NAME}` filled from this node's own store (`secret`). A server whose secret is missing here is
-    /// not given and is said once (`share.secret_missing`). What was given is kept for the agent's `AgentStarted`.
+    /// trust and policy. A server that names a secret (`{secret:NAME}` in its environment or headers) is not given yet and is said
+    /// once (`secret_needs_launcher`): a secret must never sit in a file the agent can read, since whatever an agent reads may go to
+    /// its model's provider (agora-ac's review of afafe8f3); a node launcher that puts it only into the server's own environment
+    /// comes next. What was given is kept for the agent's `AgentStarted`.
     pub fn servers_for(
         &self,
         agent: &str,
         project: &str,
         kind: &str,
-        secret: &dyn Fn(&str) -> Option<String>,
     ) -> Vec<agora_adapters::inject::SharedServer> {
         self.rejudge();
         let mut servers = Vec::new();
@@ -322,53 +323,46 @@ impl SharedItems {
             let Some(m) = w.item.as_ref().and_then(|i| i.mcp.clone()) else {
                 continue;
             };
-            let fill = |v: &[v1::ShareValue]| -> Result<Vec<(String, String)>, String> {
+            let names_a_secret = m
+                .env
+                .iter()
+                .chain(&m.headers)
+                .any(|v| v.value.contains("{secret:"));
+            if names_a_secret {
+                let mut st = self.st();
+                if st
+                    .refused
+                    .insert((w.name.clone(), format!("{}#secret", w.item_hash)))
+                {
+                    self.out.lock().unwrap_or_else(|e| e.into_inner()).push(
+                        Body::ShareItemRefused(v1::ShareItemRefused {
+                            node_id: self.node_id.clone(),
+                            name: w.name.clone(),
+                            item_hash: w.item_hash.clone(),
+                            code: "share.refused".to_string(),
+                            reason: "secret_needs_launcher".to_string(),
+                        }),
+                    );
+                }
+                continue;
+            }
+            let pairs = |v: &[v1::ShareValue]| {
                 v.iter()
-                    .map(|x| Ok((x.name.clone(), fill_secrets(&x.value, secret)?)))
+                    .map(|x| (x.name.clone(), x.value.clone()))
                     .collect()
             };
-            let filled = fill(&m.env).and_then(|env| {
-                let headers = fill(&m.headers)?;
-                let args = m
-                    .args
-                    .iter()
-                    .map(|a| fill_secrets(a, secret))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((env, headers, args))
+            given.push(v1::SharedItemRef {
+                name: w.name.clone(),
+                item_hash: w.item_hash.clone(),
             });
-            match filled {
-                Ok((env, headers, args)) => {
-                    given.push(v1::SharedItemRef {
-                        name: w.name.clone(),
-                        item_hash: w.item_hash.clone(),
-                    });
-                    servers.push(agora_adapters::inject::SharedServer {
-                        name: w.name.clone(),
-                        command: m.command.clone(),
-                        args,
-                        env,
-                        url: m.url.clone(),
-                        headers,
-                    });
-                }
-                Err(missing) => {
-                    let mut st = self.st();
-                    if st
-                        .refused
-                        .insert((w.name.clone(), format!("{}#secret", w.item_hash)))
-                    {
-                        self.out.lock().unwrap_or_else(|e| e.into_inner()).push(
-                            Body::ShareItemRefused(v1::ShareItemRefused {
-                                node_id: self.node_id.clone(),
-                                name: w.name.clone(),
-                                item_hash: w.item_hash.clone(),
-                                code: "share.secret_missing".to_string(),
-                                reason: missing,
-                            }),
-                        );
-                    }
-                }
-            }
+            servers.push(agora_adapters::inject::SharedServer {
+                name: w.name.clone(),
+                command: m.command.clone(),
+                args: m.args.clone(),
+                env: pairs(&m.env),
+                url: m.url.clone(),
+                headers: pairs(&m.headers),
+            });
         }
         self.given
             .lock()
@@ -910,16 +904,16 @@ mod tests {
         );
     }
 
-    /// At launch an agent gets the servers in its scope with their secrets filled; one whose secret is missing here is left out and
-    /// said once; what it got is kept for its start, and forgotten when it ends.
+    /// At launch an agent gets the servers in its scope; one that names a secret is not given (never into a file the agent can read)
+    /// and is said once; what it got is kept for its start, and forgotten when it ends.
     #[test]
-    fn a_launch_gets_its_servers_with_secrets_and_a_missing_secret_leaves_one_out() {
+    fn a_launch_gets_its_servers_and_one_naming_a_secret_waits_for_the_launcher() {
         let d = temp("launch");
         let s = open(&d, SharePolicy::default());
         let mut db = item("db", "npx", "");
         db.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
-            name: "DB_URL".into(),
-            value: "{secret:DB_URL}".into(),
+            name: "MODE".into(),
+            value: "readonly".into(),
         }];
         let mut docs = item("docs", "", "https://mcp.example.com");
         docs.mcp.as_mut().unwrap().headers = vec![v1::ShareValue {
@@ -928,13 +922,9 @@ mod tests {
         }];
         s.take(word("db", Some(db), 1, ShareScope::default()));
         s.take(word("docs", Some(docs), 1, ShareScope::default()));
-        let store = |n: &str| (n == "DB_URL").then(|| "postgres://db".to_string());
-        let got = s.servers_for("agent-1", "p", "claude-code", &store);
+        let got = s.servers_for("agent-1", "p", "claude-code");
         assert_eq!(got.len(), 1);
-        assert_eq!(
-            got[0].env,
-            [("DB_URL".to_string(), "postgres://db".to_string())]
-        );
+        assert_eq!(got[0].env, [("MODE".to_string(), "readonly".to_string())]);
         assert_eq!(
             s.given("agent-1")
                 .iter()
@@ -942,10 +932,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["db"]
         );
-        s.servers_for("agent-2", "p", "claude-code", &store);
+        s.servers_for("agent-2", "p", "claude-code");
         let said = s.take_events();
         assert!(
-            matches!(&said[..], [Body::ShareItemRefused(r)] if r.code == "share.secret_missing" && r.reason == "DOCS"),
+            matches!(&said[..], [Body::ShareItemRefused(r)] if r.reason == "secret_needs_launcher" && r.name == "docs"),
             "once: {said:?}"
         );
         s.agent_ended("agent-1");

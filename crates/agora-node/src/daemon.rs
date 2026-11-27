@@ -2423,14 +2423,13 @@ impl Node {
         {
             // ADR-0122 step 3b: each launch gets the shared MCP servers in its scope, judged again and with this node's own secrets.
             let for_hook = Arc::clone(&shared);
-            let secrets = crate::credentials::SecretStore::in_data(&cfg.data_dir);
             supervisor
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
+                // Called under the supervisor's lock; it takes the approvals' trust lock under it (re-judging), and nothing in
+                // approvals ever calls back into the supervisor, so the order holds.
                 .set_shared_hook(Box::new(move |id, project, kind| {
-                    let servers = for_hook.servers_for(id.as_str(), project, kind, &|n| {
-                        secrets.get(n).map(|s| s.expose().to_string())
-                    });
+                    let servers = for_hook.servers_for(id.as_str(), project, kind);
                     Some((for_hook.agent_file(id.as_str()), servers))
                 }));
             events.set_shared(Arc::clone(&shared));

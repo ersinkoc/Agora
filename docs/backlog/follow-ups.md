@@ -8,6 +8,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **A node launcher for shared MCP servers that need secrets** (ADR-0122, agora-ac's review of afafe8f3): today a server naming
+  `{secret:NAME}` is not given (`secret_needs_launcher`). Write it in the file as `agora mcp shared --item NAME --socket <agent socket>`,
+  which asks the node over the agent's own socket for the item it was given (judged again), puts the secrets into the real server's
+  environment only and runs it (stdio passed through); for a URL server with secret headers, a small stdio-to-HTTP bridge adds them.
 - **Shared MCP servers for Codex and WrongStack** (ADR-0122 step 3b): Codex takes MCP servers only as `-c mcp_servers.NAME...` overrides,
   which would put a filled secret on its command line (readable by other processes of the machine); find a way that keeps secrets off
   the command line (its config file under a node-owned `CODEX_HOME` overlay, or an env var it reads) and check it on a real version
