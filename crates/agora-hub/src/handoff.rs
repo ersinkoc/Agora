@@ -1,0 +1,229 @@
+//! Durable delivery of a shared task handoff (ADR-0109).
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use agora_protocol::handshake::TASK_HANDOFF_V1;
+use agora_protocol::v1::{self, command_ok, command_request, command_response};
+use agora_protocol::{Error, ErrorCode};
+use prost::Message;
+
+use crate::hub::Hub;
+use crate::server::now_ms;
+use crate::store::{SqliteStore, StoreError};
+
+pub(crate) const WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_COUNT: usize = 1_024;
+const MAX_BYTES: usize = 32 * 1024 * 1024;
+const MAX_IN_FLIGHT: usize = 16;
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, PartialEq, Message)]
+pub(crate) struct Pending {
+    #[prost(message, required, tag = "1")]
+    pub delivery: v1::DeliverTaskHandoff,
+    #[prost(string, tag = "2")]
+    pub receiver_node: String,
+    #[prost(string, tag = "3")]
+    pub board_project: String,
+    #[prost(uint64, tag = "4")]
+    pub task_revision: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub giver_run: Vec<u8>,
+    #[prost(uint64, tag = "6")]
+    pub giver_started_seq: u64,
+    #[prost(bool, tag = "7")]
+    pub attempted: bool,
+}
+
+impl Pending {
+    fn reserved_bytes(&self) -> usize {
+        // The first attempt may add the protobuf tag and value for the boolean.
+        self.encoded_len() + 2 * usize::from(!self.attempted)
+    }
+
+    pub(crate) fn key(&self) -> String {
+        let id: String = self
+            .delivery
+            .delivery_id
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("task-handoff.{id}")
+    }
+}
+
+pub(crate) type Queue = BTreeMap<Vec<u8>, Pending>;
+
+pub(crate) fn load(store: &SqliteStore) -> Result<Queue, StoreError> {
+    let mut queue = Queue::new();
+    let mut total = 0;
+    for bytes in store.handoff_settings()? {
+        let pending = Pending::decode(bytes.as_slice()).map_err(|e| StoreError(e.to_string()))?;
+        total += bytes.len().max(pending.reserved_bytes());
+        if pending.delivery.delivery_id.len() != 16
+            || pending.delivery.receiver_run_id.len() != 16
+            || queue
+                .insert(pending.delivery.delivery_id.clone(), pending)
+                .is_some()
+            || queue.len() > MAX_COUNT
+            || total > MAX_BYTES
+        {
+            return Err(StoreError("invalid task handoff queue".into()));
+        }
+    }
+    Ok(queue)
+}
+
+pub(crate) fn reserve(queue: &Queue, pending: &Pending) -> Result<(), Error> {
+    let limit = |resource, limit| {
+        Error::new(ErrorCode::NodeResourceLimit)
+            .with("resource", resource)
+            .with("limit", limit as i64)
+    };
+    if queue.len() >= MAX_COUNT {
+        return Err(limit("handoff_records", MAX_COUNT));
+    }
+    let used: usize = queue.values().map(Pending::reserved_bytes).sum();
+    if used + pending.reserved_bytes() > MAX_BYTES {
+        return Err(limit("handoff_bytes", MAX_BYTES));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Attempt {
+    Delivered,
+    Rejected,
+    Retry,
+}
+
+fn classify(pending: &Pending, response: v1::CommandResponse) -> Attempt {
+    match response.result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(command_ok::Result::TaskHandoffReceipt(receipt)),
+        })) if receipt.delivery_id == pending.delivery.delivery_id
+            && receipt.receiver_run_id == pending.delivery.receiver_run_id =>
+        {
+            Attempt::Delivered
+        }
+        Some(command_response::Result::Err(err)) => match ErrorCode::parse(&err.code) {
+            ErrorCode::ApprovalGrantRequired
+            | ErrorCode::NodePolicyDenied
+            | ErrorCode::MeshRecipientUnknown
+            | ErrorCode::MeshBodyTooLarge
+            | ErrorCode::MeshTooManyRefs
+            | ErrorCode::ProtocolInvalidMessage
+            | ErrorCode::ProtocolCapabilityMissing => Attempt::Rejected,
+            ErrorCode::NodeResourceLimit
+                if err.params.get("resource").is_some_and(|p| {
+                    matches!(&p.value, Some(v1::param_value::Value::Str(s)) if
+                        matches!(s.as_str(), "handoff_records" | "handoff_bytes"))
+                }) =>
+            {
+                Attempt::Rejected
+            }
+            _ => Attempt::Retry,
+        },
+        _ => Attempt::Retry,
+    }
+}
+
+pub(crate) async fn send_on(router: &crate::router::Router, pending: &Pending) -> Attempt {
+    let remaining = pending.delivery.valid_until_ms.saturating_sub(now_ms());
+    if remaining == 0 {
+        return Attempt::Retry;
+    }
+    let request = v1::CommandRequest {
+        command: Some(command_request::Command::DeliverTaskHandoff(
+            pending.delivery.clone(),
+        )),
+        ..Default::default()
+    };
+    let Ok(reply) = router.send(&pending.receiver_node, request) else {
+        return Attempt::Retry;
+    };
+    match tokio::time::timeout(ATTEMPT_TIMEOUT.min(Duration::from_millis(remaining)), reply).await {
+        Ok(Ok(response)) => classify(pending, response),
+        _ => Attempt::Retry,
+    }
+}
+
+/// One worker per listening hub. Attempts to different machines run concurrently, with one at a time per machine.
+pub(crate) async fn run(hub: &Hub) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut retry = BTreeMap::<Vec<u8>, (u64, u64)>::new();
+    let mut reported = std::collections::BTreeSet::new();
+    loop {
+        tick.tick().await;
+        let now = now_ms();
+        hub.report_unresolved_handoffs(now, &mut reported);
+        let mut nodes = std::collections::BTreeSet::new();
+        let batch = hub.pending_handoffs(
+            now,
+            |p| {
+                retry
+                    .get(&p.delivery.delivery_id)
+                    .is_none_or(|(at, _)| now >= *at)
+                    && hub
+                        .router()
+                        .has_capability(&p.receiver_node, TASK_HANDOFF_V1)
+                    && nodes.insert(p.receiver_node.clone())
+            },
+            MAX_IN_FLIGHT,
+        );
+        let mut sends = tokio::task::JoinSet::new();
+        for pending in batch {
+            let Ok(may_have_arrived) = hub.begin_handoff_attempt(&pending) else {
+                continue;
+            };
+            let router = hub.router().clone();
+            sends.spawn(async move {
+                let outcome = match send_on(&router, &pending).await {
+                    Attempt::Rejected if may_have_arrived => Attempt::Retry,
+                    outcome => outcome,
+                };
+                (pending, outcome)
+            });
+        }
+        while let Some(result) = sends.join_next().await {
+            let Ok((pending, outcome)) = result else {
+                continue;
+            };
+            let id = pending.delivery.delivery_id.clone();
+            if outcome != Attempt::Retry && hub.settle_handoff(&pending, outcome, now_ms()).is_ok()
+            {
+                retry.remove(&id);
+            } else {
+                let entry = retry.entry(id).or_insert((0, 500));
+                entry.1 = (entry.1 * 2).min(60_000);
+                entry.0 = now_ms().saturating_add(entry.1);
+            }
+        }
+        retry.retain(|id, _| hub.handoff_is_pending(id, now));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_attempt_marker_is_reserved_before_a_delivery_fills_the_queue() {
+        let mut pending = Pending::default();
+        pending.delivery.summary = "x".repeat(MAX_BYTES);
+        let excess = pending.encoded_len() - MAX_BYTES;
+        pending.delivery.summary.truncate(MAX_BYTES - excess);
+        assert_eq!(pending.encoded_len(), MAX_BYTES);
+        assert_eq!(
+            reserve(&Queue::new(), &pending).unwrap_err().code,
+            ErrorCode::NodeResourceLimit,
+        );
+        pending.delivery.summary.truncate(MAX_BYTES - excess - 2);
+        assert!(reserve(&Queue::new(), &pending).is_ok());
+        pending.attempted = true;
+        assert_eq!(pending.encoded_len(), MAX_BYTES);
+        assert!(reserve(&Queue::new(), &pending).is_ok());
+    }
+}

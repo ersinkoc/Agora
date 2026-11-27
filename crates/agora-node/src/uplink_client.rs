@@ -886,9 +886,19 @@ where
                             // above) and before anything is stored. The grant check may read the trusted-devices file, so it runs
                             // off the link's task.
                             let answer = match mesh.stored_handoff_receipt(&delivery) {
-                                Some(receipt) => Ok(receipt),
-                                None => match (grants.as_deref(), req.command.as_ref()) {
-                                    (Some(g), Some(c)) => g.gate(c, crate::grants::now_ms()),
+                                Ok(Some(receipt)) => Ok(receipt),
+                                Err(error) => Err(error),
+                                Ok(None) => match (grants.as_deref(), req.command.as_ref()) {
+                                    (Some(g), Some(c)) => {
+                                        let now = crate::grants::now_ms();
+                                        let legacy = command_request::Command::MeshPost(
+                                            agora_protocol::v1::MeshPost {
+                                                to: delivery.agent_id.clone(),
+                                                ..Default::default()
+                                            },
+                                        );
+                                        g.gate(&legacy, now).and_then(|()| g.gate(c, now))
+                                    }
                                     _ => Ok(()),
                                 }
                                 .and_then(|()| {

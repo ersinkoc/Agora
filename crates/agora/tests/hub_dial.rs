@@ -64,6 +64,7 @@ fn hubside(node_id: &str) -> Hubside {
                 "terminal.raw".into(),
                 "workspace.directory".into(),
                 "directory.list".into(),
+                agora_protocol::handshake::TASK_HANDOFF_V1.into(),
                 "agent.launch_settings".into(),
                 // ADR-0090: Stop turn and an agent's settings from the terminal console.
                 "agent.cancel_turn".into(),
@@ -1936,6 +1937,137 @@ fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_clo
     let (_, err) = call(&mut ac, "inbox", json!({}));
     assert!(!err);
     drop((a, b, b1));
+}
+
+/// ADR-0109 over the real hub uplink and the node's MCP and durable inbox paths.
+#[test]
+fn two_fake_agents_on_different_nodes_use_the_durable_handoff() {
+    use agora_node::supervisor::StartRequest;
+    use agora_node::uplink_client::MeshOut;
+    use serde_json::{json, Value};
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    let mut fake = PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args(["build", "-q", "-p", "agora-fake-agent"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let hub = hubside("durable-giver");
+    let addr = hub.listen("127.0.0.1:0");
+    let project = agora_core::ProjectId::portable("06ab78a2-d589-4494-8a79-4d505677ef3b").unwrap();
+    let start = |name: &str| {
+        let dir = tmp(name);
+        let manifests = dir.join("manifests");
+        let folder = dir.join("repo");
+        std::fs::create_dir_all(&manifests).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            manifests.join("ad.toml"),
+            format!(
+                r#"kind = "adapted"
+display_name = "A"
+version = "1"
+min_engine = 1
+[adapter]
+command = [{:?}, "--adapter"]
+"#,
+                fake.to_string_lossy(),
+            ),
+        )
+        .unwrap();
+        let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: manifests,
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = hub.enroll(name);
+        link.commands = Some(cfg.socket);
+        link.mesh = Some(Arc::clone(&node.mesh));
+        link.mesh_out = Some(out);
+        let uplink = spawn(Arc::clone(&node.events), link).unwrap();
+        node.events
+            .checkout_discovered(name, &project.to_string(), &folder);
+        let id = node
+            .supervisor
+            .lock()
+            .unwrap()
+            .start_in_directory(
+                &StartRequest {
+                    kind: "adapted".into(),
+                    checkout: folder,
+                    name: "handoff".into(),
+                    worktree_root: cfg.worktree_root,
+                    base: None,
+                },
+                project.clone(),
+                std::time::Instant::now(),
+            )
+            .unwrap();
+        node.events.announce();
+        let mut conn = agora_platform::local_connect(&node.mesh.socket_path(&id)).unwrap();
+        mcp(
+            &mut conn,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26"}),
+        );
+        (node, uplink, id, conn, cfg.data_dir)
+    };
+    let (_giver, _giver_link, giver_id, mut from, _) = start("durable-giver");
+    let (_receiver, _receiver_link, receiver_id, mut to, receiver_data) = start("durable-receiver");
+    let receiver = format!("durable-receiver/{}", receiver_id.as_str());
+    wait("both agents on the shared board", || {
+        let view = hub.state.hub.view().0;
+        view.agents.contains_key(&receiver)
+            && view
+                .agents
+                .contains_key(&format!("durable-giver/{}", giver_id.as_str()))
+    });
+    let call = |c: &mut agora_platform::LocalStream, tool, args| {
+        let result = mcp(c, 2, "tools/call", json!({"name":tool, "arguments":args}));
+        assert_ne!(result["isError"], true, "{result}");
+        serde_json::from_str::<Value>(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let id = call(&mut from, "task_create", json!({"title":"port the parser"}))["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&mut from, "task_claim", json!({"task_id":id}));
+    call(
+        &mut from,
+        "handoff",
+        json!({"task_id":id, "to":receiver, "summary":"port the parser"}),
+    );
+    wait("the receiver durably stored the handoff", || {
+        std::fs::read_dir(receiver_data.join("handoffs"))
+            .unwrap()
+            .flatten()
+            .any(|f| f.path().extension().is_some_and(|ext| ext == "handoff"))
+    });
+    let inbox = call(&mut to, "inbox", json!({}));
+    let entries = inbox.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["kind"], "handoff");
+    assert_eq!(entries[0]["body"], "port the parser");
+    assert_eq!(
+        hub.state.hub.view().0.tasks[&format!("{project}/{id}")].owner,
+        receiver
+    );
 }
 
 /// ADR-0112: three machines with different projects on a real hub. An agent on a solo hub sees every machine that agreed on the view

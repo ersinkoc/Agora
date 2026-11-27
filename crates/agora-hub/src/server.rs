@@ -1817,7 +1817,7 @@ fn forget_failed_for_now(code: &str) -> bool {
 }
 
 /// Sends one board notice to its agent as a mesh message from the hub (best effort, like any mesh post).
-fn board_notice(hub: &Hub, n: &crate::board::Notice) {
+pub(crate) fn board_notice(hub: &Hub, n: &crate::board::Notice) {
     let post = v1::CommandRequest {
         request_id: String::new(),
         idempotency_key: String::new(),
@@ -2890,6 +2890,17 @@ const ACCEPT_RETRY_FIRST: Duration = Duration::from_millis(10);
 const ACCEPT_RETRY_MAX: Duration = Duration::from_secs(1);
 
 async fn run_with(
+    listener: tokio::net::TcpListener,
+    state: Arc<ServerState>,
+    tls: impl Fn() -> Chosen,
+) {
+    tokio::select! {
+        () = crate::handoff::run(&state.hub) => {}
+        () = accept_connections(listener, Arc::clone(&state), tls) => {}
+    }
+}
+
+async fn accept_connections(
     listener: tokio::net::TcpListener,
     state: Arc<ServerState>,
     tls: impl Fn() -> Chosen,

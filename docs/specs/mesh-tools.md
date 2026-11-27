@@ -106,7 +106,7 @@ for this node's agents are not made. Calls that go through the hub instead (a `#
 project, below) are not numbered here and work as usual, except that a copy for an agent of this node is refused like any message
 from another node. The node tries again every half second. Numbers are per node: the same number on two nodes names two messages.
 
-When the hub enables ADR-0109 for a cross-node task handoff, the recipient sees a durable `handoff` message. It shares the same
+When the receiving node and hub negotiate ADR-0109 for a cross-node task handoff, the recipient sees a durable `handoff` message. It shares the same
 cursor as ordinary messages and keeps its original number if that process is taken up from the holder. Ordinary message traffic
 does not evict it. A replacement process under the same agent id cannot see it. The `inbox` call still reads without removing.
 

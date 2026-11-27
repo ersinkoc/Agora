@@ -633,6 +633,14 @@ impl Router {
         out
     }
 
+    pub(crate) fn has_capability(&self, node: &str, capability: &str) -> bool {
+        self.nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(node)
+            .is_some_and(|link| link.capabilities.iter().any(|cap| cap == capability))
+    }
+
     pub fn is_connected(&self, node: &str) -> bool {
         self.nodes
             .lock()

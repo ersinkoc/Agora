@@ -365,6 +365,49 @@ impl Boards {
         mesh.take_events()
     }
 
+    /// Compensate a tracked delivery only while the board still holds the receiver's claim.
+    pub(crate) fn revert_tracked(
+        &self,
+        pending: &crate::handoff::Pending,
+        view: &View,
+        now_ms: u64,
+    ) -> Vec<Body> {
+        let delivery = &pending.delivery;
+        let project = &pending.board_project;
+        let mut boards = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mesh) = boards.get_mut(project) else {
+            return Vec::new();
+        };
+        let receiver = AgentId::new(format!("{}/{}", pending.receiver_node, delivery.agent_id));
+        let still_claimed = mesh.export_tasks().1.iter().any(|task| {
+            task.id.as_str() == delivery.task_id
+                && task.status == agora_mesh::broker::TaskStatus::Claimed
+                && task.owner.as_ref() == Some(&receiver)
+        });
+        if !still_claimed {
+            return Vec::new();
+        }
+        let giver = format!("{}/{}", delivery.sender_node, delivery.sender_agent_id);
+        let giver = view
+            .agents
+            .get(&giver)
+            .filter(|a| {
+                a.running
+                    && a.project_id == *project
+                    && match a.run_id {
+                        Some(run) => run.as_slice() == pending.giver_run,
+                        None => {
+                            pending.giver_run.is_empty()
+                                && a.started_seq == pending.giver_started_seq
+                        }
+                    }
+            })
+            .map_or("", |_| giver.as_str());
+        Self::sync(mesh, view, project, now_ms);
+        mesh.reassign_task(&delivery.task_id, &receiver, &AgentId::new(giver));
+        mesh.take_events()
+    }
+
     /// A node's process started again: every agent it had is gone, even if a new one will carry the same local id (`agent-1`). Gives
     /// their tasks and leases back now, in every board in memory, and returns each project with the events that produced.
     pub fn node_restarted(&self, node: &str, now_ms: u64) -> Vec<(String, Vec<Body>)> {
@@ -1702,6 +1745,8 @@ mod tests {
             v.agents.insert(
                 format!("{n}/a"),
                 AgentView {
+                    run_id: None,
+                    started_seq: 0,
                     node_id: (*n).into(),
                     project_id: "p".into(),
                     worktree_id: String::new(),

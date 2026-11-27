@@ -1,0 +1,1 @@
+- Shared task handoffs to compatible machines survive a hub restart. The receiving agent gets a single durable inbox entry even if the hub has to retry the delivery.

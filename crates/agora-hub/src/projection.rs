@@ -101,6 +101,8 @@ const MAX_COMMANDS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentView {
+    pub(crate) run_id: Option<[u8; 16]>,
+    pub(crate) started_seq: u64,
     pub node_id: String,
     pub project_id: String,
     pub worktree_id: String,
@@ -184,6 +186,7 @@ pub struct ApprovalView {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskView {
+    pub(crate) board_revision: Option<u64>,
     pub project_id: String,
     pub title: String,
     /// `<node>/<agent>`; empty while the task is open.
@@ -970,6 +973,8 @@ impl View {
                 self.agents.insert(
                     q(&e.agent_id),
                     AgentView {
+                        run_id: e.run_id.as_slice().try_into().ok(),
+                        started_seq: ev.seq,
                         // The agent runs on the node that started it: the connection decides, not the body (T19).
                         node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
@@ -1005,6 +1010,8 @@ impl View {
                     .agents
                     .entry(q(&e.agent_id))
                     .or_insert_with(|| AgentView {
+                        run_id: None,
+                        started_seq: 0,
                         node_id: producer.to_string(),
                         project_id: e.project_id.clone(),
                         worktree_id: q(""),
@@ -1256,9 +1263,16 @@ impl View {
                     (false, true) => t.claimed_by_agent_id.clone(),
                     (false, false) => qualified(producer, &t.claimed_by_agent_id),
                 };
+                let key = format!("{}/{}", t.project_id, t.task_id);
+                let board_revision = if producer == RESERVED_HUB_ID {
+                    Some(ev.seq)
+                } else {
+                    self.tasks.get(&key).and_then(|task| task.board_revision)
+                };
                 self.tasks.insert(
-                    format!("{}/{}", t.project_id, t.task_id),
+                    key,
                     TaskView {
+                        board_revision,
                         project_id: t.project_id.clone(),
                         title: t.title.clone(),
                         owner,

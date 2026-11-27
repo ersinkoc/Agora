@@ -1353,14 +1353,29 @@ impl MeshServer {
     pub(crate) fn stored_handoff_receipt(
         &self,
         delivery: &agora_protocol::v1::DeliverTaskHandoff,
-    ) -> Option<agora_protocol::v1::TaskHandoffReceipt> {
-        let id: crate::handoff_store::Id = delivery.delivery_id.as_slice().try_into().ok()?;
+    ) -> Result<Option<agora_protocol::v1::TaskHandoffReceipt>, agora_protocol::Error> {
+        let Ok(id) = <crate::handoff_store::Id>::try_from(delivery.delivery_id.as_slice()) else {
+            return Ok(None);
+        };
         let handoffs = self.handoffs.lock().unwrap_or_else(|e| e.into_inner());
-        let stored = handoffs.as_ref()?.store.get(&id)?;
-        (stored.delivery == *delivery).then(|| agora_protocol::v1::TaskHandoffReceipt {
-            delivery_id: delivery.delivery_id.clone(),
-            receiver_run_id: delivery.receiver_run_id.clone(),
-        })
+        let Some(handoffs) = handoffs.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(stored) = handoffs.store.get(&id) {
+            return Ok((stored.delivery == *delivery).then(|| {
+                agora_protocol::v1::TaskHandoffReceipt {
+                    delivery_id: delivery.delivery_id.clone(),
+                    receiver_run_id: delivery.receiver_run_id.clone(),
+                }
+            }));
+        }
+        // An existing file that could not be loaded may represent an accepted delivery.
+        // Keep its outcome pending even if the grant used on the first attempt has ended.
+        handoffs
+            .store
+            .present(&id)
+            .map_err(|_| agora_protocol::Error::new(agora_protocol::ErrorCode::MeshUnavailable))?;
+        Ok(None)
     }
 
     /// Answers only after the addressed run owns the entry on disk and in its inbox.
@@ -3036,6 +3051,24 @@ mod tests {
 
     /// Review of #1175 (B2, N3, N4): a delivery past its deadline, one valid for longer than the node keeps receipts, and one whose
     /// ids exceed their bound are refused; none of them leaves a record or an inbox entry.
+    #[test]
+    fn a_receipt_not_loaded_from_disk_is_a_temporary_failure_before_grants() {
+        let data = TempDir::new("unknown-receipt");
+        let node = handoff_node(&data.0, &[("receiver", 2)]);
+        let delivery = handoff(1, "receiver", 2, 5000);
+        assert_eq!(node.stored_handoff_receipt(&delivery).unwrap(), None);
+        let path = data
+            .0
+            .join("handoffs")
+            .join(format!("{}.handoff", "01".repeat(16)));
+        // The presence probe cannot establish that this file is safe to replace.
+        std::fs::write(&path, b"unread").unwrap();
+        assert_eq!(
+            node.stored_handoff_receipt(&delivery).unwrap_err().code,
+            agora_protocol::ErrorCode::MeshUnavailable,
+        );
+    }
+
     #[test]
     fn a_handoff_outside_its_window_or_bounds_is_refused_without_a_record() {
         use agora_protocol::ErrorCode;

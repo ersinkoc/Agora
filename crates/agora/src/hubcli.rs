@@ -38,6 +38,7 @@ const HUB_CAPABILITIES: &[&str] = &[
     "workspace.directory",
     "directory.list",
     "board.join",
+    agora_protocol::handshake::TASK_HANDOFF_V1,
     "mesh.spawn",
     // ADR-0058
     "agent.set_mode",

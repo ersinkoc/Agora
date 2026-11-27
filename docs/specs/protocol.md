@@ -1591,14 +1591,15 @@ remove ID`, docs/ux/plugins.md).
 ## Durable cross-node task handoffs (ADR-0109)
 
 `mesh.task_handoff.v1` is a generation 1 capability on the hub–node link. A node that opened its durable inbox offers it. A hub
-will offer it and send the new command once its durable queue is implemented. An older peer connects normally and uses the
-current best-effort handoff path. Without negotiation the node answers `DeliverTaskHandoff` before grants with
+offers it with its durable queue. An older receiver connects normally and uses the best-effort handoff path. Without negotiation the node answers `DeliverTaskHandoff` before grants with
 `protocol.capability_missing` (`capability = mesh.task_handoff.v1`). Its local socket always answers with that error. After
 negotiation the delivery passes the node's grant check like any routed command (ADR-0041): when `signed_commands` lists
 `mesh.task_handoff.v1` (or `mesh.*`), it needs a live grant for that command, and it names no agent, so only a `node`-scope grant
-covers it. An identical retry of a delivery the node already stored (the same delivery id and the same fields) gets the stored
+covers it. The node also applies any grant requirement for the corresponding legacy `mesh.post` so negotiating the new command cannot
+bypass an existing policy. An identical retry of a delivery the node already stored (the same delivery id and the same fields) gets the stored
 receipt before that check, also once the grant has ended (ADR-0109 decisions 3 and 4); it changes nothing on the node. Any other
-delivery without a live grant gets `approval.grant_required` before the node stores anything.
+delivery without a live grant gets `approval.grant_required` before the node stores anything. An existing receipt file the node
+could not load yields `mesh.unavailable` before the grant check because its acceptance is unknown.
 
 - **Run identity.** `AgentStarted.run_id` (9) is an opaque 16-byte value. An empty field means the node has supplied no identity.
   A node keeps the value when it restates the same live process or takes it up from the holder. A new run or resume gets a new
@@ -1641,5 +1642,12 @@ delivery without a live grant gets `approval.grant_required` before the node sto
   and accepts a new entry only before it. When a new delivery arrives, expired entries of ended runs are reclaimed; an entry counts
   as expired at its deadline, and never later than 25 hours after the node accepted it. Without a receipt, expiry leaves the
   outcome unresolved.
+- **Hub recovery.** For a named task sent to a different node that negotiated the capability, the hub commits the board, its
+  events and the encoded delivery together in SQLite. An acceptance from the board means the hub queued the delivery. The hub
+  retries the exact persisted request on a capable connection until a matching receipt, a definitive refusal, or expiry. It
+  compensates a definitive refusal only for the same shared-board task revision and when no earlier attempt may have arrived.
+  A lost reply or expiry never rolls back the task. Expired deliveries stay in the queue for reconciliation and are reported in the
+  hub log. A receiver node process restart still applies the board's normal claim cleanup, including for runs taken up from a
+  holder. The inbox receipt is independent of that cleanup.
 - **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
   fixture keeps its original bytes.

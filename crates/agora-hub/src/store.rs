@@ -646,6 +646,14 @@ impl SqliteStore {
         Ok(())
     }
 
+    pub(crate) fn handoff_settings(&self) -> Result<Vec<Vec<u8>>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM settings WHERE key GLOB 'task-handoff.*' ORDER BY key")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// [`append_batch_with_setting`](Self::append_batch_with_setting) with any number of settings (ADR-0115: a merged board and the
     /// markers of the boards merged into it, #1150), all in the one transaction.
     pub fn append_batch_with_settings(
@@ -654,6 +662,17 @@ impl SqliteStore {
         first_seq: u64,
         events: &[(u64, Vec<u8>)],
         settings: &[(&str, &[u8])],
+    ) -> Result<Vec<u64>, StoreError> {
+        self.append_batch_with_setting_changes(producer, first_seq, events, settings, None)
+    }
+
+    pub(crate) fn append_batch_with_setting_changes(
+        &self,
+        producer: &str,
+        first_seq: u64,
+        events: &[(u64, Vec<u8>)],
+        settings: &[(&str, &[u8])],
+        remove: Option<&str>,
     ) -> Result<Vec<u64>, StoreError> {
         let mut conn = self.lock()?;
         let tx = write_tx(&mut conn)?;
@@ -694,6 +713,9 @@ impl SqliteStore {
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 params![key, value],
             )?;
+        }
+        if let Some(key) = remove {
+            tx.execute("DELETE FROM settings WHERE key = ?1", [key])?;
         }
         tx.commit()?;
         Ok(positions)
