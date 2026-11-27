@@ -1211,8 +1211,8 @@ pub(crate) fn current_user_sid_text() -> io::Result<String> {
     user_sid_text_of(unsafe { GetCurrentProcess() })
 }
 
-/// Whether process `pid` runs as the user this process runs as (M2.6: the node checks that the pipe it reached is served by its own
-/// user's holder). A process whose token cannot be read (another user's, as a rule) does not.
+/// Whether process `pid` may be taken for this user's own (M2.6, T79: the node checks that the pipe it reached is served by its own
+/// user's holder): [`trusted_as_this_user`] on both tokens. A process whose token cannot be read (another user's, as a rule) is not.
 pub(crate) fn process_runs_as_this_user(pid: u32) -> bool {
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     // SAFETY: plain call; the handle is closed below.
@@ -1220,13 +1220,129 @@ pub(crate) fn process_runs_as_this_user(pid: u32) -> bool {
     if process.is_null() {
         return false;
     }
-    let theirs = user_sid_text_of(process);
+    let theirs = token_facts_of(process);
     // SAFETY: opened above, closed once.
     unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
-    match (theirs, current_user_sid_text()) {
-        (Ok(a), Ok(b)) => a == b,
+    // SAFETY: the pseudo handle of this process needs no closing.
+    let mine = token_facts_of(unsafe { GetCurrentProcess() });
+    match (theirs, mine) {
+        (Ok(theirs), Ok(mine)) => trusted_as_this_user(&theirs, &mine),
         _ => false,
     }
+}
+
+/// What the holder check needs to know of a process's token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TokenFacts {
+    /// The user's SID, as text.
+    pub(crate) user: String,
+    /// A restricted token (one with restricting SIDs, as a confined agent's: ADR-0050).
+    pub(crate) restricted: bool,
+    /// The mandatory integrity level's RID (Low 0x1000, Medium 0x2000, High 0x3000, System 0x4000).
+    pub(crate) integrity: u32,
+    /// An AppContainer token.
+    pub(crate) app_container: bool,
+}
+
+/// M2.6 (T79): a process the node may take for this user's own holder: the same user, not restricted, not in an AppContainer, and at
+/// this process's integrity level or higher. A confined agent runs as the same user but restricted and at Low integrity (ADR-0050
+/// Amendment B), so it can never pass for the holder even when it creates the holder's pipe first.
+pub(crate) fn trusted_as_this_user(theirs: &TokenFacts, mine: &TokenFacts) -> bool {
+    theirs.user == mine.user
+        && !theirs.restricted
+        && !theirs.app_container
+        && theirs.integrity >= mine.integrity
+}
+
+/// The [`TokenFacts`] of `process` (a handle with PROCESS_QUERY_LIMITED_INFORMATION, or this process's pseudo handle).
+fn token_facts_of(process: HANDLE) -> io::Result<TokenFacts> {
+    use windows_sys::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, IsTokenRestricted, TokenIsAppContainer,
+    };
+    let mut token: HANDLE = null_mut();
+    // SAFETY: a process handle as above and an out pointer.
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+        return Err(last_error());
+    }
+    let token = Token(token);
+    let user = token_user_sid_text(token.0)?;
+    // SAFETY: a token with TOKEN_QUERY.
+    let restricted = unsafe { IsTokenRestricted(token.0) } != 0;
+    let mut container = 0u32;
+    let mut got = 0u32;
+    // SAFETY: a u32 out-buffer of the size given (TokenIsAppContainer answers a DWORD).
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenIsAppContainer,
+            (&mut container as *mut u32).cast(),
+            4,
+            &mut got,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    let mut needed = 0u32;
+    // SAFETY: the documented size query.
+    unsafe { GetTokenInformation(token.0, TokenIntegrityLevel, null_mut(), 0, &mut needed) };
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_MANDATORY_LABEL>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
+    // SAFETY: `buf` is at least `needed` bytes, pointer-aligned.
+    if unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: GetTokenInformation(TokenIntegrityLevel) wrote a TOKEN_MANDATORY_LABEL at the start of `buf`; its SID's last
+    // sub-authority is the level's RID.
+    let integrity = unsafe {
+        let label = &*(buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>());
+        let count = *GetSidSubAuthorityCount(label.Label.Sid);
+        if count == 0 {
+            return Err(io::Error::other("integrity label"));
+        }
+        *GetSidSubAuthority(label.Label.Sid, u32::from(count) - 1)
+    };
+    Ok(TokenFacts {
+        user,
+        restricted,
+        integrity,
+        app_container: container != 0,
+    })
+}
+
+/// The user SID of `token` (TOKEN_QUERY), as text.
+fn token_user_sid_text(token: HANDLE) -> io::Result<String> {
+    use windows_sys::Win32::Security::{TokenUser, TOKEN_USER};
+    let mut needed = 0u32;
+    // SAFETY: the documented size query.
+    unsafe { GetTokenInformation(token, TokenUser, null_mut(), 0, &mut needed) };
+    let bytes = (needed as usize).max(std::mem::size_of::<TOKEN_USER>());
+    let mut buf = vec![0u64; bytes.div_ceil(8)];
+    // SAFETY: `buf` is at least `needed` bytes, pointer-aligned.
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_error());
+    }
+    // SAFETY: GetTokenInformation(TokenUser) wrote a TOKEN_USER at the start of `buf`.
+    let user = unsafe { &*(buf.as_ptr().cast::<TOKEN_USER>()) };
+    sid_text(user.User.Sid)
 }
 
 /// The SID of the user `process` runs as, as text.
@@ -2115,5 +2231,187 @@ mod tests {
         assert!(may_change_dacl(&root));
         assert_eq!(icacls(&[&root.to_string_lossy()]), before);
         remove(&root);
+    }
+}
+
+/// M2.6 (T79): who may pass for this user's holder.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod holder_trust_tests {
+    use super::*;
+
+    fn me() -> TokenFacts {
+        TokenFacts {
+            user: "S-1-5-21-1-2-3-1001".into(),
+            restricted: false,
+            integrity: 0x2000,
+            app_container: false,
+        }
+    }
+
+    #[test]
+    fn only_an_unrestricted_process_of_this_user_at_this_level_or_above_passes() {
+        let mine = me();
+        assert!(trusted_as_this_user(&mine, &mine));
+        assert!(trusted_as_this_user(
+            &TokenFacts {
+                integrity: 0x3000,
+                ..me()
+            },
+            &mine
+        ));
+        for theirs in [
+            TokenFacts {
+                user: "S-1-5-21-1-2-3-1002".into(),
+                ..me()
+            },
+            // A confined agent: the same user, restricted, Low.
+            TokenFacts {
+                restricted: true,
+                integrity: 0x1000,
+                ..me()
+            },
+            TokenFacts {
+                restricted: true,
+                ..me()
+            },
+            TokenFacts {
+                integrity: 0x1000,
+                ..me()
+            },
+            TokenFacts {
+                app_container: true,
+                ..me()
+            },
+        ] {
+            assert!(!trusted_as_this_user(&theirs, &mine), "{theirs:?}");
+        }
+    }
+
+    /// A real process with a restricted, Low-integrity copy of this process's token (as a confined agent gets) never passes for this
+    /// user's holder, though its user is this user; this process does.
+    #[test]
+    fn a_restricted_low_process_of_this_user_does_not_pass() {
+        use windows_sys::Win32::Security::{SECURITY_MAX_SID_SIZE, TOKEN_ADJUST_DEFAULT};
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessAsUserW, TerminateProcess, CREATE_NO_WINDOW, PROCESS_INFORMATION,
+            STARTUPINFOW,
+        };
+        assert!(process_runs_as_this_user(std::process::id()));
+        let mut own: HANDLE = null_mut();
+        // SAFETY: this process's pseudo handle and an out pointer.
+        assert!(
+            unsafe {
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT,
+                    &mut own,
+                )
+            } != 0
+        );
+        let own = Token(own);
+        // Everyone as the restricting SID (any restricting SID makes the token restricted).
+        let mut everyone = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut everyone_psid: PSID = null_mut();
+        // SAFETY: a NUL-terminated SID string and an out pointer (freed with LocalFree below).
+        assert!(
+            unsafe {
+                ConvertStringSidToSidW(
+                    wide(std::ffi::OsStr::new("S-1-1-0")).as_ptr(),
+                    &mut everyone_psid,
+                )
+            } != 0
+        );
+        let _ = &mut everyone;
+        let restricting = [SID_AND_ATTRIBUTES {
+            Sid: everyone_psid,
+            Attributes: 0,
+        }];
+        let mut restricted: HANDLE = null_mut();
+        // SAFETY: a token with TOKEN_DUPLICATE and a one-entry restricting list.
+        assert!(
+            unsafe {
+                CreateRestrictedToken(
+                    own.0,
+                    DISABLE_MAX_PRIVILEGE,
+                    0,
+                    null(),
+                    0,
+                    null(),
+                    1,
+                    restricting.as_ptr(),
+                    &mut restricted,
+                )
+            } != 0
+        );
+        let restricted = Token(restricted);
+        let mut low_psid: PSID = null_mut();
+        // SAFETY: as above.
+        assert!(
+            unsafe {
+                ConvertStringSidToSidW(
+                    wide(std::ffi::OsStr::new("S-1-16-4096")).as_ptr(),
+                    &mut low_psid,
+                )
+            } != 0
+        );
+        let label = TOKEN_MANDATORY_LABEL {
+            Label: SID_AND_ATTRIBUTES {
+                Sid: low_psid,
+                Attributes: 0x20, // SE_GROUP_INTEGRITY
+            },
+        };
+        // SAFETY: a valid label structure and its size.
+        assert!(
+            unsafe {
+                SetTokenInformation(
+                    restricted.0,
+                    TokenIntegrityLevel,
+                    (&label as *const TOKEN_MANDATORY_LABEL).cast(),
+                    std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32,
+                )
+            } != 0
+        );
+        // SAFETY: allocated by ConvertStringSidToSidW.
+        unsafe {
+            LocalFree(everyone_psid as _);
+            LocalFree(low_psid as _);
+        }
+        let mut cmd = wide(std::ffi::OsStr::new("ping.exe -n 30 127.0.0.1"));
+        // SAFETY: an all-zero STARTUPINFOW with its size, an out PROCESS_INFORMATION.
+        let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a restricted copy of this process's own token (no privilege needed to assign it), a mutable command line.
+        assert!(
+            unsafe {
+                CreateProcessAsUserW(
+                    restricted.0,
+                    null(),
+                    cmd.as_mut_ptr(),
+                    null(),
+                    null(),
+                    0,
+                    CREATE_NO_WINDOW,
+                    null(),
+                    null(),
+                    &si,
+                    &mut pi,
+                )
+            } != 0,
+            "{}",
+            io::Error::last_os_error()
+        );
+        let passes = process_runs_as_this_user(pi.dwProcessId);
+        // SAFETY: handles from CreateProcessAsUserW, ended and closed once.
+        unsafe {
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
+        assert!(
+            !passes,
+            "a restricted Low process passed for this user's holder"
+        );
     }
 }
