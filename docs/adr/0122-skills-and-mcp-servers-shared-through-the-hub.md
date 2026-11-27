@@ -1,6 +1,7 @@
 # 0122. Skills and MCP servers shared through the hub
 Status: Accepted
 Date: 2026-11-27
+Amended: Amendment A (Proposed, 2026-11-27): the node's launcher gives a shared MCP server its secrets.
 
 Accepted: 2026-11-27 (the maintainer's answer to the question listing the written decisions). The open questions' proposed answers stand.
 Decided later the same day (the maintainer): the additive `ShareItemSigned.name` (7), for a removal that carries no item, is covered
@@ -88,6 +89,40 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
 3. The node: fetch, verify, policy, secret filling, per-launch injection for MCP servers (Claude Code, Codex, WrongStack manifests).
 4. The window: Settings → Shared, publish and sign, per-machine refusals, the agent's started-with list.
 5. Skills: the `[skills]` manifest section per kind once checked on a real version.
+
+## Amendment A (Proposed, 2026-11-27): the node's launcher gives a shared server its secrets
+
+Decision 6 says a `{secret:NAME}` is filled on the node "when the agent starts", but the agent's tool reads its MCP servers from a file
+the agent can read (`<data>/shared-items/agents/<agent>.json`), so a filled value would sit in that file. Step 3b therefore gives no
+server that names a secret (`share.refused`, `secret_needs_launcher`). This amendment says how such a server is given.
+
+**What can and cannot be kept from an agent.** A server started for an agent runs as the agent's user; that user can read the
+server's environment (`/proc/<pid>/environ` on Linux) and its memory. So no design keeps a secret from an agent that is set on finding
+it. What a launcher can promise is narrower and still worth it: the secret is never written to a file (the agent's config, the
+worktree, a log, the hub), never on a command line, and only reaches a process the owner's signed item names, on a machine whose own
+policy lets that secret go to shared servers.
+
+1. **The file names the launcher, not the secret.** A program server that names a secret is written to the agent's MCP file as
+   `command = <the node's own binary>`, `args = ["mcp-launch", <item name>, <launch id>]`, and no environment. The launch id is 32
+   random bytes, made for this agent at its start, for this item only.
+2. **The launcher asks the node over the agent's own mesh endpoint** (the socket the node already serves per agent, ADR-0031), with
+   a new request `shared.launch {item, launch_id}`. The node answers only for a launch id it made for this agent and item, once
+   (single use), while the agent runs, and fills the item's environment from its secret store (ADR-0084). The launcher then replaces
+   itself with the item's program (`exec`), so the secret lives only in that process's environment.
+3. **The machine decides which secrets may go.** A new node policy key `share.secrets`: the secret names a shared server may receive
+   on this machine (default: none). A name not listed keeps the item refused (`share.refused`, `secret_not_allowed`), whatever the
+   owner signed: the hub cannot widen it.
+4. **Remote (URL) servers with secret headers stay refused** in this step: the agent's tool connects to them itself and reads the
+   headers from the file. A later step can make the launcher a local stdio-to-HTTP bridge that adds the headers.
+5. **Single use and what it costs.** The agent's tool starts its servers when it starts, so the launcher spends the id first. An agent
+   that reads the file and spends the id before its tool does gets the secret (as it could from the server's environment) and the
+   server then fails to start, which shows. A restart of the agent makes new ids.
+6. **Audit and words.** The node records `share.launch` (the item, the agent, the outcome; never the value). The window's Shared
+   section says "needs the secret NAME on MACHINE" and "MACHINE does not let NAME go to shared servers" instead of "not given yet".
+
+Open questions (with proposed answers): (1) `share.secrets` empty by default, so every machine opts in by name: yes. (2) URL servers
+with secret headers in this step: no, a later step. (3) A new mesh request needs the schema's approval (`shared.launch` is a node-local
+mesh tool, not a hub message): proposed as a mesh tool name only, no schema change; confirm.
 
 ## Status of the build
 
