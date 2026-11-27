@@ -261,6 +261,8 @@ where
     let (registration, commands, generation) =
         hub.node_link_opened(node_id, welcome.capabilities, now_ms())?;
     let load = registration.load();
+    // ADR-0088 Amendment A: the frames of the hub's own preview connections to this node, written only while no command waits.
+    let previews = registration.preview_queue();
     // ADR-0061: a node that verifies endorsements gets every one it may have missed while it was away, and every revocation.
     if verifies_devices {
         give_device_changes(hub, node_id);
@@ -285,7 +287,7 @@ where
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut events, hub, node_id, (commands, &load, subtasks_agreed), silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut events, hub, node_id, (commands, &load, subtasks_agreed, previews), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
     // The certificate check can cancel the stream while a write is running. Wait for that event before recording the link closed.
@@ -564,10 +566,11 @@ async fn stream_events<S>(
     hub: &Arc<Hub>,
     node_id: &str,
     // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
-    (mut commands, load, subtasks_agreed): (
+    (mut commands, load, subtasks_agreed, mut previews): (
         tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
         &crate::router::LinkLoad,
         bool,
+        Option<tokio::sync::mpsc::Receiver<crate::router::PreviewOut>>,
     ),
     silence: Duration,
     last_heard: &mut tokio::time::Instant,
@@ -619,6 +622,11 @@ where
                         put(conn, &frame(stream, STREAM_CLOSE, Vec::new()), silence).await?;
                     }
                 }
+                continue;
+            }
+            // ADR-0088 Amendment A: preview bytes are the lowest priority and never delay a command (a keystroke is one).
+            Some(p) = async { match previews.as_mut() { Some(q) => q.recv().await, None => None } }, if commands.is_empty() => {
+                put(conn, &frame(p.stream, p.kind, p.payload), silence).await?;
                 continue;
             }
         };

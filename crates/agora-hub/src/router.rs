@@ -30,6 +30,20 @@ pub enum ToNode {
     Close { stream: u32 },
 }
 
+/// A frame of a hub-originated preview connection on its way to the node (ADR-0088 Amendment A): written on the node's link only
+/// while no command waits (input outranks output, ADR-0022), from a queue of [`PREVIEW_QUEUE`] frames per link.
+pub struct PreviewOut {
+    pub stream: u32,
+    pub kind: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Preview frames one node link holds before a sender waits: at most a credit window (16 × 16 KiB) plus its credit and end frames.
+pub const PREVIEW_QUEUE: usize = 32;
+
+/// How long the hub waits for a node to answer a `PreviewConnect`.
+const PREVIEW_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// A terminal frame on its way from a node to the client that subscribed.
 pub struct RelayFrame {
     pub stream: u32,
@@ -50,6 +64,9 @@ struct Link {
     capabilities: Vec<String>,
     tx: mpsc::UnboundedSender<ToNode>,
     load: Arc<LinkLoad>,
+    /// Preview frames for this link, and their receiver until the link's loop takes it ([`Registration::preview_queue`]).
+    preview_tx: mpsc::Sender<PreviewOut>,
+    preview_rx: Option<mpsc::Receiver<PreviewOut>>,
 }
 
 /// How much one node connection has to do (`GET /api/metrics`, architecture review R8). Kept with the connection, so a connection
@@ -205,6 +222,15 @@ impl Registration {
         self.release()
     }
 
+    /// The preview frames to write on this connection (taken once by the connection's loop; `None` after that, or when a newer
+    /// connection of the node replaced this one).
+    pub fn preview_queue(&self) -> Option<mpsc::Receiver<PreviewOut>> {
+        let mut g = self.router.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        g.get_mut(&self.node)
+            .filter(|l| Arc::ptr_eq(&l.owner, &self.owner))
+            .and_then(|l| l.preview_rx.take())
+    }
+
     /// The node this registration is for.
     pub fn node(&self) -> &str {
         &self.node
@@ -256,6 +282,7 @@ impl Router {
         capabilities: Vec<String>,
     ) -> (Registration, mpsc::UnboundedReceiver<ToNode>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (preview_tx, preview_rx) = mpsc::channel(PREVIEW_QUEUE);
         let owner = Arc::new(());
         let load = Arc::new(LinkLoad::default());
         let replaced = self
@@ -269,6 +296,8 @@ impl Router {
                     tx,
                     capabilities,
                     load: Arc::clone(&load),
+                    preview_tx,
+                    preview_rx: Some(preview_rx),
                 },
             )
             .is_some();
@@ -823,6 +852,164 @@ impl Router {
             return Err(offline());
         }
         Ok(rx)
+    }
+}
+
+/// One relayed TCP connection to a node's forward, opened by the hub itself (ADR-0088 Amendment A: the hub's preview listener is
+/// the only originator; a window's `PreviewConnect` stays refused). Frames from the node arrive on [`Self::recv`]; frames to it go
+/// through the link's low-priority preview queue. Dropping it ends the stream on both sides.
+pub struct PreviewLink {
+    router: Arc<Router>,
+    node: String,
+    stream: u32,
+    rx: mpsc::Receiver<RelayFrame>,
+    tx: mpsc::Sender<PreviewOut>,
+    /// The budgets the node answered with (chunk size, credit window, rate, total).
+    pub limits: v1::PreviewConnectResult,
+    ended: bool,
+}
+
+impl PreviewLink {
+    /// The next frame from the node (`PREVIEW_DATA`, `PREVIEW_CREDIT`, `PREVIEW_END`); `None` once the stream ended (the node closed it,
+    /// its link ended, or the hub dropped a relay it could not keep up with).
+    pub async fn recv(&mut self) -> Option<RelayFrame> {
+        let f = self.rx.recv().await;
+        if f.is_none() {
+            self.ended = true;
+        }
+        f
+    }
+
+    /// Sends one frame to the node, waiting while the link's preview queue is full; `false` when the link is gone.
+    pub async fn send(&self, kind: u8, payload: Vec<u8>) -> bool {
+        self.tx
+            .send(PreviewOut {
+                stream: self.stream,
+                kind,
+                payload,
+            })
+            .await
+            .is_ok()
+    }
+
+    /// The stream on the node's link (for logs and tests).
+    pub fn stream(&self) -> u32 {
+        self.stream
+    }
+}
+
+impl Drop for PreviewLink {
+    fn drop(&mut self) {
+        self.router.drop_relay(&self.node, self.stream);
+        if !self.ended {
+            // The stream's end goes behind its last data on the same queue; when that queue is full, on the command queue instead.
+            let close = PreviewOut {
+                stream: self.stream,
+                kind: agora_protocol::frame::STREAM_CLOSE,
+                payload: Vec::new(),
+            };
+            if self.tx.try_send(close).is_err() {
+                self.router.tell_node(
+                    &self.node,
+                    ToNode::Close {
+                        stream: self.stream,
+                    },
+                );
+            }
+        }
+    }
+}
+
+impl Router {
+    /// Opens one relayed connection to `forward_id` on `node` (`PreviewConnect` on a fresh dynamic stream of its link). Refused with
+    /// `protocol.capability_missing` when the node does not offer `preview.v1`, `node.offline` when it is not connected, the node's
+    /// own refusal (`preview.unknown`, `preview.port_refused`, ...) or `node.timeout`.
+    pub async fn connect_preview(
+        self: &Arc<Self>,
+        node: &str,
+        forward_id: &str,
+    ) -> Result<PreviewLink, Error> {
+        let tx = {
+            let g = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
+            let link = g
+                .get(node)
+                .ok_or_else(|| Error::new(ErrorCode::NodeOffline).with("node_id", node))?;
+            if !link.capabilities.iter().any(|c| c == "preview.v1") {
+                return Err(Error::new(ErrorCode::ProtocolCapabilityMissing)
+                    .with("capability", "preview.v1"));
+            }
+            link.preview_tx.clone()
+        };
+        // The relay holds the only sender of `rx`: when the hub removes it (the node closed the stream, its link ended, the queue
+        // overflowed), `recv` ends.
+        let (to_hub, rx) = mpsc::channel(RELAY_QUEUE);
+        let stream = {
+            let mut relays = self.relays.lock().unwrap_or_else(|e| e.into_inner());
+            let first = agora_protocol::frame::FIRST_DYNAMIC_STREAM;
+            let mut stream = self.next_stream.load(Ordering::Relaxed).max(first);
+            while relays.keys().any(|(n, s)| n == node && *s == stream) {
+                stream = if stream == u32::MAX {
+                    first
+                } else {
+                    stream + 1
+                };
+            }
+            self.next_stream.store(
+                if stream == u32::MAX {
+                    first
+                } else {
+                    stream + 1
+                },
+                Ordering::Relaxed,
+            );
+            relays.insert(
+                (node.to_string(), stream),
+                Relay {
+                    client: ClientId(Arc::new(())),
+                    client_stream: stream,
+                    terminal: None,
+                    to_client: to_hub,
+                    closed: Arc::default(),
+                },
+            );
+            stream
+        };
+        let mut link = PreviewLink {
+            router: Arc::clone(self),
+            node: node.to_string(),
+            stream,
+            rx,
+            tx,
+            limits: v1::PreviewConnectResult::default(),
+            ended: false,
+        };
+        let request = v1::CommandRequest {
+            command: Some(command_request::Command::PreviewConnect(
+                v1::PreviewConnect {
+                    forward_id: forward_id.to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+        // On any refusal `link` is dropped, which forgets the relay (and tells the node, which holds nothing for a refused stream).
+        let reply = self.send_on(node, request, stream)?;
+        let answer = tokio::time::timeout(PREVIEW_CONNECT_WAIT, reply)
+            .await
+            .map_err(|_| Error::new(ErrorCode::NodeTimeout).with("node_id", node))?
+            .map_err(|_| Error::new(ErrorCode::NodeOffline).with("node_id", node))?;
+        match answer.result {
+            Some(v1::command_response::Result::Ok(v1::CommandOk {
+                result: Some(v1::command_ok::Result::PreviewConnect(limits)),
+            })) => {
+                link.limits = limits;
+                Ok(link)
+            }
+            // The node's code is enough here: the preview listener answers in HTTP status codes, never in the node's words.
+            Some(v1::command_response::Result::Err(e)) => {
+                Err(Error::new(ErrorCode::parse(&e.code)))
+            }
+            _ => Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "result")),
+        }
     }
 }
 
@@ -1968,5 +2155,150 @@ mod tests {
             }
             println!("relay_path clients={clients} payload={size}B best_of_5={best:.1} ns/frame");
         }
+    }
+
+    /// ADR-0088 Amendment A: the hub opens a preview connection itself, on a fresh stream; frames go both ways; the stream ends on
+    /// both sides however it ends.
+    #[tokio::test]
+    async fn the_hub_opens_a_preview_connection_and_its_frames_go_both_ways() {
+        use agora_protocol::frame::STREAM_CLOSE;
+        let r = Router::new();
+        let (_old, _old_rx) = r.register("old");
+        assert!(matches!(
+            r.connect_preview("old", "fwd-1").await,
+            Err(e) if e.code == ErrorCode::ProtocolCapabilityMissing
+        ));
+        assert!(
+            matches!(r.connect_preview("gone", "fwd-1").await, Err(e) if e.code == ErrorCode::NodeOffline)
+        );
+        let (reg, mut commands) = r.register_with_capabilities("mac", vec!["preview.v1".into()]);
+        let mut previews = reg.preview_queue().unwrap();
+        assert!(reg.preview_queue().is_none(), "taken once");
+        // The node: answers the connect with its budgets.
+        let node = tokio::spawn(async move {
+            let Some(ToNode::Command {
+                request,
+                reply,
+                stream,
+            }) = commands.recv().await
+            else {
+                panic!("no connect");
+            };
+            assert!(
+                matches!(&request.command, Some(command_request::Command::PreviewConnect(c)) if c.forward_id == "fwd-1")
+            );
+            assert!(stream >= agora_protocol::frame::FIRST_DYNAMIC_STREAM);
+            let ok = v1::CommandOk {
+                result: Some(v1::command_ok::Result::PreviewConnect(
+                    v1::PreviewConnectResult {
+                        max_chunk_bytes: 16384,
+                        window_bytes: 262144,
+                        ..Default::default()
+                    },
+                )),
+            };
+            reply
+                .send(v1::CommandResponse {
+                    request_id: request.request_id,
+                    result: Some(v1::command_response::Result::Ok(ok)),
+                })
+                .unwrap();
+            (stream, commands)
+        });
+        let mut link = r.connect_preview("mac", "fwd-1").await.unwrap();
+        let (stream, mut commands) = node.await.unwrap();
+        assert_eq!((link.stream(), link.limits.window_bytes), (stream, 262144));
+        // Hub → node: on the preview queue, never the command queue.
+        assert!(link.send(20, b"GET / HTTP/1.1\r\n\r\n".to_vec()).await);
+        let out = previews.recv().await.unwrap();
+        assert_eq!((out.stream, out.kind, out.payload.len()), (stream, 20, 18));
+        assert!(commands.try_recv().is_err());
+        // Node → hub: what the link's loop relays arrives on the connection.
+        r.relay_frame("mac", stream, 20, b"HTTP/1.1 200 OK\r\n\r\n".to_vec());
+        let f = link.recv().await.unwrap();
+        assert_eq!((f.kind, f.payload.len()), (20, 19));
+        // The node ends the stream: `recv` ends, and dropping the link sends nothing more.
+        r.relay_frame("mac", stream, STREAM_CLOSE, Vec::new());
+        assert!(link.recv().await.is_none());
+        drop(link);
+        assert!(
+            previews.try_recv().is_err(),
+            "no close after the node's own"
+        );
+        // The hub drops a live one: its close follows its data on the preview queue.
+        let node = tokio::spawn(async move {
+            let Some(ToNode::Command {
+                request,
+                reply,
+                stream,
+            }) = commands.recv().await
+            else {
+                panic!()
+            };
+            let ok = v1::CommandOk {
+                result: Some(v1::command_ok::Result::PreviewConnect(
+                    v1::PreviewConnectResult::default(),
+                )),
+            };
+            reply
+                .send(v1::CommandResponse {
+                    request_id: request.request_id,
+                    result: Some(v1::command_response::Result::Ok(ok)),
+                })
+                .unwrap();
+            (stream, commands)
+        });
+        let link = r.connect_preview("mac", "fwd-1").await.unwrap();
+        let (stream2, mut commands) = node.await.unwrap();
+        assert_ne!(stream2, stream);
+        assert!(link.send(20, b"x".to_vec()).await);
+        drop(link);
+        assert_eq!(previews.recv().await.map(|p| p.kind), Some(20));
+        assert_eq!(
+            previews.recv().await.map(|p| (p.stream, p.kind)),
+            Some((stream2, STREAM_CLOSE))
+        );
+        r.relay_frame("mac", stream2, 20, b"late".to_vec()); // nothing holds it any more: dropped quietly
+                                                             // A refusal from the node is its code.
+        let node = tokio::spawn(async move {
+            let Some(ToNode::Command { request, reply, .. }) = commands.recv().await else {
+                panic!()
+            };
+            reply
+                .send(v1::CommandResponse {
+                    request_id: request.request_id,
+                    result: Some(v1::command_response::Result::Err(v1::ErrorInfo {
+                        code: "preview.unknown".into(),
+                        params: Default::default(),
+                    })),
+                })
+                .unwrap();
+        });
+        assert!(
+            matches!(r.connect_preview("mac", "fwd-x").await, Err(e) if e.code == ErrorCode::PreviewUnknown)
+        );
+        node.await.unwrap();
+        // The node's link ends: a live connection's `recv` ends.
+        let (_reg2, mut commands2) = r.register_with_capabilities("pc", vec!["preview.v1".into()]);
+        let node = tokio::spawn(async move {
+            let Some(ToNode::Command { request, reply, .. }) = commands2.recv().await else {
+                panic!()
+            };
+            let ok = v1::CommandOk {
+                result: Some(v1::command_ok::Result::PreviewConnect(
+                    v1::PreviewConnectResult::default(),
+                )),
+            };
+            reply
+                .send(v1::CommandResponse {
+                    request_id: request.request_id,
+                    result: Some(v1::command_response::Result::Ok(ok)),
+                })
+                .unwrap();
+        });
+        let mut link = r.connect_preview("pc", "fwd-2").await.unwrap();
+        node.await.unwrap();
+        drop(_reg2);
+        assert!(link.recv().await.is_none());
     }
 }
