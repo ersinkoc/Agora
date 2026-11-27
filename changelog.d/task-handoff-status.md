@@ -1,1 +1,0 @@
-- The project board shows waiting, delivered, failed, and unconfirmed task handoffs. The hub owner can acknowledge an unconfirmed handoff and free the queue reservation while keeping the task's current owner.

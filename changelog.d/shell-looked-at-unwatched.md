@@ -1,1 +1,0 @@
-- An agent started in a Shell that no window is showing (by `agora agent prompt`, an agent, or a tab in the background) is now found too, within about 10 seconds (ADR-0094)

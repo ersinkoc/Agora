@@ -6,6 +6,32 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.42
+
+- `agora remote tailscale --serve` now says what to do when Tailscale refuses `serve` because your user is not its operator:
+  run `sudo tailscale set --operator=<you>` once (`remote.tailscale_not_operator`), instead of "Tailscale's answer could not be used".
+- Choose from 20 shipped themes in both the web window and terminal client, including five new light palettes and four new dark palettes; the web and desktop title bar now opens a visual theme gallery with live mini previews.
+- Agents can start helpers on other machines: an agent's `agent_start` with `node` set to another machine raises a card on that machine,
+  which you approve there once or with "More like this" (later starts from that machine go ahead without asking, up to 6 at a time, for
+  1 hour, 8 hours or until the asking run ends, at most 24 hours, of that kind or any kind, in that folder or also the folders below it); the helper shows under its parent in the agent tree. A hub that other people use carries these starts only after
+  `agora hub remote-helpers on`, and a machine can refuse them with `mesh.remote_helpers = false` in its policy (ADR-0119).
+- The project board shows waiting, delivered, failed, and unconfirmed task handoffs. The hub owner can acknowledge an unconfirmed handoff and free the queue reservation while keeping the task's current owner.
+- Shared task handoffs to compatible machines survive a hub restart. The receiving agent gets a single durable inbox entry even if the hub has to retry the delivery.
+- Agents can stay reachable while idle: the new mesh tool `inbox_wait` returns as soon as another agent's message arrives (or an
+  empty list after its timeout), for an agent asked to stay reachable (say so in its first prompt). Nothing is typed into a terminal, and typing into the agent or
+  prompting it from the window ends the wait at once so it reads what you wrote.
+- The node now cleans up the worktrees it made for agents: a day after the agent ended, a worktree with no uncommitted changes, no
+  unpushed commits and no ignored files other than build output and caches (an `.env`, a database or a key keeps it) is removed (its
+  branch is kept); one that holds work stays and is listed as left behind with the reason.
+  `agora workspaces` lists them with their size, `agora workspaces clean [--older-than 7d] [--dry-run]` removes the ones nothing would
+  be lost with. Build output (`target/`, `node_modules/`) of a left-behind worktree goes after the same day, and a new worktree is
+  refused when the node's worktrees hold 50 GB or the disk has under 3 GB free (`workspaces.*` in the node policy) (ADR-0064).
+- An agent started in a Shell that no window is showing (by `agora agent prompt`, an agent, or a tab in the background) is now found too, within about 10 seconds (ADR-0094)
+- Agents show their tool's logo in the window instead of a letter: Claude Code, Codex, opencode and the registry agents wear their own
+  mark (one colour, following the theme) on tiles, lists, tabs, chat and the start window; a kind with no logo keeps its first letter.
+- A Shell where you started Claude Code (or another known agent) by hand is now shown as that agent while it runs, with its name and
+  avatar in the sidebar, the tabs and the tiles, instead of only a small "in Shell" chip (ADR-0094)
+
 ## 0.3.41
 
 - On macOS, Claude Code installed with npm is recognised when you start it by hand in a Shell (macOS names its process `claude.exe`) (ADR-0094)
