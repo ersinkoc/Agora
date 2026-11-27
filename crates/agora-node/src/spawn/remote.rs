@@ -121,7 +121,8 @@ pub(super) struct Asked {
 
 /// How often the asking side asks a remote helper's state again while an agent waits on it, and how long one output request waits.
 const FOLLOW_EVERY: Duration = Duration::from_secs(2);
-const OUTPUT_WAIT: Duration = Duration::from_secs(25);
+/// Short, since it holds the agent's mesh connection while it waits (review of the follow: a waiting call is a follow-up).
+const OUTPUT_WAIT: Duration = Duration::from_secs(10);
 /// The most helpers on other machines one caller is remembered to have started (for following them); the oldest go first.
 const REMOTE_CHILDREN_MAX: usize = 256;
 
@@ -783,6 +784,11 @@ impl Spawner {
             });
             if stale.is_some() {
                 st.remote.targets.remove(caller);
+                // The right to follow ends with the run that asked (ADR-0119 decision 8): the new process does not follow the old run's
+                // helpers.
+                for h in st.remote.children.remove(caller).unwrap_or_default() {
+                    st.remote.followed.remove(&h);
+                }
             }
             st.remote
                 .targets
