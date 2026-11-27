@@ -1,6 +1,7 @@
 # 0128. Notify the parent agent on task acceptance
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer explicitly approved ADR-0128 and its protocol additions in chat).
 
 ## Context
 
