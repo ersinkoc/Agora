@@ -79,8 +79,15 @@ it would hand the window that trust; that is why those ports are refused even fo
   `Connection: close` (a WebSocket keeps `Connection: Upgrade`). Answer heads up to the final one are read: each `Set-Cookie` is
   renamed into the forward's partition, capped at the forward's end and made host-only, and the final answer says `Connection: close`;
   after it nothing more from the browser is relayed. A `101` the browser did not ask for ends the connection. Bodies are never read.
-- **Revocation.** A forward that ends, a person who signs out and a token past its 8 hours end live connections too (checked at every
-  revocation and every 30 s).
+- **Only this preview's own requests.** Cookies ignore ports, so a page on another forward's port would send this port's cookie too:
+  a request is refused (403) before its token is looked at unless `Sec-Fetch-Site` is `same-origin` or `none`, or `same-site` for a
+  `GET` navigation into a frame or a document (the window's frame, the entry's redirect, a new tab); without `Sec-Fetch-Site`, a
+  request whose `Origin` is not this port's is refused.
+- **Deadlines.** The TLS handshake and the whole request head take 10 s at most together; the program's final answer head, 60 s.
+- **Revocation.** A token is tied to the session it was asked from: it holds while that session exists and the device that opened the
+  forward is still the person's and not revoked, so a sign-out, "sign out everywhere", a password change, the person's removal and a
+  device's revocation end it, whichever process made the change. A forward that ends and a token past its 8 hours end it too; live
+  connections, WebSockets included, are checked at every revocation in the hub and every 30 s.
 - **On the node's link** the bytes ride a hub-originated `PreviewConnect` under the node's credit, and the hub writes preview frames
   only while no command waits for that node.
 

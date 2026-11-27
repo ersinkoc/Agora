@@ -2637,6 +2637,8 @@ fn device_command(
                 }
                 Some(r) => devices.record_revocation(&who.user, r, now).map(|()| {
                     carry_device_change(hub, C::DeviceRevoke(d.clone()), &[]);
+                    // A preview its device opened ends now (ADR-0088 Amendment A).
+                    hub.previews().recheck();
                     empty()
                 }),
             },

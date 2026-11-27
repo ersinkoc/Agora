@@ -29,8 +29,15 @@ pub const ENTER_PATH: &str = "/.agora-preview/enter";
 const CONNECTIONS_PER_PORT: usize = 64;
 /// How long a browser may take to finish its TLS handshake and send its request head.
 const HEAD_WAIT: Duration = Duration::from_secs(10);
-/// How often a live connection checks its token again without a revocation (a token's 8 hours end within this).
+/// How often a live connection checks its token again without a revocation (a token's 8 hours, and a session or a device ended by
+/// another process such as `agora hub users remove`, end within this).
 const RECHECK: Duration = Duration::from_secs(30);
+/// How long the program may take to send its final answer head.
+const ANSWER_WAIT: Duration = Duration::from_secs(60);
+
+/// Whether a token still holds beyond the gate's own book: its session still exists, and the device that opened the forward is
+/// still the person's and not revoked. `(session, creator device, person)`.
+pub type Validity = Box<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
 
 const PREVIEW_DATA: u8 = 20;
 const PREVIEW_CREDIT: u8 = 21;
@@ -83,6 +90,7 @@ struct Inner {
 pub struct PreviewNet {
     inner: Mutex<Inner>,
     router: Arc<Router>,
+    valid: Validity,
     /// Bumped at every revocation; every live connection then checks its token again.
     epoch: watch::Sender<u64>,
 }
@@ -92,12 +100,24 @@ fn now_ms() -> u64 {
 }
 
 impl PreviewNet {
+    /// Origins whose tokens hold only by the gate's own book (tests).
     pub fn new(router: Arc<Router>) -> Self {
+        Self::with_validity(router, Box::new(|_, _, _| true))
+    }
+
+    /// Origins whose tokens also need `valid` at every check.
+    pub fn with_validity(router: Arc<Router>, valid: Validity) -> Self {
         Self {
             inner: Mutex::default(),
             router,
+            valid,
             epoch: watch::channel(0).0,
         }
+    }
+
+    /// Makes every live connection check its token now (a session, a person or a device was ended in this hub).
+    pub fn recheck(&self) {
+        self.revoked();
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -185,6 +205,7 @@ impl PreviewNet {
     pub fn enter(
         self: &Arc<Self>,
         user: &str,
+        session: &str,
         device_user: impl Fn(&str) -> Option<String>,
         node: &str,
         forward: &str,
@@ -257,19 +278,32 @@ impl PreviewNet {
             let task = tokio::spawn(accept(Arc::clone(self), port, listener, slot));
             g.listeners.insert(port, task.abort_handle());
         }
-        let ticket =
-            g.gate
-                .ticket(port, user, now)
-                .ok_or(refused(503, "preview.unavailable", "random"))?;
+        let ticket = g.gate.ticket(port, user, session, now).ok_or(refused(
+            503,
+            "preview.unavailable",
+            "random",
+        ))?;
         Ok((port, ticket))
     }
 
     /// The person a token presented on `port` belongs to, while both it and the port's forward hold.
     fn check(&self, token: &str, port: u16) -> Option<String> {
-        let g = self.lock();
-        let carried = g.carried.get(&port)?;
-        let user = g.gate.check(token, port, now_ms())?;
-        (user == carried.user).then(|| user.to_string())
+        let (user, session, creator) = {
+            let g = self.lock();
+            let carried = g.carried.get(&port)?;
+            let (user, session) = g.gate.check(token, port, now_ms())?;
+            if user != carried.user {
+                return None;
+            }
+            let creator = g
+                .forwards
+                .get(&(carried.node.clone(), carried.forward.clone()))?
+                .creator
+                .clone();
+            (user.to_string(), session.to_string(), creator)
+        };
+        // Outside the lock: the store is asked.
+        (self.valid)(&session, &creator, &user).then_some(user)
     }
 }
 
@@ -304,10 +338,12 @@ async fn accept(net: Arc<PreviewNet>, port: u16, listener: tokio::net::TcpListen
         let net = Arc::clone(&net);
         tokio::spawn(async move {
             let _permit = permit;
-            let Ok(Ok(tls)) = tokio::time::timeout(HEAD_WAIT, acceptor.accept(tcp)).await else {
+            // One deadline for the handshake and the whole head, before anything is known of who sends it (review of slice 3).
+            let deadline = tokio::time::Instant::now() + HEAD_WAIT;
+            let Ok(Ok(tls)) = tokio::time::timeout_at(deadline, acceptor.accept(tcp)).await else {
                 return;
             };
-            serve(&net, port, tls).await;
+            serve(&net, port, tls, deadline).await;
         });
     }
 }
@@ -317,6 +353,7 @@ async fn answer<S: AsyncWrite + Unpin>(s: &mut S, status: u16) {
     let reason = match status {
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         431 => "Request Header Fields Too Large",
         502 => "Bad Gateway",
         _ => "Error",
@@ -344,6 +381,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
     net: &Arc<PreviewNet>,
     port: u16,
     mut tls: S,
+    deadline: tokio::time::Instant,
 ) {
     // The request head, read whole (and only it) before anything else happens.
     let mut buf = Vec::with_capacity(4096);
@@ -355,7 +393,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
             Err(HeadError::TooLarge) => return answer(&mut tls, 431).await,
             Err(HeadError::Malformed) => return answer(&mut tls, 400).await,
         }
-        match tokio::time::timeout(HEAD_WAIT, tls.read(&mut chunk)).await {
+        match tokio::time::timeout_at(deadline, tls.read(&mut chunk)).await {
             Ok(Ok(n)) if n > 0 => buf.extend_from_slice(&chunk[..n]),
             _ => return,
         }
@@ -368,6 +406,10 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin + Send>(
         Err(HeadError::TooLarge) => return answer(&mut tls, 431).await,
         Err(HeadError::Malformed) => return answer(&mut tls, 400).await,
     };
+    // A request another forward's page made goes no further, the entry included (review of slice 3).
+    if !request.fetch_ok {
+        return answer(&mut tls, 403).await;
+    }
     // The entry: a ticket for this port becomes the forward token, in this port's cookie.
     if let Some(ticket) = entry_ticket(&request.target) {
         let token = net
@@ -389,6 +431,8 @@ Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\nContent-Length: 0\r\n
     let Some(token) = request.token.clone() else {
         return answer(&mut tls, 401).await;
     };
+    // Subscribed before the check, so a revocation between the two is not missed.
+    let epoch = net.epoch.subscribe();
     if net.check(&token, port).is_none() {
         return answer(&mut tls, 401).await;
     }
@@ -411,6 +455,7 @@ Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\nContent-Length: 0\r\n
         tls,
         first,
         request.upgrade,
+        epoch,
     )
     .await;
 }
@@ -435,6 +480,7 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin + Send>(
     tls: S,
     first: Vec<u8>,
     upgrade: bool,
+    mut epoch: watch::Receiver<u64>,
 ) {
     let (mut rd, mut wr) = tokio::io::split(tls);
     let max_chunk = match link.limits.max_chunk_bytes {
@@ -451,7 +497,7 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let mut answer_head: Vec<u8> = Vec::new();
     let mut phase = Phase::Head;
     let mut browser_open = true;
-    let mut epoch = net.epoch.subscribe();
+    let answer_by = tokio::time::Instant::now() + ANSWER_WAIT;
     let mut recheck = tokio::time::interval(RECHECK);
     recheck.tick().await;
     let mut chunk = vec![0u8; max_chunk];
@@ -537,6 +583,8 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin + Send>(
             _ = recheck.tick() => {
                 if net.check(token, port).is_none() { break }
             },
+            // A program that never sends its final answer head does not hold the connection.
+            () = tokio::time::sleep_until(answer_by), if phase == Phase::Head => break,
         }
         if !browser_open && phase == Phase::Upgraded && pending.is_empty() {
             break;
@@ -615,7 +663,7 @@ mod tests {
         // Not configured: no origin.
         net.changed("mac", &forward("web-ada", far));
         assert_eq!(
-            net.enter("ada", devices, "mac", "fwd-1", "h:7443")
+            net.enter("ada", "s1", devices, "mac", "fwd-1", "h:7443")
                 .unwrap_err()
                 .reason,
             "no_origin"
@@ -628,27 +676,31 @@ mod tests {
         net.configure(hub, slot, None);
         let host = format!("localhost:{}", hub.port());
         assert_eq!(
-            net.enter("ada", devices, "mac", "fwd-2", &host)
+            net.enter("ada", "s1", devices, "mac", "fwd-2", &host)
                 .unwrap_err()
                 .code,
             "preview.unknown"
         );
         assert_eq!(
-            net.enter("bo", devices, "mac", "fwd-1", &host)
+            net.enter("bo", "s2", devices, "mac", "fwd-1", &host)
                 .unwrap_err()
                 .code,
             "auth.forbidden"
         );
         assert_eq!(
-            net.enter("ada", devices, "mac", "fwd-1", "proxy.example")
+            net.enter("ada", "s1", devices, "mac", "fwd-1", "proxy.example")
                 .unwrap_err()
                 .reason,
             "no_origin"
         );
-        let (port, ticket) = net.enter("ada", devices, "mac", "fwd-1", &host).unwrap();
+        let (port, ticket) = net
+            .enter("ada", "s1", devices, "mac", "fwd-1", &host)
+            .unwrap();
         assert!(port > hub.port() && port <= hub.port() + DEFAULT_POOL);
         assert_eq!(ticket.len(), 64);
-        let (again, _) = net.enter("ada", devices, "mac", "fwd-1", &host).unwrap();
+        let (again, _) = net
+            .enter("ada", "s1", devices, "mac", "fwd-1", &host)
+            .unwrap();
         assert_eq!(again, port, "one port per forward");
         // A forward opened on the node's control socket has no device: nobody enters it.
         net.changed(
@@ -659,7 +711,7 @@ mod tests {
             },
         );
         assert_eq!(
-            net.enter("ada", devices, "mac", "fwd-3", &host)
+            net.enter("ada", "s1", devices, "mac", "fwd-3", &host)
                 .unwrap_err()
                 .code,
             "auth.forbidden"
@@ -673,7 +725,7 @@ mod tests {
         net.changed("mac", &ended);
         assert!(net.check(&tok, port).is_none());
         assert_eq!(
-            net.enter("ada", devices, "mac", "fwd-1", &host)
+            net.enter("ada", "s1", devices, "mac", "fwd-1", &host)
                 .unwrap_err()
                 .code,
             "preview.unknown"
@@ -796,7 +848,9 @@ mod tests {
         });
         let devices = |d: &str| (d == "web-ada").then(|| "ada".to_string());
         let host = format!("localhost:{}", hub.port());
-        let (port, ticket) = net.enter("ada", devices, "mac", "fwd-1", &host).unwrap();
+        let (port, ticket) = net
+            .enter("ada", "s1", devices, "mac", "fwd-1", &host)
+            .unwrap();
         let tls = connector(&ca);
         // Without the cookie: refused, nothing reaches the node.
         let no = browse(&tls, port, "GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
@@ -850,6 +904,10 @@ mod tests {
             "{page}"
         );
         assert!(page.ends_with("\r\n\r\nhi"), "{page}");
+        // Another forward's page (same site, not this origin): refused before its token is looked at.
+        let csrf = browse(&tls, port, &format!(
+            "POST /delete HTTP/1.1\r\nHost: x\r\nCookie: {token}\r\nSec-Fetch-Site: same-site\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: empty\r\nContent-Length: 0\r\n\r\n")).await;
+        assert!(csrf.starts_with("HTTP/1.1 403"), "{csrf}");
         // The program closed after its answer: the browser's connection ended at once, and nothing more went to the node.
         let at = std::time::Instant::now();
         let page2 = browse(
@@ -890,6 +948,7 @@ mod tests {
         let (port, ticket) = net
             .enter(
                 "ada",
+                "s1",
                 devices,
                 "mac",
                 "fwd-1",
@@ -933,5 +992,87 @@ mod tests {
         let mut rest = Vec::new();
         let ended = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut rest)).await;
         assert!(ended.is_ok(), "the upgraded connection ends at once");
+    }
+
+    /// A session or a device that ends (in this hub or in another process) ends the person's live previews too.
+    #[tokio::test]
+    async fn a_websocket_ends_when_its_session_or_device_no_longer_holds() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let holds = Arc::new(AtomicBool::new(true));
+        let router = Router::new();
+        let h = Arc::clone(&holds);
+        let net = Arc::new(PreviewNet::with_validity(
+            Arc::clone(&router),
+            Box::new(move |session, creator, user| {
+                assert_eq!((session, creator, user), ("s1", "web-ada", "ada"));
+                h.load(Ordering::SeqCst)
+            }),
+        ));
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let hub = probe.local_addr().unwrap();
+        drop(probe);
+        let (ca, slot) = test_ca_slot();
+        net.configure(hub, slot, None);
+        net.changed("mac", &forward("web-ada", now_ms() + 3_600_000));
+        let (_node, _seen) = fake_node(&router, |_| {
+            Some(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n".to_vec())
+        });
+        let devices = |d: &str| (d == "web-ada").then(|| "ada".to_string());
+        let (port, ticket) = net
+            .enter(
+                "ada",
+                "s1",
+                devices,
+                "mac",
+                "fwd-1",
+                &format!("localhost:{}", hub.port()),
+            )
+            .unwrap();
+        let tls = connector(&ca);
+        let entered = browse(
+            &tls,
+            port,
+            &format!("GET {ENTER_PATH}?t={ticket} HTTP/1.1\r\nHost: x\r\n\r\n"),
+        )
+        .await;
+        let token = entered
+            .lines()
+            .find(|l| l.starts_with("Set-Cookie: "))
+            .unwrap()
+            .trim_start_matches("Set-Cookie: ")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut s = tls
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                tcp,
+            )
+            .await
+            .unwrap();
+        s.write_all(format!("GET /ws HTTP/1.1\r\nHost: x\r\nCookie: {token}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n").as_bytes()).await.unwrap();
+        let mut head = vec![0u8; 4096];
+        let n = s.read(&mut head).await.unwrap();
+        assert!(String::from_utf8_lossy(&head[..n]).starts_with("HTTP/1.1 101"));
+        holds.store(false, Ordering::SeqCst);
+        net.recheck();
+        let mut rest = Vec::new();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut rest))
+                .await
+                .is_ok(),
+            "ended at once"
+        );
+        let again = browse(
+            &tls,
+            port,
+            &format!("GET / HTTP/1.1\r\nHost: x\r\nCookie: {token}\r\n\r\n"),
+        )
+        .await;
+        assert!(again.starts_with("HTTP/1.1 401"), "{again}");
     }
 }

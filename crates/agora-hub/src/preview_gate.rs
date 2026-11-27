@@ -200,6 +200,48 @@ pub struct Rewritten {
     pub upgrade: bool,
     /// The path asked for (the entry path is answered by the hub itself).
     pub target: String,
+    /// Whether the browser says the request comes from this preview itself, from the window's frame or from the person typing it
+    /// ([`fetch_allowed`]); a request another forward's page made is refused before its token is looked at.
+    pub fetch_ok: bool,
+}
+
+/// Who made a request, from the headers a browser sets and a page cannot (review of the preview slice 3): cookies ignore ports, so a
+/// page on another forward's port (the same site) could otherwise send credentialed requests here.
+/// - `Sec-Fetch-Site: same-origin` or `none` (this preview's own page, or the person typed it): allowed;
+/// - `same-site`: only a navigation (`Sec-Fetch-Mode: navigate`, `GET`, `Sec-Fetch-Dest: iframe` or `document`): the window's frame,
+///   the entry's redirect, "open in a new tab";
+/// - anything else is refused; without `Sec-Fetch-Site` (an older browser), a request whose `Origin` is not this port's is refused.
+fn fetch_allowed(h: &Head, method: &str, port: u16) -> bool {
+    let one = |name: &str| h.values(name).next().map(|v| v.to_ascii_lowercase());
+    match one("sec-fetch-site").as_deref() {
+        Some("same-origin" | "none") => true,
+        Some("same-site") => {
+            method == "GET"
+                && one("sec-fetch-mode").as_deref() == Some("navigate")
+                && matches!(
+                    one("sec-fetch-dest").as_deref(),
+                    Some("iframe" | "document")
+                )
+        }
+        Some(_) => false,
+        None => match one("origin") {
+            None => true,
+            Some(origin) => origin_port(&origin) == Some(port),
+        },
+    }
+}
+
+/// The port of an `https://` origin (443 when it names none); `None` for any other scheme or a malformed one.
+fn origin_port(origin: &str) -> Option<u16> {
+    let rest = origin.strip_prefix("https://")?;
+    if rest.contains('/') {
+        return None;
+    }
+    let after = rest.rfind(']').map_or(rest, |end| &rest[end + 1..]);
+    match after.rsplit_once(':') {
+        Some((_, p)) => p.parse().ok(),
+        None => Some(443),
+    }
 }
 
 fn has_token(list: &str, token: &str) -> bool {
@@ -212,6 +254,8 @@ fn has_token(list: &str, token: &str) -> bool {
 pub fn rewrite_request(raw: &[u8], p: &Partition) -> Result<Rewritten, HeadError> {
     let mut h = parse_request(raw)?;
     let target = h.first.split(' ').nth(1).unwrap_or("/").to_string();
+    let method = h.first.split(' ').next().unwrap_or("").to_string();
+    let fetch_ok = fetch_allowed(&h, &method, p.port);
     let upgrade = h.values("connection").any(|v| has_token(v, "upgrade"))
         && h.values("upgrade").next().is_some();
     let ours = p.token_cookie();
@@ -263,6 +307,7 @@ pub fn rewrite_request(raw: &[u8], p: &Partition) -> Result<Rewritten, HeadError
         token,
         upgrade,
         target,
+        fetch_ok,
     })
 }
 
@@ -444,13 +489,22 @@ impl PortPool {
     }
 }
 
+/// What a ticket or a token was given for: the port, the person, the session it was asked from, and until when.
+#[derive(Debug, Clone)]
+struct Grant {
+    port: u16,
+    user: String,
+    /// The session the window asked with (its token's hash, hex): the token holds only while that session does, so every way a
+    /// session ends (sign-out, "sign out everywhere", a password change, the person's removal) ends the token too.
+    session: String,
+    until: u64,
+}
+
 /// Entry tickets and forward tokens, with the clock passed in.
 #[derive(Debug, Default)]
 pub struct Gate {
-    /// ticket → (port, user, expires).
-    tickets: HashMap<String, (u16, String, u64)>,
-    /// token → (port, user, expires).
-    tokens: HashMap<String, (u16, String, u64)>,
+    tickets: HashMap<String, Grant>,
+    tokens: HashMap<String, Grant>,
 }
 
 /// 32 random bytes as hex (a ticket or a token); `None` when the system has no randomness to give (nothing is then issued).
@@ -470,12 +524,19 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 impl Gate {
-    /// A ticket for `user` to enter the forward on `port`: single use, [`TICKET_MS`].
-    pub fn ticket(&mut self, port: u16, user: &str, now_ms: u64) -> Option<String> {
-        self.tickets.retain(|_, (_, _, until)| *until > now_ms);
+    /// A ticket for `user`, asked from `session`, to enter the forward on `port`: single use, [`TICKET_MS`].
+    pub fn ticket(&mut self, port: u16, user: &str, session: &str, now_ms: u64) -> Option<String> {
+        self.tickets.retain(|_, g| g.until > now_ms);
         let t = random_hex()?;
-        self.tickets
-            .insert(t.clone(), (port, user.to_string(), now_ms + TICKET_MS));
+        self.tickets.insert(
+            t.clone(),
+            Grant {
+                port,
+                user: user.to_string(),
+                session: session.to_string(),
+                until: now_ms + TICKET_MS,
+            },
+        );
         Some(t)
     }
 
@@ -488,36 +549,40 @@ impl Gate {
         now_ms: u64,
         forward_ends_ms: u64,
     ) -> Option<String> {
-        let (p, user, until) = self.tickets.remove(ticket)?; // removed whatever follows: single use
-        if p != port || until <= now_ms {
+        let g = self.tickets.remove(ticket)?; // removed whatever follows: single use
+        if g.port != port || g.until <= now_ms {
             return None;
         }
+        self.tokens.retain(|_, t| t.until > now_ms);
         let token = random_hex()?;
         self.tokens.insert(
             token.clone(),
-            (port, user, (now_ms + TOKEN_MS).min(forward_ends_ms)),
+            Grant {
+                until: (now_ms + TOKEN_MS).min(forward_ends_ms),
+                ..g
+            },
         );
         Some(token)
     }
 
-    /// The person a token presented on `port` belongs to, while it is good.
-    pub fn check(&self, token: &str, port: u16, now_ms: u64) -> Option<&str> {
+    /// The person a token presented on `port` belongs to and the session it came from, while it is good.
+    pub fn check(&self, token: &str, port: u16, now_ms: u64) -> Option<(&str, &str)> {
         self.tokens
             .iter()
-            .find(|(t, (p, _, until))| *p == port && *until > now_ms && same(t, token))
-            .map(|(_, (_, user, _))| user.as_str())
+            .find(|(t, g)| g.port == port && g.until > now_ms && same(t, token))
+            .map(|(_, g)| (g.user.as_str(), g.session.as_str()))
     }
 
     /// Ends every ticket and token of a port (its forward ended, or the port was given back).
     pub fn end_port(&mut self, port: u16) {
-        self.tickets.retain(|_, (p, _, _)| *p != port);
-        self.tokens.retain(|_, (p, _, _)| *p != port);
+        self.tickets.retain(|_, g| g.port != port);
+        self.tokens.retain(|_, g| g.port != port);
     }
 
     /// Ends every ticket and token of a person (signed out, removed).
     pub fn end_user(&mut self, user: &str) {
-        self.tickets.retain(|_, (_, u, _)| u != user);
-        self.tokens.retain(|_, (_, u, _)| u != user);
+        self.tickets.retain(|_, g| g.user != user);
+        self.tokens.retain(|_, g| g.user != user);
     }
 }
 
@@ -674,7 +739,7 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
     #[test]
     fn a_ticket_is_single_use_short_and_for_its_port_and_a_token_ends_with_its_forward() {
         let mut g = Gate::default();
-        let t = g.ticket(7450, "ada", 1_000).unwrap();
+        let t = g.ticket(7450, "ada", "s1", 1_000).unwrap();
         assert_eq!(t.len(), 64);
         assert_eq!(g.enter(&t, 7451, 1_001, u64::MAX), None, "another port");
         assert_eq!(
@@ -682,19 +747,19 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
             None,
             "already spent by the wrong port"
         );
-        let t = g.ticket(7450, "ada", 1_000).unwrap();
+        let t = g.ticket(7450, "ada", "s1", 1_000).unwrap();
         assert_eq!(g.enter(&t, 7450, 1_000 + TICKET_MS, u64::MAX), None, "late");
-        let t = g.ticket(7450, "ada", 1_000).unwrap();
+        let t = g.ticket(7450, "ada", "s1", 1_000).unwrap();
         let tok = g.enter(&t, 7450, 2_000, 10_000).unwrap();
         assert_eq!(g.enter(&t, 7450, 2_001, 10_000), None, "single use");
-        assert_eq!(g.check(&tok, 7450, 9_999), Some("ada"));
+        assert_eq!(g.check(&tok, 7450, 9_999), Some(("ada", "s1")));
         assert_eq!(
             g.check(&tok, 7450, 10_000),
             None,
             "never past the forward's end"
         );
         assert_eq!(g.check(&tok, 7451, 3_000), None, "never on another port");
-        let t = g.ticket(7450, "ada", 1_000).unwrap();
+        let t = g.ticket(7450, "ada", "s1", 1_000).unwrap();
         let long = g.enter(&t, 7450, 2_000, u64::MAX).unwrap();
         assert_eq!(
             g.check(&long, 7450, 2_000 + TOKEN_MS),
@@ -703,7 +768,7 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         );
         g.end_user("ada");
         assert_eq!(g.check(&long, 7450, 3_000), None);
-        let t = g.ticket(7450, "bo", 1_000).unwrap();
+        let t = g.ticket(7450, "bo", "s2", 1_000).unwrap();
         let tok = g.enter(&t, 7450, 2_000, u64::MAX).unwrap();
         g.end_port(7450);
         assert_eq!(g.check(&tok, 7450, 3_000), None);
@@ -780,5 +845,50 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         }
         assert!(parse_request(b"POST / HTTP/1.1\r\nContent-Length: 4\r\n\r\n").is_ok());
         assert!(parse_request(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n").is_ok());
+    }
+
+    #[test]
+    fn a_request_another_forwards_page_made_is_refused() {
+        let ok = |extra: &str| {
+            rewrite_request(format!("GET /a HTTP/1.1\r\n{extra}\r\n").as_bytes(), &p())
+                .unwrap()
+                .fetch_ok
+        };
+        let post = |extra: &str| {
+            rewrite_request(
+                format!("POST /a HTTP/1.1\r\nContent-Length: 0\r\n{extra}\r\n").as_bytes(),
+                &p(),
+            )
+            .unwrap()
+            .fetch_ok
+        };
+        assert!(
+            ok("Sec-Fetch-Site: same-origin\r\nSec-Fetch-Mode: cors\r\n"),
+            "its own page"
+        );
+        assert!(
+            ok("Sec-Fetch-Site: none\r\nSec-Fetch-Mode: navigate\r\n"),
+            "typed"
+        );
+        assert!(ok("Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: iframe\r\n"), "the window's frame");
+        assert!(ok("Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"), "a new tab");
+        assert!(
+            !ok(
+                "Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: image\r\n"
+            ),
+            "an <img> on another forward"
+        );
+        assert!(
+            !ok("Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n"),
+            "a fetch from another forward"
+        );
+        assert!(!post("Sec-Fetch-Site: same-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"), "a form POST from another forward");
+        assert!(!ok("Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"));
+        // An older browser: Origin decides.
+        assert!(ok(""));
+        assert!(ok("Origin: https://hub.example:7450\r\n"));
+        assert!(!post("Origin: https://hub.example:7451\r\n"));
+        assert!(!post("Origin: http://hub.example:7450\r\n"));
+        assert!(!post("Origin: null\r\n"));
     }
 }

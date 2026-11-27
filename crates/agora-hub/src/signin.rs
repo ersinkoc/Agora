@@ -43,6 +43,15 @@ fn to_i64(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
 
+/// How a preview token names the session it was asked from: the session token's hash, hex (ADR-0088 Amendment A; see
+/// `crate::preview_net::Validity`).
+pub fn session_key(token: &str) -> String {
+    token_hash(token)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
@@ -506,11 +515,14 @@ impl crate::web::SessionApi for HubSessions {
                 outcome,
             );
         };
-        match self
-            .hub
-            .previews()
-            .enter(&access.user, device_user, node, forward, host)
-        {
+        match self.hub.previews().enter(
+            &access.user,
+            &session_key(bearer.unwrap_or("")),
+            device_user,
+            node,
+            forward,
+            host,
+        ) {
             Ok((port, ticket)) => {
                 audit("ok");
                 (
@@ -697,6 +709,8 @@ impl HubSessions {
                             return (500, String::new());
                         };
                         audit("password_set", "ok");
+                        // The other sessions ended: their previews end now too.
+                        self.hub.previews().recheck();
                         (200, serde_json::json!({ "revoked": revoked }).to_string())
                     }
                     Some(None) => {

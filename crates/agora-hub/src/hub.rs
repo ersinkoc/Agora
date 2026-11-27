@@ -245,6 +245,45 @@ fn spawn_audit(
     }
 }
 
+/// ADR-0088 Amendment A: a preview token holds while the session it was asked from exists (every way a session ends ends it,
+/// whichever process ended it) and the device that opened its forward is still the person's and not revoked.
+fn preview_validity(store: Arc<SqliteStore>) -> crate::preview_net::Validity {
+    Box::new(move |session: &str, creator: &str, user: &str| {
+        let Some(hash) = (0..session.len())
+            .step_by(2)
+            .map(|i| {
+                session
+                    .get(i..i + 2)
+                    .and_then(|b| u8::from_str_radix(b, 16).ok())
+            })
+            .collect::<Option<Vec<u8>>>()
+        else {
+            return false;
+        };
+        let Ok(conn) = store.lock() else {
+            return false;
+        };
+        let session_alive = conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE token_hash = ?1 AND expires_ms > ?2",
+                rusqlite::params![
+                    hash,
+                    i64::try_from(crate::server::now_ms()).unwrap_or(i64::MAX)
+                ],
+                |_| Ok(()),
+            )
+            .is_ok();
+        let device_theirs = conn
+            .query_row(
+                "SELECT 1 FROM user_devices WHERE device_id = ?1 AND user_id = ?2 AND revoked_ms = 0",
+                [creator, user],
+                |_| Ok(()),
+            )
+            .is_ok();
+        session_alive && device_theirs
+    })
+}
+
 impl Hub {
     /// Opens the hub on a store, rebuilding the view from the log. See [`Hub::open_at`].
     pub fn open(store: SqliteStore) -> Result<Self, StoreError> {
@@ -266,6 +305,10 @@ impl Hub {
         let task_notices = crate::task_notice::load(&store)?;
         let store = Arc::new(store);
         let router = crate::router::Router::new();
+        let previews = Arc::new(crate::preview_net::PreviewNet::with_validity(
+            Arc::clone(&router),
+            preview_validity(Arc::clone(&store)),
+        ));
         let hub = Self {
             metrics: crate::metrics::Metrics::default(),
             metrics_on: std::sync::atomic::AtomicBool::new(false),
@@ -286,9 +329,7 @@ impl Hub {
             store,
             event_writer: Arc::new(tokio::sync::Semaphore::new(1)),
             recording_later: std::sync::atomic::AtomicBool::new(false),
-            previews: std::sync::Arc::new(crate::preview_net::PreviewNet::new(
-                std::sync::Arc::clone(&router),
-            )),
+            previews,
             router,
             inner: Mutex::new(Inner {
                 view,
