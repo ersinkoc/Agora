@@ -1,8 +1,7 @@
 # 0118. A terminal agent can report its own state through its mesh socket
-Status: Proposed
+Status: Accepted
 Date: 2026-11-26
-
-Not accepted. Nothing here may be built until the maintainer accepts it.
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 Touches ADR-0006 (append-only: no change to `schema/`), ADR-0020 (approvals are user-signed and verified on the node), ADR-0031 and
 ADR-0075 (the per-agent mesh endpoint), ADR-0047, ADR-0050 and ADR-0083 (confined agents and the sockets they may reach), ADR-0057
@@ -59,9 +58,11 @@ Constraints:
    on a fresh connection without `initialize`, answered, and the connection is closed. The same endpoint on Windows, with its
    per-agent identity.
 
-2. **A per-run token in the agent's environment.** For every terminal agent it starts, the node sets two variables:
-   `AGORA_AGENT_SOCKET` (the endpoint's path) and `AGORA_REPORT_TOKEN` (32 random bytes, hex), new for each process run (start,
-   restart, resume, take-up from the holder). A report must carry the token of the agent's current run.
+2. **A per-run token in the agent's environment.** The node sets `AGORA_AGENT_SOCKET` (the endpoint's path) and
+   `AGORA_REPORT_TOKEN` (32 random bytes, hex) for a terminal agent with verified, configured hooks. A replacement process
+   receives a fresh token. A holder-backed process keeps its environment on reattachment. The node restores its token and
+   report sequence only after proving the same run and endpoint ownership. Otherwise that process uses screen detection
+   until its next launch. A report must carry the token of the agent's current run.
    - What the token does: a report from an earlier run (a hook still running after a restart) is refused; a report sent to another
      agent's endpoint without that agent's token is refused. That protects where an agent can connect to a neighbour's socket but
      cannot read the neighbour's environment: a confined agent on a Linux kernel without pathname-socket control (ADR-0083), when its
@@ -70,8 +71,8 @@ Constraints:
      Linux). Same-user, unconfined processes are not a boundary (T11); confinement is.
    - Everything the agent starts inherits the variables (its shell, its tools, a nested `claude -p`), so they can report as the agent.
      Decision 6 drops reports about another conversation.
-   - The node's policy line `agents.self_report = off` stops setting the variables and refuses every report (default on; see open
-     questions).
+   - Reporting is enabled for configured, verified hooks unless node policy sets `agents.self_report = off`. With the policy off,
+     the node omits the variables and refuses reports.
 
 3. **The report carries a state and an order, nothing else.**
    `{"token": "...", "state": "working" | "blocked" | "idle" | "done", "seq": <u64>, "session_id": "..." (optional)}`.
@@ -97,8 +98,8 @@ Constraints:
    - **A hook `working`, `idle` or `done`** is replaced by a different screen reading only when every check read that state for
      `trust_ms` with no hook report in between. Screen `idle` agrees with a hook's `done` and changes nothing. This recovers from a
      missed hook (Claude Code runs no `Stop` hook when the person interrupts a turn, per its documentation; unverified).
-   - **Node facts outrank both** (exit, stop, crash, restart), as today; a restart starts a new run, so the old token and its state
-     are gone.
+   - **Node facts outrank both** (exit, stop and crash). A replacement agent process starts a new run and discards the old token
+     and report state. Node restart with a surviving process follows the reattachment rule in decision 2.
    - `trust_ms` is `[hooks] trust_ms` (default 5000, 1000..=60000). ADR-0117's timing gate applies to screen readings only; a hook
      report is not flicker and is applied at once.
    - A screen reading that takes over sets `reported: false`; a hook report sets `reported: true`. The existing meaning of the field
@@ -120,9 +121,8 @@ Constraints:
      holds it (the rules of `report_found_session`), and never replaces one; a report naming another id than the one held is dropped
      whole.
    A report without `session_id` is taken as the agent's own. Agora's own hooks are in a file only this process loads (decision 8), so
-   a nested `claude -p` runs none of them; the check guards against hooks the person configured and against other callers. Claude
-   Code's `/clear` may start a new conversation, with a new session id, inside the same process (unverified); this rule would then
-   drop that process's later reports (see open questions).
+   a nested `claude -p` runs none of them. The check also applies to the person's hooks and other callers. Keep the session mismatch
+   refusal through Claude Code's `/clear`. Review this decision after a real capture shows what changes and how Resume should follow it.
 
 7. **A report never approves, types or dispatches.**
    - It creates and resolves no approval. A hook's `blocked` shows the agent as needing the person, as a screen `blocked` does; the
@@ -164,16 +164,16 @@ Constraints:
    - Validation: at most 16 events; `name` and `matcher` at most 64 printable characters; `state` one of the four reportable states;
      `flag` holds `{hooks_file}`; unknown keys refuse the section. `install = "builtin:..."` in today's spec example is replaced (it
      was never read).
-   - Any program can also call `agora agent report` itself with the two variables, with no manifest change: a tool that wants to
-     report its state does not need a change to Agora.
+   - A program in a run with those variables can also call `agora agent report` itself. The node applies the same run, session
+     and ordering checks.
 
 9. **Hooks shipped for Claude Code and Codex, each after a check on a real version.**
    - **Claude Code** (`format = "claude_settings_json"`: the `{"hooks": {EVENT: [{"matcher": ..., "hooks": [{"type": "command",
      "command": ..., "timeout": 5}]}]}}` shape, passed with `--settings`): `SessionStart` → `idle` with the session id,
      `UserPromptSubmit`, `PreToolUse` and `PostToolUse` → `working`, `Notification` with `permission_prompt` → `blocked`, `Stop` →
-     `done` (open question). `--settings` is checked on 2.1.332; the events, the stdin shape and the matcher are checked on that
-     version (a scratch folder, one one-word prompt, a refused `touch probe.txt`) before the manifest declares them, and the version
-     goes in a comment, as for launch flags. A start with `--bare` runs no hooks and falls back to the screen.
+     `idle`. `--settings` is checked on 2.1.332. Verify the events, the stdin shape and the matcher on that
+     version (a scratch folder, a one-word prompt and a refused `touch probe.txt`) before the manifest declares them. Record the
+     version in a comment, as for launch flags. A start with `--bare` runs no hooks and falls back to the screen.
    - **Codex**: a format for `-c` overrides is added only once a real 0.172 (or later) run shows the hook keys, the events, and that a
      hook passed this way does not stop every start at the review dialog. If it does, no Codex hook ships and Codex stays on screen
      and title rules (PR #1204). Its `notify` program (turn finished) is the fallback to check.
@@ -206,13 +206,13 @@ Constraints:
 
 1. `agora-core`: `StateSource::Hook` and the precedence of decision 4, with unit tests (no I/O, injected clock for `trust_ms`).
 2. `agora-node`: the method on the per-agent endpoint, the per-run token and the two variables, the refusals and the rate limit, the
-   session rule, the policy line; `agora agent report` in the `agora` binary. Spec, error code and threat-model row in the same PR.
+   session rule, the policy line; `agora agent report` in the `agora` binary. Spec, error code and threat-model row in the same commit.
 3. `agora-fake-agent` gains a step that sends a report; integration tests below.
 4. Manifest engine 7 `[hooks]` and the `claude_settings_json` writer; the Claude Code manifest's hooks after the check on a real
    version, with a golden file of the written settings.
 5. Codex, only after its check (decision 9).
 
-Each step is its own PR.
+Ship each step in its own commit.
 
 ## Verification
 
@@ -222,7 +222,8 @@ Each step is its own PR.
 - **Integration with `agora-fake-agent`** (never a real agent):
   - a report with the right token sets the state with `reported: true`; the wrong token, another agent's endpoint, and a token of the
     previous run (after a restart) are refused with their reasons and change nothing;
-  - out-of-order `seq` is dropped; 21 reports in one second, the last refused `rate`;
+  - out-of-order `seq` is dropped and the 21st report in one second is refused with `rate`;
+  - a verified holder reattachment keeps the last accepted sequence. An unverified reattachment falls back to screen detection;
   - two `blocked` reports and a screen `blocked` for one dialog produce exactly one `AgentStateChanged` in the event log;
   - a report naming another session id for an `id_args` kind is dropped whole;
   - a reported `idle` does not let the node type a helper's first prompt while the screen shows a dialog;
@@ -234,15 +235,10 @@ Each step is its own PR.
 
 ## Open questions
 
-- Should Claude Code's `Stop` report `done` (a "finished" notification after every turn, and the agent shown as done until looked at)
-  or `idle`?
-- Set the two variables for every terminal agent (any tool can report, the `shell` kind included), or only for kinds with `[hooks]`?
-  And is `agents.self_report` on by default?
-- Is 5 s the right default for `trust_ms`?
-- Should the hub's notifier also ignore a `Blocked`/`Done` whose previous projected state was the same, as a second guard behind
-  decision 5 (a change in `agora-hub`)?
-- Should the window say a state was reported by the agent's hook, as distinct from an adapter? Today it says "reported by the agent"
-  for both; telling them apart would need a new field.
-- Codex: if every hook start waits at the review dialog, ship no Codex hook, or ship it off and let the person enable it once?
-- If Claude Code's `/clear` changes the session id inside one process: let a `SessionStart` report from the node's own hook file
-  replace the held id (and so what Resume continues), or skip the session check for reports from that file?
+The maintainer resolved these questions on 2026-11-27.
+
+- Use `idle` for the ordinary Claude Code end of turn and five seconds as the initial trust window.
+- Enable reporting for verified, configured hooks with the node policy opt-out in decision 2.
+- Keep the existing client source label. Test same-state events at the node and hub before considering a second notifier filter.
+- Keep Codex hooks disabled while their startup waits at the review dialog.
+- Keep the session mismatch check through `/clear` and the holder reattachment checks in decision 2.

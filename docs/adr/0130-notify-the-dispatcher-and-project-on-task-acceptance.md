@@ -1,6 +1,7 @@
 # 0130. Notify the dispatcher and project on task acceptance
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 ## Context
 

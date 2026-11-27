@@ -1,6 +1,7 @@
 # 0134. Agent accounts are configured on the node
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 ## Context
 

@@ -1,6 +1,7 @@
 # 0135. Bound hub replay with projection checkpoints
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 ## Context
 

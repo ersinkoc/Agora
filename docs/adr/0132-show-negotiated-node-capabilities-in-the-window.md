@@ -1,6 +1,7 @@
 # 0132. Show negotiated node capabilities in the window
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 ## Context
 

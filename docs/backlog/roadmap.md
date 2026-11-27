@@ -42,16 +42,15 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   the Mac. The hub recorded the helper in the same portable project with its Blackview parent, the browser showed that
   relationship, and the parent followed the helper over the mesh. A separate two-node rehearsal on Blackview with the same
   release and web build also verified that a standing grant covered a later matching start.
-- [ ] **M8.2 The board drives the work** (ADR-0095): the Review column and subtasks (M3.2, **schema**); dispatch to an agent on any
-  machine; when a task is done the dispatcher, the parent and the project channel are told; an idle ready agent can take the next
-  open task it is allowed (an automation rule: **decision**, ADR first)
+- [ ] **M8.2 The board drives the work** (ADR-0095): shared-board Review and subtasks are built (M3.2). A task can be given to an
+  agent on another machine. Acceptance notices and automatic pickup follow the steps below.
   Manual dispatch to a second node and the existing Done transition were verified in a browser on Blackview.
   Shared-board Review is implemented under [ADR-0125](../adr/0125-review-a-task-before-accepting-it.md).
   The owner's web window shows recently accepted tasks ([ADR-0127](../adr/0127-show-accepted-task-notices.md)).
   [ADR-0128](../adr/0128-notify-the-parent-agent-on-task-acceptance.md) delivers durable opt-in acceptance notices to a
-  cross-machine helper's verified parent agent. Notices to the dispatcher and project channel await the
-  [ADR-0130 decision](../adr/0130-notify-the-dispatcher-and-project-on-task-acceptance.md). The opt-in pull model for
-  automatic pickup awaits the [ADR-0131 decision](../adr/0131-an-idle-agent-can-ask-for-the-next-task.md).
+  cross-machine helper's verified parent agent. Next come notices to the dispatcher and project channel
+  ([ADR-0130](../adr/0130-notify-the-dispatcher-and-project-on-task-acceptance.md), **schema**) and opt-in task pickup
+  ([ADR-0131](../adr/0131-an-idle-agent-can-ask-for-the-next-task.md), **schema**).
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (ADR-0122 Accepted 2026-11-27): the owner publishes a skill or an MCP server
@@ -59,7 +58,7 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   cannot widen it); secrets stay on the node (ADR-0084). Built: the hub's store, the node's verification and launch-time injection for
   Claude Code, Settings → Shared with agents for MCP servers, secrets through the node's launcher (Amendment A) and each agent's
   started-with list in its pane; left: skills per kind, additional kinds, and the restart and URL bridge behavior in
-  [ADR-0133](../adr/0133-shared-mcp-servers-can-restart-within-an-agent-run.md) (**decision**).
+  [ADR-0133](../adr/0133-shared-mcp-servers-can-restart-within-an-agent-run.md) (Accepted).
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
   hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
   Recovery (the maintainer, 2026-11-27): a whole-machine power loss (hub, node, supervisors, holder and agents killed at once) brings
@@ -71,8 +70,8 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
   sizes and free disk in the window (M3.7's schema part). Built: ADR-0123 in the window end to end (snapshot, pane, tile,
   lists, the fleet's and the board picker's filter)
-- [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
-  and ADR-0118 (M0.3, **decision**)
+- [ ] **M8.7 Detection that never misses**: verify Shell detection for supported kinds on each OS (ADR-0094), then follow the
+  accepted build and verification order in ADR-0117 and ADR-0118 (M6.2).
 - [x] **M8.8 The map**. [ADR-0129](../adr/0129-a-live-map-of-the-fleet.md) chose a fixed radial layout with no new dependency.
   The web panel shows this window, the hub, machines, agents and helpers, and animates messages, task assignments and delivered
   handoffs. The desktop app uses the same window. The terminal client names the panel as part of the accepted scope.
@@ -98,11 +97,12 @@ The earlier M0 (the kanban board gives a task to an agent, ADR-0095 steps 1 to 3
   - [x] #1243 the node renews an agent's file leases while it runs (ADR-0039; review fixes in progress)
   - [x] #1244 a refusing skip-permissions policy stops an agent that starts in, or switches to, a mode that skips (P2-16; needs an
     independent review; **decision**: what `allow` does)
-- [ ] **M0.3 Proposed ADRs** (**decision**)
-  - [ ] ADR-0117 (detection engine) and ADR-0118 (agents report their own state): G2; on `main` as Proposed (#1251)
-  - [x] ADR-0119 (a helper started on another machine): revised for standing grants and chains (the maintainer's "approve once, then free"), Accepted 2026-11-27 with the defaults; built as M7.1
-  - [ ] ADR-0114 Amendment B (plugins can act): on `main` as Proposed (M5.4)
-  See the [decision notes for ADR-0117, ADR-0118 and ADR-0114 Amendment B](../reviews/2026-11-27-adr-decisions.md).
+- [x] **M0.3 Architecture decisions** (Accepted 2026-11-27)
+  - ADR-0117 (detection engine) and ADR-0118 (agent state reports): implementation in M6.2.
+  - ADR-0119 (a helper on another machine): standing grants and chains accepted and built as M7.1.
+  - ADR-0114 Amendment B (plugin actions): user-gesture proof and implementation in M5.4.
+  - ADR-0130 to ADR-0135: see the [decision review](../reviews/2026-11-27-adr-decisions.md) and the linked work below.
+    The schema additions in ADR-0130 to ADR-0132 and the window step of ADR-0134 retain their explicit approval step.
 - [x] **M0.4 Other open PRs**: #1188 (Codex's input validation audit) merged on `main`; #1204 (title rules) closed earlier, its
   open point is in [follow-ups](follow-ups.md)
 - [x] **M0.5 Release 0.3.40** (2026-11-26), blackview and `win` updated; mac asked. Left: **win**, a real `shutdown /r` check of #1231's
@@ -165,7 +165,7 @@ checkpoint and retention decision.
 - [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
   the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
 - [ ] **M2.13 The window knows what each machine can do** (**schema**). The web window learns unsupported actions only from
-  a refusal (#885). [ADR-0132](../adr/0132-show-negotiated-node-capabilities-in-the-window.md) proposes scoped snapshot
+  a refusal (#885). [ADR-0132](../adr/0132-show-negotiated-node-capabilities-in-the-window.md) defines scoped snapshot
   and live updates, starting with task dispatch.
 - [x] **M2.14 The terminal repaint carries the program's modes and its history** (ADR-0100, **schema** for step 2)
   - [x] step 1, the modes in the repaint (#953); step 2, the history before the repaint when a window asks (#959); step 3, the web
@@ -200,7 +200,7 @@ checkpoint and retention decision.
 - [ ] **M3.9 Any machine can be the hub** (ADR-0086, staged)
   - [ ] export and import; the signed hub record (**schema**); manual takeover with partition tests; continuous replication with a drill; automatic takeover (3+ machines)
 - [ ] **M3.10 Agent login and accounts**. [ADR-0134](../adr/0134-agent-accounts-are-configured-on-the-node.md)
-  (**decision**) proposes node-local account management, with selection from the window as a separate schema step.
+  (Accepted) starts with node-local account management. Selection from the window follows as a separate **schema** step.
 - [x] **M3.11 A structured agent can be allowed always** (ADR-0101, Accepted 2026-11-22; the agent decides how long it keeps the answer)
   - [x] part A, steps 1 to 3 (**schema**, bridge and node, hub): #1007, merged
   - [x] part B, steps 4 to 6 (the window, the terminal client, docs): #1012
@@ -229,7 +229,8 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
   the readability rules without a warning ([why, per variant](../ux/themes.md#starter-themes))
 - [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the
   wrong machine
-- [ ] **M5.4 Plugins can act** (ADR-0114 amendments, **decision** on the order; each one its own amendment, then built)
+- [ ] **M5.4 Plugins can act** (ADR-0114 Amendment B accepted for P1 and P2, starting with the user-gesture proof.
+  P3 to P5 each need a further **decision**)
   - [ ] P1 UI actions: open a pane, focus an agent, prepare a prompt the person reads and sends
   - [ ] P2 palette commands and keybindings declared by a plugin (the safe-mode key stays unbindable)
   - [ ] P3 a status-line segment and notifications the host draws
@@ -249,8 +250,8 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 
 - [ ] **M6.1 More coding tools out of the box** (G1, **human**): L1 manifests with real fixture screens (Gemini CLI, Copilot CLI,
   Cursor, Amp, Kiro, Droid, Qwen, Cline, ...); the 41 ACP registry kinds checked with real programs. The largest gap.
-- [ ] **M6.2 Detection engine and self-reported state** (G2): ADR-0117 and ADR-0118 (#1219, M0.3), then built; the manifests' `hooks`
-  table runs
+- [ ] **M6.2 Detection engine and self-reported state** (G2): ADR-0117 and ADR-0118 accepted. Follow their benchmarks, fixtures,
+  engine steps and verified per-kind hooks.
 - [x] **M6.3 A plain terminal shows its agent** (G3): M3.4
 - [ ] **M6.4 A pushed event stream and a published API description** (G9, **decision**): `agora events` polls every 200 ms today
 - [x] **M6.5 A manual written for agents** (G10, no protocol change): a command that prints how to drive and customize Agora, so an

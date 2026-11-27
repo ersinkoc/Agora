@@ -232,10 +232,9 @@ be framed. The frame page is one more file the hub serves with headers of its ow
 **Evidence.** `scripts/e2e-plugin-sandbox.mjs` runs every check of the Verification list under the hub's headers per path (read from
 `web.rs`), the frame page opened on its own included; the real hub binary serves the same headers and the sample plugin draws in it.
 
-## Amendment B (Proposed, 2026-11-26): plugins can act: open their panels, show an agent, prepare a prompt, add commands the person can give keys
+## Amendment B (Accepted, 2026-11-27): plugins can act: open their panels, show an agent, prepare a prompt, add commands the person can give keys
 
-Status: Proposed. Waits for the maintainer; nothing below is built. ADR-0114 itself stays Accepted, and its decisions stand as written
-until this amendment is accepted.
+Accepted: 2026-11-27 (maintainer approval in chat). The user-gesture check in the build order gates the action capabilities.
 
 Origin: roadmap M5.4 (steps P1 and P2) and the gap review of 2026-11-26 (`docs/reviews/2026-11-26-architecture-gap-review.md`, section
 4, "The capability gap"). Decision 3 lists actions as "not in rung 1", each needing an amendment, and the open question "Which UI actions
@@ -527,13 +526,10 @@ T63 changes with it: "there are no write messages at all" becomes the three acti
 - **A command that starts its plugin when no panel shows it.** A plugin would run where nothing shows it, against decision 4. Rejected
   for P2.
 
-### Open questions
+### Approved defaults
 
-- **Should `pane.open` also open built-in tool panels** (Changes, Files) bound to an agent? Proposed: not in P1. The plugin's own panels
-  first.
-- **Should a command open its panel** when no pane shows it? Proposed: no in P2. Revisit with P5 (events).
-- **The extra question before sending a plugin's text to an agent that acts without asking:** keep it? Proposed: yes.
-- **The bounds:** 16 commands a plugin, 4,096 characters a prompt, one action a second. Proposed: as written.
-- **An engine with no user activation** (B3): only commands act there. Proposed: yes, failing closed.
-- **Copy through the host** (decision 3's list): when? Proposed: with P3 (the status-line segment and notifications), in its own
-  amendment.
+- P1 opens the plugin's own panels. P2 commands apply while a plugin panel is open.
+- Keep the extra confirmation when sending prepared text to an agent that skips permission prompts.
+- Keep the bounds of 16 commands per plugin, 4,096 characters per prepared prompt and one action per second.
+- Where the host lacks usable activation evidence, only its explicit command path can authorize a plugin action.
+- Host clipboard actions require a future amendment.

@@ -1,6 +1,7 @@
 # 0131. An idle agent can ask for the next task
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 ## Context
 

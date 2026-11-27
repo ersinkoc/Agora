@@ -1,8 +1,7 @@
 # 0117. Screen detection confirms idle, keeps blocked, and reads anchored regions and progress reports
-Status: Proposed
+Status: Accepted
 Date: 2026-11-26
-
-Not accepted. Nothing here may be built until the maintainer accepts it.
+Accepted: 2026-11-27 (maintainer approval in chat).
 
 Touches ADR-0006 (append-only: manifest engine 7, no protocol message), ADR-0018, ADR-0019 and ADR-0044 (signed lists, the release
 key), ADR-0022 and `docs/design/performance.md` (detection is a hot path), ADR-0057 (`[[ready]]`/`[[typed]]` gate typing a prompt),
@@ -73,9 +72,8 @@ Constraints that shape the answer:
      clock passed in, no I/O), owned by the node's per-agent entry. Node facts (exit, stop, crash, restart) and reported states
      bypass it and clear anything pending. `agora agent explain` reads one screen and is not affected; `terminal_readiness`
      (ADR-0095) and the ADR-0057 typing check keep their own fresh look at the screen and do not wait for the gate.
-   - **Defaults.** Absent table or `0` means today's behaviour. The shipped `claude-code` and `codex` manifests opt in with values
-     taken from timed captures of the real agents (see Verification). Whether the engine should apply a default to every manifest is
-     an open question.
+   - **Defaults.** An absent table or `0` keeps today's behaviour. Start with 300 ms for idle confirmation and 800 ms for blocked hold
+     in the opted-in `claude-code` and `codex` manifests. Validate those starting values with timed captures before enabling them.
 
 2. **Hold rules (`state = "hold"`, engine 7).** A `[[rules]]` entry may say `state = "hold"`: when it is the highest-priority
    matching rule, detection stops there and the state stays as it is (other workspaces call this a "skip state update" rule). It differs from "no
@@ -148,7 +146,7 @@ Constraints that shape the answer:
      and `agora update` checks an SSH signature under the release key the owner pinned (`<AGORA_HOME>/release-key`; the published key
      is `docs/security/release-key.pub`, an `ssh-ed25519` key). The rule list uses the same model: a root key file on the node
      (`<AGORA_HOME>/rules-root-key`), and the first-party list is signed with the release key's Ed25519 key pair (the 32-byte public
-     key inside `release-key.pub`), so no new key pair is made. Whether that key should be built into the binary is an open question.
+     key inside `release-key.pub`), so no new key pair is made. The owner pins the public key on the node.
      Payload: `{version, expires_ms, kinds: [{kind, manifest_version, min_engine, rules_toml}]}`, at most 64 kinds and 256 KiB;
      unknown fields refuse the list.
    - **Only rule sections.** `rules_toml` may hold `[detection]`, `[[anchor]]` and `[[rules]]`, nothing else; any other key refuses
@@ -174,7 +172,7 @@ Constraints that shape the answer:
 
 - **Baseline first.** A detection benchmark in `bench/`: every shipped fixture replayed on 50 terminals, measuring the time per
   detection tick and how long the terminal lock is held. Each later step reports against it (AGENTS.md: hot-path changes need a
-  benchmark result in the PR).
+  benchmark result in the commit).
 - **Timing gate:** a few comparisons per check and one `Instant` per pending change; extra checks only while a change is pending.
 - **Hold rules:** none; they are rules.
 - **Anchored regions:** one pass over at most `search` rows per anchor per tick, cached per tick like region text today. The build
@@ -201,7 +199,7 @@ Constraints that shape the answer:
 - **Re-announce blocked periodically.** Every re-announce is an event in the hub's store and on the wire, and the notifier
   would notify again after its 60 s window. A hold inside the node gives the same stability with one event.
 - **One engine-wide debounce for every manifest.** Changes the behaviour of every manifest, community ones included, without fixtures
-  for their timing. Kept as an open question once the shipped manifests have measured values.
+  for their timing. Per-manifest opt-in lets the measured fixtures determine where the guards apply.
 - **Named prompt-box regions as engine built-ins.** Each new box style would need engine code. Anchors express the same
   regions as data.
 - **Regions that read the whole recent screen or its top non-empty lines.** They read rows that can be above the live bottom of the buffer; not
@@ -221,7 +219,7 @@ Constraints that shape the answer:
 5. Progress region (decision 4): the evidence capture first; build only if the sequence is seen.
 6. Signed rule updates (decision 6), after a release step that signs a list exists.
 
-Each step is its own PR; steps 2 to 5 raise `ENGINE_VERSION` to 7 once (the first to land does it).
+Ship each step in its own commit. The first of steps 2 to 5 raises `ENGINE_VERSION` to 7.
 
 ## Verification
 
@@ -242,18 +240,15 @@ Each step is its own PR; steps 2 to 5 raise `ENGINE_VERSION` to 7 once (the firs
   `AgentStateChanged`, not one per flicker; a hidden terminal with a pending change is checked at the visible floor until it settles.
 - **Signed updates:** fixtures signed by a public test seed (as `tests/fixtures/agent-list/`): a valid list replaces rules; an entry
   with `[process]` is refused; an older `version` is refused; an expired list leaves built-in rules; policy off fetches nothing.
-- **Benchmark:** each step's PR states the detection-tick time and lock hold time against the baseline, and the progress step the PTY
-  throughput.
+- **Benchmark:** each step records the detection-tick time and lock hold time against the baseline. Measure PTY throughput in the
+  progress step. Keep the 300 ms plus network budget for working and blocked and report the intentional idle confirmation delay separately.
 
 ## Open questions
 
-- Default values: `idle_confirm_ms = 300` and `blocked_hold_ms = 800` (the numbers another workspace uses) until the timed captures say otherwise? And
-  should the engine apply defaults to manifests without a `[detection]` table?
-- Budget: `docs/design/performance.md` says a screen-detected change is visible within 300 ms. Should that row say it is measured for
-  `blocked` and `working`, with `idle` after `working` allowed `idle_confirm_ms` more?
-- A start grace (3 s elsewhere) that keeps `unknown` while the agent draws its first screen: needed, or does "no opinion" already cover
-  it?
-- Signed updates: worth building before the release pipeline signs any list (the agent-package list is not signed yet either)? Default
-  off, or on for the first-party list once it exists? Build the first-party public key into the binary, or keep it an owner-placed
-  file as the agent-package list does?
-- Anchored regions in `[[ready]]`/`[[typed]]`: keep them out, or allow them after a separate review of the typing gate?
+The maintainer resolved these questions on 2026-11-27.
+
+- Keep timing guards opt-in through the manifest, with the initial values and evidence in decision 1.
+- Keep the existing no-opinion behaviour at startup. Revisit a startup grace period when a timed capture shows it is needed.
+- Measure the idle confirmation delay separately from the working and blocked budget.
+- Build and enable signed rule updates only after a release pipeline can sign the list. Start with node-local opt-in and an owner-pinned key.
+- Reserve anchored regions in `[[ready]]` and `[[typed]]` for a separate review of the typing gate.

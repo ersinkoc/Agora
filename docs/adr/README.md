@@ -132,8 +132,8 @@ Date: YYYY-MM-DD
 | 0113 | Deep themes and community themes, and a theme is always data | Accepted |
 | 0114 | Community plugins run sandboxed in the window and ask for what they see | Accepted |
 | 0115 | A repository on a case-insensitive host is one project, whatever the case of its URL | Accepted |
-| 0117 | Screen detection confirms idle, keeps blocked, and reads anchored regions and progress reports | Proposed |
-| 0118 | A terminal agent can report its own state through its mesh socket | Proposed |
+| 0117 | Screen detection confirms idle, keeps blocked, and reads anchored regions and progress reports | Accepted |
+| 0118 | A terminal agent can report its own state through its mesh socket | Accepted |
 | 0119 | A helper started on another machine | Accepted |
 | 0120 | A gallery for the community catalogs: dates, popularity and plugin screenshots | Accepted |
 | 0121 | Show task handoff delivery on the project board | Accepted |
@@ -145,9 +145,9 @@ Date: YYYY-MM-DD
 | 0127 | Show accepted task notices | Accepted |
 | 0128 | Notify the parent agent on task acceptance | Accepted |
 | 0129 | A live map of the fleet | Accepted |
-| 0130 | Notify the dispatcher and project on task acceptance | Proposed |
-| 0131 | An idle agent can ask for the next task | Proposed |
-| 0132 | Show negotiated node capabilities in the window | Proposed |
-| 0133 | Shared MCP servers can restart within an agent run | Proposed |
-| 0134 | Agent accounts are configured on the node | Proposed |
-| 0135 | Bound hub replay with projection checkpoints | Proposed |
+| 0130 | Notify the dispatcher and project on task acceptance | Accepted |
+| 0131 | An idle agent can ask for the next task | Accepted |
+| 0132 | Show negotiated node capabilities in the window | Accepted |
+| 0133 | Shared MCP servers can restart within an agent run | Accepted |
+| 0134 | Agent accounts are configured on the node | Accepted |
+| 0135 | Bound hub replay with projection checkpoints | Accepted |
