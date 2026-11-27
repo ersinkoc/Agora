@@ -140,4 +140,4 @@ Date: YYYY-MM-DD
 | 0122 | Skills and MCP servers shared through the hub | Accepted |
 | 0123 | Every agent shows its provider, model and effort | Accepted |
 | 0124 | Preserve a task claim when its receiver reattaches | Accepted |
-| 0125 | Review a task before accepting it | Proposed |
+| 0125 | Review a task before accepting it | Accepted |

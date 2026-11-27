@@ -1,5 +1,5 @@
 # 0125. Review a task before accepting it
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
 
 ## Context
@@ -14,7 +14,7 @@ adapter on a second 0.3.42 node through their shared board. The target saw the c
 `task_complete`, and the browser moved the card to Done. A dependent task was refused while its prerequisite was still
 claimed. Both node processes ran on Linux in that test.
 
-## Proposal
+## Decision
 
 1. Enable Review per shared project at its hub, with the owner's opt-in. Support node-local boards in a later step that
    covers their persistence and handover to the hub. On a Review-enabled board, the task's current owner submits a report
