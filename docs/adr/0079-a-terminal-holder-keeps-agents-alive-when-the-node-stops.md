@@ -51,13 +51,8 @@ and typed through them.
   - **One rule follows:** `spawn_detached` falls back to starting *inside* the job when breakaway is refused. The holder must never
     take that fallback, because inside the supervisor's kill-on-close job it would die with the supervisor. It refuses to start
     instead, and the node runs its agents itself as today.
-  - **Amended 2026-11-27 (the maintainer accepted the rewording; measured on WHITE, Windows 11 Pro 26300, by the Windows session):**
-    the rule is that a holder never starts inside a **kill-on-close** job. Task Scheduler's job (limit flags 0: no
-    `KILL_ON_JOB_CLOSE`, no breakaway) is not one: a child in it survives the task's process ending and `Stop-ScheduledTask`. From the
-    supervisor's nested job (`KILL_ON_JOB_CLOSE` and `BREAKAWAY_OK`) inside it, `CREATE_BREAKAWAY_FROM_JOB` succeeds and the holder
-    lands in Task Scheduler's job, where it outlives the supervisor's job. "Breakaway is refused under Task Scheduler" holds only for a
-    process the task starts directly, not for the node under `agora supervise`. So the holder may run in a job that does not kill on
-    close, and still refuses to start when it would stay in a kill-on-close one.
+  - **Clarified 2026-11-27 (the maintainer):** the rule means a *kill-on-close* job. Task Scheduler's own job does not kill on close
+    (limit flags 0), and a holder that broke away into it is fine. Re-measured on Windows 11 Pro 26300 with the same results as above.
 
 ## Decision
 1. **One holder per Agora home** (`agora hold`, the same binary). It owns, for every agent of that home:
