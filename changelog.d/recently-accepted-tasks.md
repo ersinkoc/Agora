@@ -1,0 +1,1 @@
+- The owner's web window shows recently accepted tasks across shared boards, with the project, acceptance time and a shortcut to the board.

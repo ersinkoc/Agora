@@ -280,9 +280,9 @@ describe('quick win: a machine shows its id only when its name is shared', () =>
   it('the project board follows the same rule', () => {
     setLanguage('en');
     const two = [m('n1', 'Laptop'), m('n2', 'Laptop')];
-    expect(renderToStaticMarkup(<ProjectBoard board={board(two)} machines={two} />)).toContain('Laptop · n1');
+    expect(renderToStaticMarkup(<ProjectBoard onOpen={() => {}} board={board(two)} machines={two} />)).toContain('Laptop · n1');
     const distinct = [m('n1', 'Laptop'), m('n2', 'Server')];
-    const html = renderToStaticMarkup(<ProjectBoard board={board(distinct)} machines={distinct} />);
+    const html = renderToStaticMarkup(<ProjectBoard onOpen={() => {}} board={board(distinct)} machines={distinct} />);
     expect(html).toContain('>Laptop<');
     expect(html).not.toContain('Laptop · n1');
   });

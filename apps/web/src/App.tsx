@@ -1,4 +1,5 @@
 import { BoardReviewContext } from './components/BoardReview';
+import { ShowAcceptedTasks } from './components/SharedBoards';
 import { AcknowledgeHandoffContext } from './components/BoardHandoffs';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
@@ -737,6 +738,7 @@ export function App() {
         await api.command('', { taskReviewDecide: request });
       } : undefined,
     } : undefined}>
+    <ShowAcceptedTasks.Provider value={role === 'owner'}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
       {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined} heldGrants={hub && api ? heldGrants : undefined} revokeHeld={hub && changes ? revokeHeld : undefined}
@@ -778,6 +780,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </GiveContext.Provider>
+    </ShowAcceptedTasks.Provider>
     </BoardReviewContext.Provider>
     </AcknowledgeHandoffContext.Provider>
     </ChatActionsContext.Provider>

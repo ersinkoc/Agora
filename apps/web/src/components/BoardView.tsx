@@ -74,7 +74,7 @@ export function BoardColumns({ board }: { board: BoardModel }) {
 
 // ADR-0095 step 1: a project's tasks in three columns, a deep view opened on demand. Step 2: a Backlog card offers "Give to an agent"
 // (the dialog, net/give.ts and GiveTask.tsx, sends it); nothing else here changes a task.
-export function BoardView({ board, onClose }: { board: BoardModel; onClose: () => void }) {
+export function BoardView({ board, onClose, returnFocus }: { board: BoardModel; onClose: () => void; returnFocus?: HTMLElement }) {
   const content = useRef<HTMLDivElement>(null);
   return (
     <Dialog.Root open onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -83,6 +83,12 @@ export function BoardView({ board, onClose }: { board: BoardModel; onClose: () =
         <Dialog.Content aria-describedby={undefined}
           // A dialog opened over the board (Give to an agent) takes Escape; the board never closes under it (dialogStack.ts).
           ref={content} onEscapeKeyDown={(e) => { if (belowAnotherDialog(content.current)) e.preventDefault(); }}
+          onCloseAutoFocus={(e) => {
+            if (returnFocus?.isConnected) {
+              e.preventDefault();
+              returnFocus.focus();
+            }
+          }}
           onKeyDown={(e) => { if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) e.stopPropagation(); }}
           className="fixed inset-2 z-50 flex flex-col overflow-hidden rounded-l border border-line bg-surface-raised shadow-pop md:inset-x-[3vw] md:inset-y-[4vh]">
           {/* The kit's dialog header: an icon chip, the title, and the icon close used by every other dialog. */}

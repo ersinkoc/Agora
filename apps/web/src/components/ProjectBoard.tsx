@@ -1,14 +1,15 @@
-import { useState } from 'react';
 import { t } from '../i18n';
-import { BoardView } from './BoardView';
 import { Icon } from './Icon';
 import { Tag } from './kit';
 import { sharesName } from '../model';
 import type { BoardModel } from '../net/view';
 import { visible } from '../net/hidden';
 
-export function ProjectBoard({ board: b, machines = [] }: { board: BoardModel; machines?: readonly { id: string; name: string }[] }) {
-  const [open, setOpen] = useState(false);
+export function ProjectBoard({ board: b, machines = [], onOpen }: {
+  board: BoardModel;
+  machines?: readonly { id: string; name: string }[];
+  onOpen: (trigger: HTMLButtonElement) => void;
+}) {
   return (
     <div data-project-id={b.projectId} className="grid min-w-0 gap-1.5 rounded-m border border-line bg-surface-0 p-3">
       <strong className="break-words text-xs">{visible(b.project)}</strong>
@@ -23,8 +24,7 @@ export function ProjectBoard({ board: b, machines = [] }: { board: BoardModel; m
           </li>)}
         </ul>
       </details>}
-      {b.tasks.length > 0 && <button type="button" className="kit-btn kit-btn--sm w-fit" onClick={() => setOpen(true)}><Icon name="board" className="size-3.5" />{t('board-open-view', { count: b.tasks.length })}</button>}
-      {open && <BoardView board={b} onClose={() => setOpen(false)} />}
+      {b.tasks.length > 0 && <button type="button" className="kit-btn kit-btn--sm w-fit" aria-haspopup="dialog" onClick={e => onOpen(e.currentTarget)}><Icon name="board" className="size-3.5" />{t('board-open-view', { count: b.tasks.length })}</button>}
       <ul className="m-0 grid list-none gap-1 p-0 text-[0.8125rem]">
         {b.tasks.map(task => <li key={task.id} className="flex items-baseline justify-between gap-2">
           <span className={`min-w-0 line-clamp-2 break-words ${task.status === 'done' ? 'text-muted line-through' : ''}`} title={visible(task.title)}>{visible(task.title)}</span>

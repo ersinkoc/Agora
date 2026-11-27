@@ -138,6 +138,7 @@ function recordHandoff(v: View, row: agora.v1.TaskHandoffDeliveryChanged.$Proper
 export interface TaskReviewModel {
   revision: number;
   state: 'pending' | 'accepted' | 'returned';
+  decidedAtMs?: number;
 }
 
 function recordReview(v: View, key: string, row: agora.v1.TaskReview.$Properties): void {
@@ -146,7 +147,10 @@ function recordReview(v: View, key: string, row: agora.v1.TaskReview.$Properties
   const state = row.state === states.TASK_REVIEW_STATE_PENDING ? 'pending'
     : row.state === states.TASK_REVIEW_STATE_ACCEPTED ? 'accepted'
     : row.state === states.TASK_REVIEW_STATE_RETURNED ? 'returned' : undefined;
-  if (revision > 0 && state) v.reviews.set(key, { revision, state });
+  if (revision > 0 && state) {
+    const decidedAtMs = num(row.decidedAtMs);
+    v.reviews.set(key, { revision, state, ...(decidedAtMs > 0 && decidedAtMs <= 8.64e15 ? { decidedAtMs } : {}) });
+  }
 }
 
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean; parentTaskId?: string }

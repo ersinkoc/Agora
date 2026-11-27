@@ -76,3 +76,7 @@ columns and shows pending reports in Doing.
 On a Review-enabled shared board, agents can create subtasks (ADR-0126). A child card shows the parent task
 and stays in the column for its own status. The parent card counts accepted direct children out of all
 its direct children. An agent can take an open child whenever its task dependencies are done.
+
+The owner can open **Recently accepted** under **Shared tasks and files** to see up to 50 accepted reports across
+Review-enabled shared boards, newest decision first (ADR-0127). Each entry shows the task, project and acceptance time.
+Select an entry to open its board. Open windows update when an acceptance arrives, and the list is restored on reload.

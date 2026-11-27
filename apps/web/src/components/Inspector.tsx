@@ -12,7 +12,7 @@ import { requestShown, useAnswerGuard, type AnswerResult } from './useAnswerGuar
 import type { StartChoice } from './StartApproval';
 import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
-import { ProjectBoard } from './ProjectBoard';
+import { SharedBoards } from './SharedBoards';
 import { StateBadge } from './StateBadge';
 import { TeamChat } from './TeamChat';
 
@@ -141,8 +141,6 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   onPane?: (id: string) => void;
   pairing?: PairingUi;
 }) {
-  // Every machine that has a folder on a board: a name is followed by its id only when two of them share it.
-  const boardMachines = [...new Map(boards.flatMap((b) => b.folders).map((f) => [f.nodeId, { id: f.nodeId, name: f.machine }] as const)).values()];
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
   useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
@@ -173,7 +171,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
           {onPane && <button type="button" className="ide-iconbtn flex-none" onClick={() => onPane(a.id)} aria-label={t('pane-open-beside-named', { name: visible(a.shared ? a.workspace : a.name) })} title={t('pane-open-changes')}><Icon name="splitRight" /></button>}
         </li>)}
       </ul>)}
-    {tab === 'board' && <div className="grid gap-2">{boards.map(b => <ProjectBoard key={b.projectId} board={b} machines={boardMachines} />)}</div>}
+    {tab === 'board' && boards.length > 0 && <SharedBoards boards={boards} />}
     {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <TeamChat messages={messages} fleet={fleet} now={now} />)}
     {tab === 'usage' && <UsagePanel fleet={fleet} now={now} />}
     {tab === 'board' && boards.length === 0 && <EmptyState icon="board" title={t('empty-board-title')} hint={t('empty-board-hint')} />}
