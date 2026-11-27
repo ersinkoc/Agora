@@ -150,7 +150,7 @@ regex = '^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] '
 `[process] names` (ADR-0094) are the program names this kind runs as, the executable's file name the system reports for a process
 (`claude`, `claude.exe`): at most 8, each 1 to 64 bytes with no `/`, `\\`, space, control or hidden character, and not `.` or `..`
 (`process.names` otherwise). When a person starts one by hand in a plain terminal (a `shell` agent), the node sees it as that
-terminal's foreground program (its foreground process group, looked at every 2 s while the terminal is watched or not idle; never its
+terminal's foreground program (its foreground process group, looked at every 2 s while the terminal is watched, not idle or running something, every 10 s otherwise; never its
 screen, its arguments or its path) and reads the terminal with this kind's screen rules until it ends; the shell stays a shell (same
 id, kind, ledger entry and resume) and the mark grants nothing (skip-permissions rules apply only to agents started as a kind). Linux
 reports at most 15 characters of a name, the one the program was started by; macOS reports the executable file's name, so a program

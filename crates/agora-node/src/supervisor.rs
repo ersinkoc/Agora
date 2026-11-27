@@ -1336,6 +1336,10 @@ struct AdapterEntry {
 
 /// ADR-0094: how often a plain terminal's foreground program is looked at.
 const FOREGROUND_EVERY: Duration = Duration::from_secs(2);
+/// ADR-0094: how often a plain terminal nobody watches and that is idle is looked at, so the list still learns of an agent started in it
+/// without a window open (typed by `agora agent prompt`, the mesh, or in a tab in the background). One `tcgetpgrp` and one short read of
+/// the process's name on Unix; on Windows the snapshot is shared by every terminal of the tick.
+const FOREGROUND_IDLE_EVERY: Duration = Duration::from_secs(10);
 
 struct Entry {
     agent: Agent,
@@ -4283,14 +4287,20 @@ impl Supervisor {
             return;
         }
 
-        // ADR-0094: what a person runs by hand in a plain terminal. Looked at every few seconds while someone watches it or it is not
-        // idle, from the terminal's foreground process group (never its screen). A program a manifest names marks the terminal as
-        // running that kind, whose screen rules then read it; when the program ends the mark ends and so does what its rules said.
-        if entry.agent.kind == crate::manifests::SHELL_KIND
-            && now >= entry.next_look
-            && (entry.visible || entry.agent.state() != AgentState::Idle || entry.inside.is_some())
-        {
-            entry.next_look = now + FOREGROUND_EVERY;
+        // ADR-0094: what a person runs by hand in a plain terminal, from the terminal's foreground process group (never its screen).
+        // Every few seconds while someone watches it, it is not idle or something runs inside; otherwise less often, never not at all,
+        // so an agent started in a terminal nobody looks at is still listed as itself (the macOS check of 0.3.41). A program a manifest
+        // names marks the terminal as running that kind, whose screen rules then read it; when the program ends the mark ends and so does
+        // what its rules said.
+        if entry.agent.kind == crate::manifests::SHELL_KIND && now >= entry.next_look {
+            let lively =
+                entry.visible || entry.agent.state() != AgentState::Idle || entry.inside.is_some();
+            entry.next_look = now
+                + if lively {
+                    FOREGROUND_EVERY
+                } else {
+                    FOREGROUND_IDLE_EVERY
+                };
             let front = entry
                 .terminal
                 .as_ref()

@@ -20,6 +20,10 @@ listed; `docs/ux/main-window.md`).
 The registry's names (the second open question, 2026-11-27): rather than the converter writing them (its golden outputs are never
 edited), the node takes a kind's ACP program as its name when the kind lists none and that program is a plain file name of its own
 (`docs/specs/agent-manifest.md`).
+After the live checks of 0.3.41 (2026-11-27): an idle terminal nobody watches is looked at every 10 s instead of not at all, so an agent
+started in it without a window open (by `agora agent prompt`, the mesh, a tab in the background) is still listed as itself (the open
+question's "only terminals that are visible or not idle" proved too narrow; the cost is one `tcgetpgrp` and one short read per terminal
+every 10 s, and on Windows the shared snapshot).
 Step 3 (2026-11-27): the Windows lookup, measured first and built per Amendment A (`agora-platform`'s `winproc.rs`). Every step is built.
 
 Builds on ADR-0004 (agents are data), ADR-0079 (the terminal holder), ADR-0091 (plan limits) and the invariant "detection never reads the

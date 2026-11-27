@@ -734,3 +734,56 @@ fn a_program_started_by_hand_in_a_plain_terminal_is_read_with_its_kinds_rules() 
     sup.stop(&id).unwrap();
     let _ = std::fs::remove_dir_all(&e.dir);
 }
+
+/// ADR-0094 (the macOS check of 0.3.41): a plain terminal nobody watches and that is idle is still looked at, less often, so an agent
+/// started in it without a window open (typed by `agora agent prompt`, the mesh, a tab in the background) is listed as itself.
+#[test]
+fn an_agent_started_in_an_idle_terminal_nobody_watches_is_still_found() {
+    if std::env::consts::FAMILY != "unix" || !sh_on_path() {
+        return;
+    }
+    let e = env("inside-unwatched");
+    let bin = e.dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let named = bin.join("probeagent");
+    std::fs::copy(fake_agent(), &named).unwrap();
+    let slow = e.dir.join("slow.toml");
+    std::fs::write(
+        &slow,
+        "name = \"slow\"\n[[frame]]\ntext = \"Fake Agent\\n\\n> \"\ndelay_ms = 30000\n",
+    )
+    .unwrap();
+    let mut sup = supervisor(RestartPolicy::default());
+    let mut fake = manifest(&fake_launch(), None);
+    fake.process.names = vec!["probeagent".into()];
+    sup.register(fake);
+    sup.register(
+        Manifest::parse(
+            "kind = \"shell\"\ndisplay_name = \"Shell\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"sh\", \"-i\"]\n",
+        )
+        .unwrap(),
+    );
+    let mut req = request(&e, "plain");
+    req.kind = "shell".into();
+    let id = sup.start(&req, Instant::now()).unwrap();
+    // Nobody watches it, and it is idle.
+    sup.set_visible(&id, false);
+    sup.report_state(&id, AgentState::Idle).unwrap();
+    sup.tick(Instant::now());
+    sup.terminal(&id)
+        .unwrap()
+        .send_input(format!("{} --script {}\n", named.display(), slow.display()).into_bytes())
+        .unwrap();
+    let end = Instant::now() + Duration::from_secs(25);
+    while sup.runs_inside(&id).is_none() {
+        assert!(
+            Instant::now() < end,
+            "an idle terminal nobody watches was never looked at"
+        );
+        sup.tick(Instant::now());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(sup.runs_inside(&id).as_deref(), Some("fake"));
+    sup.stop(&id).unwrap();
+    let _ = std::fs::remove_dir_all(&e.dir);
+}
