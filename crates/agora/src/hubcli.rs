@@ -24,10 +24,7 @@ pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 /// What a node offers that this hub does not agree on yet, so it refuses every command that needs it. Each one names the step that
 /// takes it out of here and adds it to `HUB_CAPABILITIES`.
 #[cfg(test)]
-const NOT_YET_ON_THE_HUB: &[&str] = &[
-    // ADR-0088 step 3: the hub relays preview forwards and their connections.
-    "preview.v1",
-];
+const NOT_YET_ON_THE_HUB: &[&str] = &[];
 
 /// What this hub agrees on with a node that offers it. Every capability a node offers
 /// (`agora_node::uplink_client::CAPABILITIES`) must be here, or the hub refuses each command that needs it (ADR-0053's
@@ -86,6 +83,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     // ADR-0122: keeps the owner's shared skills and MCP servers and hands a node the newest signed word (a node offers it once its
     // side is built).
     agora_protocol::handshake::SHARE_ITEMS,
+    // ADR-0088 Amendment A: the hub routes a window's signed `PreviewOpen`, `PreviewClose` and `PreviewList`, and carries the forward's
+    // connections itself (its own `PreviewConnect`; a window's stays refused).
+    "preview.v1",
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.

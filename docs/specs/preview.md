@@ -88,6 +88,10 @@ it would hand the window that trust; that is why those ports are refused even fo
   forward is still the person's and not revoked, so a sign-out, "sign out everywhere", a password change, the person's removal and a
   device's revocation end it, whichever process made the change. A forward that ends and a token past its 8 hours end it too; live
   connections, WebSockets included, are checked at every revocation in the hub and every 30 s.
+- **The window's page** may frame previews: its policy has `frame-src 'self' https://<the host it was reached by>:*`.
+- **Who is told.** `PreviewChanged` goes to the person whose device opened the forward (to the owner for one opened on the node's
+  control socket); `PreviewSuggested` to the owner, until a wider rule is decided (point 7 also names the person who started the
+  agent; not yet).
 - **On the node's link** the bytes ride a hub-originated `PreviewConnect` under the node's credit, and the hub writes preview frames
   only while no command waits for that node.
 

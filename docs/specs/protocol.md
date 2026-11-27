@@ -994,7 +994,10 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
 
 `schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design. A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`,
 records `PreviewChanged`, and relays `PreviewConnect` on its control socket and through its hub link (build step 2,
-`crates/agora-node/src/preview.rs`, `preview_relay.rs`, `uplink_client.rs`); no hub relays one yet.
+`crates/agora-node/src/preview.rs`, `preview_relay.rs`, `uplink_client.rs`); the hub (step 3, ADR-0088 Amendment A) offers
+`preview.v1`, routes a window's `PreviewOpen`, `PreviewClose` and `PreviewList`, and opens the connections itself from its preview
+origins (`docs/specs/preview.md`, "The hub's part"); a window's own `PreviewConnect` stays refused. `PreviewChanged` goes to the person
+whose device opened the forward (one opened on the node's control socket, to the owner) and `PreviewSuggested` to the owner.
 All additions; nothing published changed. Capability `preview.v1`: the node offers it in its `Hello` (from 0.3.42); the hub relay
 (step 3) adds it to the hub's list, and a hub never sends a preview command to a node that did
 not offer it. **Older peers refuse, they do not drop:** until then every peer answers `protocol.capability_missing`. The hub answers

@@ -111,8 +111,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - A local client that reads its control connection slowly still holds that connection's other streams while a preview send waits; the
   hub link avoids it with a local connection per preview connection.
 - **Hub step 3, left:** the audit row `preview.enter` names the person, the machine and the outcome but not the forward and its port
-  (the audit table has no column for them; a store migration); `PreviewChanged` and `PreviewSuggested` still reach nobody (point 7's
-  scope, with the window's Browser pane, step 4); the hub does not offer `preview.v1` to windows yet (step 4); a benchmark of a
+  (the audit table has no column for them; a store migration); `PreviewSuggested` reaches the owner but not yet the person who started
+  the agent (point 7); a benchmark of a
   terminal's keystroke round trip through the hub while a preview carries a large transfer, before the release that turns it on.
 - The default budgets are "no limit" for the rate and the forward's total (only the chunk, the window and the connection caps hold):
   choose real defaults once previews run against real dev servers.

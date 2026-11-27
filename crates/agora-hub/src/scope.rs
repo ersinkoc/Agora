@@ -345,8 +345,10 @@ impl Scope {
             }
             Body::GitStatusChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
             Body::FilesChanged(e) => self.granted(self.worktrees.get(&q(&e.worktree_id))),
-            // ADR-0088 (schema only): who may see a preview event is decided with the hub step; until then nobody is sent one.
-            Body::PreviewSuggested(_) | Body::PreviewChanged(_) => false,
+            // ADR-0088 Amendment A point 7: a member sees the forwards their own device opened (the connection checks the creator);
+            // a suggestion goes to the owner only.
+            Body::PreviewChanged(_) => true,
+            Body::PreviewSuggested(_) => false,
             Body::AgentStarted(e) => {
                 let p = pq(node, &e.project_id);
                 self.agents.insert(q(&e.agent_id), p.clone());

@@ -739,7 +739,25 @@ where
             } else {
                 Page::App
             };
-            respond_as(&mut stream, 200, a.content_type, &a.body, head_only, page).await?
+            // ADR-0088 Amendment A: the window's page may frame previews, each on a port of this same host.
+            let host = header("host").unwrap_or_default();
+            match (page, preview_frames(&host)) {
+                (Page::App, Some(src)) if a.content_type.starts_with("text/html") => {
+                    let csp =
+                        format!("{APP_CSP_HEAD} frame-src 'self' {src}; frame-ancestors 'none'");
+                    respond_with(
+                        &mut stream,
+                        200,
+                        a.content_type,
+                        &a.body,
+                        head_only,
+                        "DENY",
+                        &csp,
+                    )
+                    .await?
+                }
+                _ => respond_as(&mut stream, 200, a.content_type, &a.body, head_only, page).await?,
+            }
         }
         None => respond(&mut stream, 404, "text/plain", b"not found", head_only).await?,
     }
@@ -753,6 +771,24 @@ pub const PLUGIN_FRAME_PATH: &str = "/plugin-frame.html";
 /// refuses to be framed (`X-Frame-Options: DENY`, `frame-ancestors 'none'`).
 const APP_CSP: &str = "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; \
                        frame-src 'self'; frame-ancestors 'none'";
+/// [`APP_CSP`] up to its frame sources, for the window's page that frames previews.
+const APP_CSP_HEAD: &str =
+    "default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:;";
+
+/// The frame source for previews on the host the window was reached by (`https://<host>:*`: each preview is a port of the hub's own,
+/// ADR-0088 Amendment A); `None` for a host name with anything a policy could read as more than a host.
+fn preview_frames(host: &str) -> Option<String> {
+    let name = match host.rfind(']') {
+        Some(end) => &host[..=end],
+        None => host.rsplit_once(':').map_or(host, |(n, _)| n),
+    };
+    let ok = !name.is_empty()
+        && name.len() <= 253
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'[' | b']' | b':'));
+    ok.then(|| format!("https://{name}:*"))
+}
 
 /// The plugin frame page's own policy: opaque even when opened on its own (`sandbox allow-scripts`), the window's loader and the
 /// blobs it makes inside the frame, no connection to anywhere (WebSocket included; WebRTC too where the engine enforces `webrtc`,
@@ -780,6 +816,28 @@ async fn respond<S: AsyncWrite + Unpin>(
     head_only: bool,
 ) -> io::Result<()> {
     respond_as(stream, status, content_type, body, head_only, Page::App).await
+}
+
+async fn respond_with<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+    frame_options: &str,
+    csp: &str,
+) -> io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
+         X-Content-Type-Options: nosniff\r\nX-Frame-Options: {frame_options}\r\nReferrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: {csp}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    if !head_only {
+        stream.write_all(body).await?;
+    }
+    stream.shutdown().await
 }
 
 async fn respond_as<S: AsyncWrite + Unpin>(
@@ -947,6 +1005,10 @@ mod tests {
     const APP_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n\
         Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
         img-src 'self' data:; frame-src 'self'; frame-ancestors 'none'\r\nCache-Control: no-cache\r\n";
+    // The window's HTML page reached as `Host: h`: the same, and it may frame previews on that host's other ports (ADR-0088 Amendment A).
+    const APP_PAGE_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\n\
+        Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; \
+        img-src 'self' data:; frame-src 'self' https://h:*; frame-ancestors 'none'\r\nCache-Control: no-cache\r\n";
     // The plugin frame page's headers, exactly: opaque even on its own, no network, framed only by the hub's own pages.
     const FRAME_HEADERS: &str = "X-Content-Type-Options: nosniff\r\nX-Frame-Options: SAMEORIGIN\r\nReferrer-Policy: no-referrer\r\n\
         Content-Security-Policy: sandbox allow-scripts; default-src 'none'; script-src 'self' blob:; \
@@ -992,7 +1054,10 @@ mod tests {
             "/missing.js",
         ] {
             let out = get(path, &a).await;
-            assert!(out.contains(APP_HEADERS), "{path}: {out}");
+            assert!(
+                out.contains(APP_HEADERS) || out.contains(APP_PAGE_HEADERS),
+                "{path}: {out}"
+            );
             assert!(!out.contains("SAMEORIGIN"), "{path}");
         }
         // Without a frame page among the files, the path is a 404 with the window's headers.
@@ -1025,7 +1090,7 @@ mod tests {
         let mut out = String::new();
         c.read_to_string(&mut out).await.unwrap();
         assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
-        assert!(out.contains(APP_HEADERS), "{out}");
+        assert!(out.contains(APP_PAGE_HEADERS), "{out}");
         assert!(out.ends_with("hello"));
         assert!(task.await.unwrap().unwrap());
 
@@ -1856,5 +1921,28 @@ mod tests {
         let (out, _) = ask(&EndSessions, "127.0.0.1", other.to_string()).await;
         assert!(out.starts_with("HTTP/1.1 401"), "{out}");
         println!("FIX VERIFIED: F439 Bearer is case-insensitive without accepting other schemes");
+    }
+
+    #[test]
+    fn the_window_may_frame_previews_on_its_own_host_only() {
+        assert_eq!(
+            preview_frames("hub.example:7443").as_deref(),
+            Some("https://hub.example:*")
+        );
+        assert_eq!(
+            preview_frames("hub.example").as_deref(),
+            Some("https://hub.example:*")
+        );
+        assert_eq!(
+            preview_frames("[::1]:7443").as_deref(),
+            Some("https://[::1]:*")
+        );
+        assert_eq!(
+            preview_frames("10.0.0.2:7443").as_deref(),
+            Some("https://10.0.0.2:*")
+        );
+        assert_eq!(preview_frames("evil; script-src *"), None);
+        assert_eq!(preview_frames("a b:1"), None);
+        assert_eq!(preview_frames(""), None);
     }
 }

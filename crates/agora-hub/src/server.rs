@@ -1188,7 +1188,7 @@ where
     }
     drop(snapshot);
     for d in &subscription.backlog {
-        send_shown(&mut conn, hub, d, owner).await?;
+        send_shown(&mut conn, hub, d, owner, &current.user).await?;
     }
     let mut checked = tokio::time::Instant::now();
     let (relays, mut relay_frames) = hub.router().client();
@@ -1227,7 +1227,7 @@ where
             match subscription.live.try_recv() {
                 Ok(d) => {
                     if scope.as_mut().is_none_or(|s| s.admit(&d.event)) {
-                        send_shown(&mut conn, hub, &d, owner).await?;
+                        send_shown(&mut conn, hub, &d, owner, &current.user).await?;
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -1835,10 +1835,14 @@ async fn send_shown<S>(
     hub: &Hub,
     d: &crate::hub::Delivered,
     owner: bool,
+    user: &str,
 ) -> Result<(), ServeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if !preview_visible(hub, &d.event, owner, user) {
+        return Ok(());
+    }
     if !owner
         && matches!(
             d.event.body,
@@ -1856,6 +1860,30 @@ where
     match shown {
         Some(event) => send_positioned(conn, &crate::hub::Delivered { pos: d.pos, event }).await,
         None => send_positioned(conn, d).await,
+    }
+}
+
+/// ADR-0088 Amendment A point 7: a forward's opening and end go to the person whose device opened it (one opened on the node's
+/// control socket, to the owner); a suggestion ("my app is on port N") to the owner, until a wider rule is decided.
+fn preview_visible(hub: &Hub, event: &v1::Event, owner: bool, user: &str) -> bool {
+    match &event.body {
+        Some(v1::event::Body::PreviewChanged(c)) => {
+            let creator = c.forward.as_ref().map_or("", |f| f.creator.as_str());
+            if creator.is_empty() || creator == "owner" {
+                return owner;
+            }
+            let Ok(conn) = hub.store().lock() else {
+                return false;
+            };
+            conn.query_row(
+                "SELECT 1 FROM user_devices WHERE device_id = ?1 AND user_id = ?2",
+                [creator, user],
+                |_| Ok(()),
+            )
+            .is_ok()
+        }
+        Some(v1::event::Body::PreviewSuggested(_)) => owner,
+        _ => true,
     }
 }
 

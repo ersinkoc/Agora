@@ -151,4 +151,7 @@ the head parser (bounded, rejects malformed heads, never reads bodies).
    offering `preview.v1` to windows, and a benchmark under preview load before it is turned on in a release. Decided 2026-11-27 (the maintainer): only the person who opened a forward may
    connect to it through the hub; the per-forward origin follows the accepted open question (a separate hub port where possible,
    otherwise refuse and say why).
-4. Web Browser pane: not started.
+4. Web Browser pane: started (2026-11-27). The hub side of it: `preview.v1` in the hub's capabilities (a window's signed
+   `PreviewOpen`, `PreviewClose` and `PreviewList` are routed; the hub's own connections reach a node that offers it), point 7's
+   scope (`server.rs` `preview_visible`: `PreviewChanged` to the opener's person, `PreviewSuggested` to the owner), and the window
+   page's `frame-src` for the preview origins. The pane itself is next.
