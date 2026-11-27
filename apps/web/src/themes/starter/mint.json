@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Mint",
+  "light": {
+    "tokens": {
+      "surface-0": "#f2f9f6",
+      "surface-1": "#ffffff",
+      "surface-2": "#e4f2ec",
+      "border": "#cfe3da",
+      "text": "#17251f",
+      "text-muted": "#4f645b",
+      "accent": "#047857",
+      "on-accent": "#ffffff",
+      "state-working": "#175fb5",
+      "state-needs-you": "#945000",
+      "state-finished": "#146c36",
+      "state-idle": "#4f645b",
+      "state-unknown": "#5d6f67"
+    }
+  }
+}

@@ -1,7 +1,7 @@
-//! Starter themes (roadmap M5.2; `docs/ux/themes.md`, "Starter themes"): well-known palettes ported as theme files of format 2. They
+//! Starter themes (roadmap M5.2; `docs/ux/themes.md`, "Starter themes"): project-original and well-known palettes as theme files of format 2. They
 //! are the web window's own files (`apps/web/src/themes/starter/`, compiled in), read by the same reader as a file in the themes
-//! folder ([`read_text`]), so a starter theme is accepted or refused alike in both clients. Only the palettes' published colour values
-//! are in them; their licences are in `THIRD_PARTY.md`.
+//! folder ([`read_text`]), so a starter theme is accepted or refused alike in both clients. Third-party themes contain only their
+//! palettes' published colour values; their licences are in `THIRD_PARTY.md`.
 
 use super::file::{read_text, Read};
 use super::{Scheme, Theme};
@@ -16,12 +16,36 @@ pub struct StarterFile {
 }
 
 /// The files, in the web's order (`apps/web/src/themes/starter.ts` `STARTER_FILES`).
-pub const FILES: [StarterFile; 5] = [
+pub const FILES: [StarterFile; 14] = [
+    StarterFile {
+        id: "arctic",
+        project: "Arctic",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/arctic.json"),
+    },
+    StarterFile {
+        id: "aurora",
+        project: "Aurora",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/aurora.json"),
+    },
+    StarterFile {
+        id: "blossom",
+        project: "Blossom",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/blossom.json"),
+    },
     StarterFile {
         id: "catppuccin-mocha",
         project: "Catppuccin",
         licence: "MIT",
         text: include_str!("../../../../apps/web/src/themes/starter/catppuccin-mocha.json"),
+    },
+    StarterFile {
+        id: "cobalt",
+        project: "Cobalt",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/cobalt.json"),
     },
     StarterFile {
         id: "dracula",
@@ -30,16 +54,46 @@ pub const FILES: [StarterFile; 5] = [
         text: include_str!("../../../../apps/web/src/themes/starter/dracula.json"),
     },
     StarterFile {
+        id: "ember",
+        project: "Ember",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/ember.json"),
+    },
+    StarterFile {
         id: "gruvbox",
         project: "Gruvbox",
         licence: "MIT",
         text: include_str!("../../../../apps/web/src/themes/starter/gruvbox.json"),
     },
     StarterFile {
+        id: "lavender",
+        project: "Lavender",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/lavender.json"),
+    },
+    StarterFile {
+        id: "lilac",
+        project: "Lilac",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/lilac.json"),
+    },
+    StarterFile {
+        id: "mint",
+        project: "Mint",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/mint.json"),
+    },
+    StarterFile {
         id: "rose-pine",
         project: "Rosé Pine",
         licence: "MIT",
         text: include_str!("../../../../apps/web/src/themes/starter/rose-pine.json"),
+    },
+    StarterFile {
+        id: "sepia",
+        project: "Sepia",
+        licence: "Apache-2.0",
+        text: include_str!("../../../../apps/web/src/themes/starter/sepia.json"),
     },
     StarterFile {
         id: "tokyo-night",

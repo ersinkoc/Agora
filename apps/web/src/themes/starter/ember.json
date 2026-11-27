@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Ember",
+  "dark": {
+    "tokens": {
+      "surface-0": "#160e0b",
+      "surface-1": "#201410",
+      "surface-2": "#2d1d17",
+      "border": "#493128",
+      "text": "#fff4ec",
+      "text-muted": "#c9aa98",
+      "accent": "#ffb86c",
+      "on-accent": "#241008",
+      "state-working": "#80c7ff",
+      "state-needs-you": "#f7c66b",
+      "state-finished": "#7dde8a",
+      "state-idle": "#b39c90",
+      "state-unknown": "#aa9185"
+    }
+  }
+}

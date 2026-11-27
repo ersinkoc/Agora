@@ -36,6 +36,7 @@ describe('the starter theme files', () => {
       expect(r.ok && r.warnings, f.id).toBeFalsy();
     }
     expect(STARTER).toHaveLength(STARTER_FILES.length);
+    expect(BUILT_IN.length + STARTER.length).toBeGreaterThanOrEqual(20);
   });
 
   it('are format 2, name their palette, set only colours, and read back the same when exported', () => {
@@ -60,12 +61,14 @@ describe('the starter theme files', () => {
     }
   });
 
-  it('carry their licence notice in THIRD_PARTY.md', () => {
+  it('carry third-party licence notices, while original palettes use the project licence', () => {
     const notice = read('../../THIRD_PARTY.md');
     for (const f of STARTER_FILES) {
+      if (f.source.licence === 'Apache-2.0' && !['tokyo-night'].includes(f.id)) continue;
       expect(notice, f.id).toContain(f.source.project);
       expect(notice, f.id).toContain(f.source.licence);
     }
+    expect(STARTER_FILES.filter((f) => !['catppuccin-mocha', 'dracula', 'gruvbox', 'rose-pine', 'tokyo-night'].includes(f.id)).every((f) => f.source.licence === 'Apache-2.0')).toBe(true);
     expect(notice).toContain('apps/web/src/themes/starter/');
   });
 });
@@ -108,11 +111,11 @@ describe('the picker', () => {
       {
         "dark": [
           "Built-in: Dark, High contrast, Large text, Slate",
-          "Starter themes: Catppuccin Mocha, Dracula, Gruvbox, Rosé Pine, Tokyo Night",
+          "Starter themes: Aurora, Catppuccin Mocha, Cobalt, Dracula, Ember, Gruvbox, Lavender, Rosé Pine, Tokyo Night",
         ],
         "light": [
           "Built-in: Light, Sand",
-          "Starter themes: Gruvbox",
+          "Starter themes: Arctic, Blossom, Gruvbox, Lilac, Mint, Sepia",
         ],
       }
     `);

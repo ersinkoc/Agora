@@ -1,0 +1,1 @@
+- Choose from 20 shipped themes in both the web window and terminal client, including five new light palettes and four new dark palettes; the web and desktop title bar now opens a visual theme gallery with live mini previews.

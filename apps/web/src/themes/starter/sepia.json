@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Sepia",
+  "light": {
+    "tokens": {
+      "surface-0": "#f7f1e6",
+      "surface-1": "#fffaf0",
+      "surface-2": "#eee3d0",
+      "border": "#ddcfb9",
+      "text": "#2b2117",
+      "text-muted": "#665747",
+      "accent": "#92400e",
+      "on-accent": "#ffffff",
+      "state-working": "#175b9c",
+      "state-needs-you": "#8a4a00",
+      "state-finished": "#356a2d",
+      "state-idle": "#665747",
+      "state-unknown": "#716252"
+    }
+  }
+}

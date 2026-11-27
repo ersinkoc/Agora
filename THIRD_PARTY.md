@@ -11,9 +11,12 @@
 
 Rust dependencies are checked by `cargo deny` (`deny.toml` lists the licenses allowed in the dependency tree; the desktop shell has its own list in `apps/desktop/src-tauri/deny.toml`). JavaScript dependencies are pinned by `apps/web/package-lock.json` and are not license-checked by CI yet; ADR-0036 asks for the web client's third-party packages to be listed here, which is still to do. The project's own license is Apache-2.0 (`LICENSE`, ADR-0016); Apache-2.0 needs no `NOTICE` file, and this repository has none.
 
-**Starter themes** (`apps/web/src/themes/starter/`, `docs/ux/themes.md`) hold only colour values (hex) published by each palette's
-project, placed in Agora's own theme format; no theme file of those projects is copied. The licences above allow this with the notice
-kept: each project's copyright line is in the table, and the MIT licence text is:
+**Third-party starter themes** (`apps/web/src/themes/starter/`, `docs/ux/themes.md`) hold only colour values (hex) published by each
+palette's project, placed in Agora's own theme format; no theme file of those projects is copied. The licences above allow this with
+the notice kept: each project's copyright line is in the table, and the MIT licence text is:
+
+Arctic, Aurora, Blossom, Cobalt, Ember, Lavender, Lilac, Mint and Sepia are original palettes in this repository under the project's
+Apache-2.0 licence, not third-party material.
 
 > Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files
 > (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge,

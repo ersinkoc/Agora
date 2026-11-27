@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Cobalt",
+  "dark": {
+    "tokens": {
+      "surface-0": "#09111f",
+      "surface-1": "#0e192b",
+      "surface-2": "#17243a",
+      "border": "#2a3a55",
+      "text": "#edf4ff",
+      "text-muted": "#a7b5ca",
+      "accent": "#82aaff",
+      "on-accent": "#09111f",
+      "state-working": "#82aaff",
+      "state-needs-you": "#ffc777",
+      "state-finished": "#6ee7a8",
+      "state-idle": "#94a3b8",
+      "state-unknown": "#8796ac"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Aurora",
+  "dark": {
+    "tokens": {
+      "surface-0": "#081413",
+      "surface-1": "#0d1d1b",
+      "surface-2": "#142825",
+      "border": "#29413d",
+      "text": "#eefbf8",
+      "text-muted": "#a4bbb6",
+      "accent": "#5eead4",
+      "on-accent": "#06201c",
+      "state-working": "#7dd3fc",
+      "state-needs-you": "#fbbf24",
+      "state-finished": "#4ade80",
+      "state-idle": "#94a3a0",
+      "state-unknown": "#8ba09b"
+    }
+  }
+}

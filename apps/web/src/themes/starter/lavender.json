@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Lavender",
+  "dark": {
+    "tokens": {
+      "surface-0": "#100d19",
+      "surface-1": "#181322",
+      "surface-2": "#241d31",
+      "border": "#3c314c",
+      "text": "#f8f3ff",
+      "text-muted": "#b9abc9",
+      "accent": "#c4b5fd",
+      "on-accent": "#171020",
+      "state-working": "#93c5fd",
+      "state-needs-you": "#f9cc74",
+      "state-finished": "#86efac",
+      "state-idle": "#a99bb9",
+      "state-unknown": "#9c8fad"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Arctic",
+  "light": {
+    "tokens": {
+      "surface-0": "#f3f7fb",
+      "surface-1": "#ffffff",
+      "surface-2": "#e8f0f7",
+      "border": "#d5e0ea",
+      "text": "#17202b",
+      "text-muted": "#526171",
+      "accent": "#1d4ed8",
+      "on-accent": "#ffffff",
+      "state-working": "#175fb5",
+      "state-needs-you": "#985100",
+      "state-finished": "#146c36",
+      "state-idle": "#526171",
+      "state-unknown": "#5f6c7a"
+    }
+  }
+}

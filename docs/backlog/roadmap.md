@@ -198,8 +198,9 @@ frame with grants and safe mode (#1218, #1236, #1238), and its evidence audit (#
 - [ ] **M5.1 Theme import** (no schema): iTerm2, Alacritty, Ghostty, Windows Terminal and VS Code colour files mapped to format 2
   - [x] in the web window's editor: all five formats ([themes](../ux/themes.md#import-from-another-app))
   - [ ] as `agora theme import` (not built: the maintainer asked for the web window only)
-- [x] **M5.2 Starter themes**: well-known palettes ported after a licence check: Catppuccin Mocha, Dracula, Gruvbox (dark and light),
-  Rosé Pine and Tokyo Night, in both clients ([themes](../ux/themes.md#starter-themes)); Catppuccin Latte, Tokyo Night Day, Nord,
+- [x] **M5.2 Starter themes**: 20 shipped themes in both clients: six built-ins, nine project-original starter palettes and five
+  well-known palettes ported after a licence check—Catppuccin Mocha, Dracula, Gruvbox (dark and light), Rosé Pine and Tokyo Night
+  ([themes](../ux/themes.md#starter-themes)); Catppuccin Latte, Tokyo Night Day, Nord,
   Rosé Pine Dawn and Solarized were left out: with their own colours (and Agora's in the slots they have none for) they cannot pass
   the readability rules without a warning ([why, per variant](../ux/themes.md#starter-themes))
 - [ ] **M5.3 A colour per machine or project** (ADR-0113 amendment, **decision**): a frame colour that keeps a person from typing into the

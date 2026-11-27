@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Blossom",
+  "light": {
+    "tokens": {
+      "surface-0": "#fbf5f7",
+      "surface-1": "#ffffff",
+      "surface-2": "#f5e9ed",
+      "border": "#ead6dd",
+      "text": "#291c21",
+      "text-muted": "#665159",
+      "accent": "#9d174d",
+      "on-accent": "#ffffff",
+      "state-working": "#175fb5",
+      "state-needs-you": "#945000",
+      "state-finished": "#146c36",
+      "state-idle": "#665159",
+      "state-unknown": "#725f66"
+    }
+  }
+}

@@ -904,7 +904,7 @@ mod tests {
         let (lines, buf) = screen(&view(gruvbox, ColorMode::Full));
         let all = lines.join("\n");
         assert!(
-            all.contains("A starter theme: the colours of Gruvbox, ported (MIT licence)."),
+            all.contains("A starter theme. Palette: Gruvbox (MIT licence)."),
             "{all}"
         );
         assert_eq!(

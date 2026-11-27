@@ -1,5 +1,5 @@
-// Screenshots for the starter themes (roadmap M5.2, docs/ux/themes.md "Starter themes"): the theme picker with its "Starter themes"
-// group in both schemes, and every starter theme applied to the window (Gruvbox in dark and light, the others in dark), from the
+// Screenshots for the starter themes (roadmap M5.2, docs/ux/themes.md "Starter themes"): the visual chooser and editor picker in
+// both schemes, and every starter theme applied to the window, from the
 // built web app's demo window (`#/demo`, no hub). Needs a built web app and playwright-core with a Chromium:
 //   cd apps/web && npm run build
 //   PW_DIR=<dir with node_modules/playwright-core> node scripts/screenshots-starter-themes.mjs [dist] [outdir]
@@ -59,10 +59,21 @@ for (const scheme of ['dark', 'light']) {
   await shot(page, `starter-themes-picker-${scheme}`);
   await ctx.close();
 }
-// Every starter theme on the window: Gruvbox in both schemes (one file), the others in dark (the only scheme they have).
+// The title bar's visual chooser: the same modal is used by the browser and the desktop shell.
+for (const scheme of ['dark', 'light']) {
+  const { page, ctx } = await open(scheme, async (p) => {
+    await p.getByRole('banner').getByRole('button', { name: 'Choose theme' }).click();
+  });
+  await shot(page, `theme-chooser-${scheme}`);
+  await ctx.close();
+}
+// Every starter theme on the window, in every scheme its file has.
 for (const [name, scheme, file] of [
-  ['Gruvbox', 'dark', 'gruvbox'], ['Gruvbox', 'light', 'gruvbox'], ['Catppuccin Mocha', 'dark', 'catppuccin-mocha'], ['Dracula', 'dark', 'dracula'],
-  ['Rosé Pine', 'dark', 'rose-pine'], ['Tokyo Night', 'dark', 'tokyo-night'],
+  ['Arctic', 'light', 'arctic'], ['Aurora', 'dark', 'aurora'], ['Blossom', 'light', 'blossom'],
+  ['Catppuccin Mocha', 'dark', 'catppuccin-mocha'], ['Cobalt', 'dark', 'cobalt'], ['Dracula', 'dark', 'dracula'],
+  ['Ember', 'dark', 'ember'], ['Gruvbox', 'dark', 'gruvbox'], ['Gruvbox', 'light', 'gruvbox'],
+  ['Lavender', 'dark', 'lavender'], ['Lilac', 'light', 'lilac'], ['Mint', 'light', 'mint'],
+  ['Rosé Pine', 'dark', 'rose-pine'], ['Sepia', 'light', 'sepia'], ['Tokyo Night', 'dark', 'tokyo-night'],
 ]) {
   const { page, ctx } = await open(scheme, pick(name));
   await shot(page, `starter-theme-${file}-${scheme}`);

@@ -1,0 +1,21 @@
+{
+  "agora-theme": 2,
+  "name": "Lilac",
+  "light": {
+    "tokens": {
+      "surface-0": "#f8f5fc",
+      "surface-1": "#ffffff",
+      "surface-2": "#eee8f5",
+      "border": "#ded4e9",
+      "text": "#241b2d",
+      "text-muted": "#605269",
+      "accent": "#6d28d9",
+      "on-accent": "#ffffff",
+      "state-working": "#175fb5",
+      "state-needs-you": "#945000",
+      "state-finished": "#146c36",
+      "state-idle": "#605269",
+      "state-unknown": "#6d5e76"
+    }
+  }
+}
