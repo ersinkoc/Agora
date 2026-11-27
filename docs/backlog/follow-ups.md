@@ -8,6 +8,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **Shared MCP servers for Codex and WrongStack** (ADR-0122 step 3b): Codex takes MCP servers only as `-c mcp_servers.NAME...` overrides,
+  which would put a filled secret on its command line (readable by other processes of the machine); find a way that keeps secrets off
+  the command line (its config file under a node-owned `CODEX_HOME` overlay, or an env var it reads) and check it on a real version
+  before its manifest gets a `shared_flag`. WrongStack's `--mcp-config` has not been checked for a second file either.
 - **`agora node trust --from-hub` outside a terminal** (the maintainer, 2026-11-27, through Claude Code's `!`): it lists the devices and
   their fingerprints, then stops with "not an interactive terminal". Print the ready command for the listed devices
   (`--yes --fingerprint A --fingerprint B`) under the list, so the person compares and runs it in one step.

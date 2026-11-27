@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 /// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084). 5: `[quota]` (ADR-0091).
 /// 6: `[structured] allow_always` (ADR-0101).
-pub const ENGINE_VERSION: u32 = 6;
+pub const ENGINE_VERSION: u32 = 7;
 
 /// Longest stable agent-kind id. Kinds are ASCII, so this is both bytes and characters.
 pub const MAX_KIND_BYTES: usize = 64;
@@ -294,6 +294,11 @@ pub struct McpSpec {
     /// `env`: variables set for the agent.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// ADR-0122 (engine 7): arguments that give the agent the owner's shared MCP servers too, appended only when it gets any. The
+    /// node writes them to a file of its own, outside the worktree and readable by its user only (they may hold secrets), named by
+    /// `{shared_config_file}`. A kind without it is given no shared MCP server.
+    #[serde(default)]
+    pub shared_flag: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -1152,12 +1157,12 @@ mod launch_tests {
 
     #[test]
     fn a_manifest_newer_than_this_engine_is_refused() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 7");
+        let src = with(SKIP).replace("min_engine = 2", "min_engine = 8");
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 7,
-                supported: 6
+                required: 8,
+                supported: ENGINE_VERSION
             })
         ));
     }

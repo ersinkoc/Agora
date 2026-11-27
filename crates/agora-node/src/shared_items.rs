@@ -175,6 +175,38 @@ pub struct SharedItems {
     from_link: Arc<Mutex<Vec<FromLink>>>,
     /// Facts to record (`ShareItemRefused`), taken by the daemon's loop.
     out: Mutex<Vec<Body>>,
+    /// ADR-0122 step 3b: what each running agent was given at its launch (`AgentStarted.shared_items`).
+    given: Mutex<BTreeMap<String, Vec<v1::SharedItemRef>>>,
+}
+
+/// `{secret:NAME}` in `value` filled from `secret`; the name of the first secret that is missing, as the error.
+pub fn fill_secrets(
+    value: &str,
+    secret: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(at) = rest.find("{secret:") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + "{secret:".len()..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[at..]);
+            return Ok(out);
+        };
+        let name = &after[..end];
+        let plain = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        match secret(name).filter(|_| plain) {
+            Some(v) => out.push_str(&v),
+            None => return Err(name.chars().take(64).collect()),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 impl SharedItems {
@@ -216,6 +248,7 @@ impl SharedItems {
             link: Mutex::new(None),
             from_link: Arc::new(Mutex::new(Vec::new())),
             out: Mutex::new(Vec::new()),
+            given: Mutex::new(BTreeMap::new()),
         };
         let kept: Vec<ShareItemSigned> = std::fs::read_dir(&me.dir)
             .into_iter()
@@ -270,6 +303,102 @@ impl SharedItems {
             .take(agora_protocol::share::MAX_PER_AGENT)
             .cloned()
             .collect()
+    }
+
+    /// ADR-0122 step 3b: the shared MCP servers an agent of `kind` in `project` gets at its launch, judged again first with today's
+    /// trust and policy, their `{secret:NAME}` filled from this node's own store (`secret`). A server whose secret is missing here is
+    /// not given and is said once (`share.secret_missing`). What was given is kept for the agent's `AgentStarted`.
+    pub fn servers_for(
+        &self,
+        agent: &str,
+        project: &str,
+        kind: &str,
+        secret: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<agora_adapters::inject::SharedServer> {
+        self.rejudge();
+        let mut servers = Vec::new();
+        let mut given = Vec::new();
+        for w in self.for_launch(project, kind) {
+            let Some(m) = w.item.as_ref().and_then(|i| i.mcp.clone()) else {
+                continue;
+            };
+            let fill = |v: &[v1::ShareValue]| -> Result<Vec<(String, String)>, String> {
+                v.iter()
+                    .map(|x| Ok((x.name.clone(), fill_secrets(&x.value, secret)?)))
+                    .collect()
+            };
+            let filled = fill(&m.env).and_then(|env| {
+                let headers = fill(&m.headers)?;
+                let args = m
+                    .args
+                    .iter()
+                    .map(|a| fill_secrets(a, secret))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((env, headers, args))
+            });
+            match filled {
+                Ok((env, headers, args)) => {
+                    given.push(v1::SharedItemRef {
+                        name: w.name.clone(),
+                        item_hash: w.item_hash.clone(),
+                    });
+                    servers.push(agora_adapters::inject::SharedServer {
+                        name: w.name.clone(),
+                        command: m.command.clone(),
+                        args,
+                        env,
+                        url: m.url.clone(),
+                        headers,
+                    });
+                }
+                Err(missing) => {
+                    let mut st = self.st();
+                    if st
+                        .refused
+                        .insert((w.name.clone(), format!("{}#secret", w.item_hash)))
+                    {
+                        self.out.lock().unwrap_or_else(|e| e.into_inner()).push(
+                            Body::ShareItemRefused(v1::ShareItemRefused {
+                                node_id: self.node_id.clone(),
+                                name: w.name.clone(),
+                                item_hash: w.item_hash.clone(),
+                                code: "share.secret_missing".to_string(),
+                                reason: missing,
+                            }),
+                        );
+                    }
+                }
+            }
+        }
+        self.given
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent.to_string(), given);
+        servers
+    }
+
+    /// What `agent` was given at its launch (`AgentStarted.shared_items`); nothing for an agent started without shared items.
+    pub fn given(&self, agent: &str) -> Vec<v1::SharedItemRef> {
+        self.given
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The file of the shared servers an agent was given (outside its worktree, readable by this user only).
+    pub fn agent_file(&self, agent: &str) -> PathBuf {
+        self.dir.join("agents").join(format!("{agent}.json"))
+    }
+
+    /// The agent ended: its file of shared servers (it may hold secrets) is removed, and what it was given forgotten.
+    pub fn agent_ended(&self, agent: &str) {
+        let _ = std::fs::remove_file(self.agent_file(agent));
+        self.given
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(agent);
     }
 
     /// Facts to record since the last call.
@@ -755,6 +884,73 @@ mod tests {
         );
         let program = word("db", Some(item("db", "npx", "")), 10, ShareScope::default());
         assert_eq!(judge(&program, None, &no_urls, trusted), Ok(()));
+    }
+
+    #[test]
+    fn secrets_are_filled_from_this_nodes_store_and_a_missing_one_is_named() {
+        let store = |n: &str| (n == "DB_URL").then(|| "postgres://db".to_string());
+        assert_eq!(fill_secrets("plain", &store), Ok("plain".into()));
+        assert_eq!(
+            fill_secrets("{secret:DB_URL}?ssl=1", &store),
+            Ok("postgres://db?ssl=1".into())
+        );
+        assert_eq!(
+            fill_secrets("Bearer {secret:TOKEN}", &store),
+            Err("TOKEN".into())
+        );
+        assert_eq!(
+            fill_secrets("{secret:../x}", &store),
+            Err("../x".into()),
+            "not a plain name"
+        );
+        assert_eq!(
+            fill_secrets("{secret:open", &store),
+            Ok("{secret:open".into()),
+            "an unclosed brace is text"
+        );
+    }
+
+    /// At launch an agent gets the servers in its scope with their secrets filled; one whose secret is missing here is left out and
+    /// said once; what it got is kept for its start, and forgotten when it ends.
+    #[test]
+    fn a_launch_gets_its_servers_with_secrets_and_a_missing_secret_leaves_one_out() {
+        let d = temp("launch");
+        let s = open(&d, SharePolicy::default());
+        let mut db = item("db", "npx", "");
+        db.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+            name: "DB_URL".into(),
+            value: "{secret:DB_URL}".into(),
+        }];
+        let mut docs = item("docs", "", "https://mcp.example.com");
+        docs.mcp.as_mut().unwrap().headers = vec![v1::ShareValue {
+            name: "Authorization".into(),
+            value: "Bearer {secret:DOCS}".into(),
+        }];
+        s.take(word("db", Some(db), 1, ShareScope::default()));
+        s.take(word("docs", Some(docs), 1, ShareScope::default()));
+        let store = |n: &str| (n == "DB_URL").then(|| "postgres://db".to_string());
+        let got = s.servers_for("agent-1", "p", "claude-code", &store);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].env,
+            [("DB_URL".to_string(), "postgres://db".to_string())]
+        );
+        assert_eq!(
+            s.given("agent-1")
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["db"]
+        );
+        s.servers_for("agent-2", "p", "claude-code", &store);
+        let said = s.take_events();
+        assert!(
+            matches!(&said[..], [Body::ShareItemRefused(r)] if r.code == "share.secret_missing" && r.reason == "DOCS"),
+            "once: {said:?}"
+        );
+        s.agent_ended("agent-1");
+        assert!(s.given("agent-1").is_empty());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The hub can only narrow: a name it stops listing is dropped here.

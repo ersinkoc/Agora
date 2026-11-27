@@ -92,6 +92,10 @@ format = "json"                         # only json for now
 #                                              # flags carry the whole server and no file is needed)
 # Placeholders: {worktree} {socket} {mcp_command} {config_file} and the quoted-TOML forms {socket_toml} {mcp_command_toml}
 # (for agents that take `-c key=value` overrides, such as Codex).
+# shared_flag = ["--mcp-config", "{shared_config_file}"]   # ADR-0122 (min_engine 7): how the agent takes a second JSON file with the
+#                                              # owner's shared MCP servers, appended only when it gets any; the node writes that
+#                                              # file outside the worktree, readable by its user only (it may hold secrets), and
+#                                              # removes it when the agent ends. A kind without it gets no shared MCP server.
 # [mcp.env]                                  # env: variables set for the agent
 # AGORA_MCP_SOCKET = "{socket}"
 

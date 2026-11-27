@@ -109,6 +109,43 @@ fn json_config(ep: &Endpoint) -> String {
     serde_json::to_string_pretty(&cfg).unwrap_or_default()
 }
 
+/// ADR-0122: one shared MCP server as the node gives it to an agent, its secrets already filled from the node's own store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedServer {
+    pub name: String,
+    /// A program (`command`, `args`, `env`) or a remote server (`url`, `headers`).
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// The JSON file of the shared MCP servers (`{ "mcpServers": { name: ... } }`): a program as `command`, `args`, `env`; a remote server
+/// as `type: "http"`, `url`, `headers`. A name that would replace the node's own mesh server is left out.
+pub fn shared_json(servers: &[SharedServer]) -> String {
+    let mut map = serde_json::Map::new();
+    for s in servers.iter().filter(|s| s.name != "agora-mesh") {
+        let pairs = |v: &[(String, String)]| -> serde_json::Map<String, serde_json::Value> {
+            v.iter().map(|(k, x)| (k.clone(), json!(x))).collect()
+        };
+        let entry = if s.url.is_empty() {
+            json!({"command": s.command, "args": s.args, "env": pairs(&s.env)})
+        } else {
+            json!({"type": "http", "url": s.url, "headers": pairs(&s.headers)})
+        };
+        map.insert(s.name.clone(), entry);
+    }
+    serde_json::to_string_pretty(&json!({ "mcpServers": map })).unwrap_or_default()
+}
+
+/// The arguments that give an agent the shared servers' file (`[mcp] shared_flag` with `{shared_config_file}`); empty when the kind
+/// declares none.
+pub fn shared_args(spec: &McpSpec, file: &Path) -> Result<Vec<String>, InjectError> {
+    let vars = [("shared_config_file", file.to_string_lossy().into_owned())];
+    spec.shared_flag.iter().map(|a| expand(a, &vars)).collect()
+}
+
 /// `s` as a TOML basic string, quotes included.
 fn toml_string(s: &str) -> String {
     let mut out = String::from("\"");
@@ -192,6 +229,54 @@ mod tests {
             "kind = \"x\"\ndisplay_name = \"X\"\nversion = \"1\"\nmin_engine = 1\n[process]\nlaunch = [\"x\"]\n[mcp]\n{toml}"
         );
         Manifest::parse(&src).unwrap().mcp.unwrap()
+    }
+
+    /// ADR-0122: the shared servers' file names each server as the agent reads it, never replaces the mesh server, and its flag
+    /// names the file.
+    #[test]
+    fn shared_servers_are_written_as_the_agent_reads_them() {
+        let servers = vec![
+            SharedServer {
+                name: "db".into(),
+                command: "npx".into(),
+                args: vec!["-y".into(), "db-mcp".into()],
+                env: vec![("DB_URL".into(), "postgres://x".into())],
+                url: String::new(),
+                headers: Vec::new(),
+            },
+            SharedServer {
+                name: "docs".into(),
+                command: String::new(),
+                args: Vec::new(),
+                env: Vec::new(),
+                url: "https://mcp.example.com".into(),
+                headers: vec![("Authorization".into(), "Bearer t".into())],
+            },
+            SharedServer {
+                name: "agora-mesh".into(),
+                command: "evil".into(),
+                args: Vec::new(),
+                env: Vec::new(),
+                url: String::new(),
+                headers: Vec::new(),
+            },
+        ];
+        let v: serde_json::Value = serde_json::from_str(&shared_json(&servers)).unwrap();
+        assert_eq!(v["mcpServers"]["db"]["command"], "npx");
+        assert_eq!(v["mcpServers"]["db"]["env"]["DB_URL"], "postgres://x");
+        assert_eq!(v["mcpServers"]["docs"]["type"], "http");
+        assert_eq!(
+            v["mcpServers"]["docs"]["headers"]["Authorization"],
+            "Bearer t"
+        );
+        assert!(v["mcpServers"].get("agora-mesh").is_none());
+        let s = spec("method = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{config_file}\"]\nshared_flag = [\"--mcp-config\", \"{shared_config_file}\"]\n");
+        assert_eq!(
+            shared_args(&s, Path::new("/data/s/agent-1.json")).unwrap(),
+            ["--mcp-config", "/data/s/agent-1.json"]
+        );
+        let none = spec("method = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{config_file}\"]\n");
+        assert!(shared_args(&none, Path::new("/x")).unwrap().is_empty());
     }
 
     #[test]

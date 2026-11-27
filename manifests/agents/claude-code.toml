@@ -3,7 +3,7 @@ display_name = "Claude Code"
 # ADR-0123: who serves its models.
 provider = "anthropic"
 version = "2026.11.27.1"
-min_engine = 4
+min_engine = 7
 # ADR-0057: before Enter, the box between its two rules must hold the typed prompt (and only it), with the mode footer and no dialog.
 input_box = '^─{20,}\n❯[^\S\n]?((?s:.*?))\n─{20,}$'
 
@@ -47,6 +47,9 @@ method = "cli_flag"
 path = ".agora-mcp.json"
 format = "json"
 flag = ["--mcp-config", "{config_file}"]
+# ADR-0122: the owner's shared MCP servers, in a second file the node keeps outside the worktree (checked with `claude --help` on
+# Claude Code 2.1.332: `--mcp-config <configs...>` "Load MCP servers from JSON files or strings", and the option can be given again).
+shared_flag = ["--mcp-config", "{shared_config_file}"]
 
 [resume]
 argv = ["claude", "--resume", "{session_id}"]

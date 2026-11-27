@@ -93,6 +93,13 @@ pub struct Launching {
 /// to start it without one (the mesh is an addition; an agent never fails to start because of it).
 pub type LaunchHook = Box<dyn Fn(&Launching) -> Option<agora_adapters::inject::Endpoint> + Send>;
 
+/// ADR-0122 step 3b: the owner's shared MCP servers an agent gets at its launch `(agent, project, kind)`, and the file (outside its
+/// worktree, readable by this user only) the node writes them to.
+pub type SharedHook = Box<
+    dyn Fn(&AgentId, &str, &str) -> Option<(PathBuf, Vec<agora_adapters::inject::SharedServer>)>
+        + Send,
+>;
+
 /// Undoes the launch hook for an agent whose start then failed (its mesh endpoint would otherwise stay registered).
 pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
 
@@ -1389,6 +1396,7 @@ pub struct Supervisor {
     ended_usage: Vec<AgentId>,
     next_id: u64,
     hook: Option<LaunchHook>,
+    shared_hook: Option<SharedHook>,
     abort_hook: Option<AbortHook>,
     run_hook: Option<RunHook>,
     sandbox: crate::sandbox::SandboxPolicy,
@@ -1421,6 +1429,7 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn new(cfg: SupervisorConfig) -> Self {
         Self {
+            shared_hook: None,
             cfg,
             kinds: BTreeMap::new(),
             agents: BTreeMap::new(),
@@ -2096,6 +2105,11 @@ impl Supervisor {
         } else {
             self.notify_run(id, "", None);
         }
+    }
+
+    /// ADR-0122: where an agent's shared MCP servers come from (only a kind whose manifest says `[mcp] shared_flag` gets them).
+    pub fn set_shared_hook(&mut self, hook: SharedHook) {
+        self.shared_hook = Some(hook);
     }
 
     pub fn set_launch_hook(&mut self, hook: LaunchHook) {
@@ -2836,14 +2850,39 @@ impl Supervisor {
         }
         // #896: the mesh bridge the agent is told to run is the node's own executable, which may sit in a folder only the user may
         // open (on Windows `%LOCALAPPDATA%\Programs\Agora`). A confined agent may read and run that one file, nothing beside it.
-        let read = private_config
+        let mut read: Vec<PathBuf> = private_config
             .map(Path::to_path_buf)
             .into_iter()
             .chain(std::iter::once(endpoint.command.clone()))
             .collect();
+        let mut argv = plan.argv_extra;
+        // ADR-0122 step 3b: the owner's shared MCP servers, in a file of the node's own outside the worktree (they may hold secrets),
+        // only for a kind that says how it takes a second file.
+        if !spec.shared_flag.is_empty() {
+            if let Some((file, servers)) =
+                self.shared_hook.as_ref().and_then(|h| h(id, project, kind))
+            {
+                if !servers.is_empty() {
+                    if let Some(dir) = file.parent() {
+                        std::fs::create_dir_all(dir)
+                            .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+                    }
+                    agora_platform::write_private(
+                        &file,
+                        agora_adapters::inject::shared_json(&servers).as_bytes(),
+                    )
+                    .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
+                    argv.extend(
+                        agora_adapters::inject::shared_args(&spec, &file)
+                            .map_err(|e| SupervisorError::Spawn(format!("mcp injection: {e}")))?,
+                    );
+                    read.push(file);
+                }
+            }
+        }
         Ok(Extras {
             read,
-            argv: plan.argv_extra,
+            argv,
             env: plan.env,
             identity,
             socket,

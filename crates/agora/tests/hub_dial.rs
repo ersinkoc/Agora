@@ -4830,7 +4830,7 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
 /// the item, for the owner).
 #[test]
 fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
-    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
         return;
     }
     use agora_node::uplink_client::MeshOut;
@@ -4894,7 +4894,39 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
     let dir = tmp("shared-items");
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    let manifests = dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    // ADR-0122 step 3b: a kind that takes a second MCP file (`shared_flag`), whose process says what it was started with.
+    let mut fake = std::path::PathBuf::from(env!("CARGO_BIN_EXE_agora"));
+    fake.pop();
+    fake.push(format!("agora-fake-agent{}", std::env::consts::EXE_SUFFIX));
+    static FRESH: std::sync::Once = std::sync::Once::new();
+    FRESH.call_once(|| {
+        assert!(std::process::Command::new(
+            std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
+        )
+        .args(["build", "-q", "-p", "agora-fake-agent"])
+        .status()
+        .unwrap()
+        .success());
+    });
+    let launch = serde_json::to_string(&vec![
+        fake.to_string_lossy().into_owned(),
+        "--probe-directory".into(),
+        dir.join("probe-{pid}.json").to_string_lossy().into_owned(),
+    ])
+    .unwrap();
+    std::fs::write(
+        manifests.join("probe.toml"),
+        format!("kind = \"probe\"\ndisplay_name = \"Probe\"\nversion = \"1\"\nmin_engine = 7\n[process]\nlaunch = {launch}\n[mcp]\nmethod = \"cli_flag\"\npath = \".mcp.json\"\nflag = [\"--mcp-config\", \"{{config_file}}\"]\nshared_flag = [\"--mcp-config\", \"{{shared_config_file}}\"]\n"),
+    )
+    .unwrap();
+    let repo = dir.join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "x").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
     agora_node::approvals::trust_device(
         &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
         &trusted.id,
@@ -4907,8 +4939,8 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
         socket: dir.join("c.sock"),
         data_dir: data,
         worktree_root: dir.join("wt"),
-        manifests_dir: dir.join("manifests"),
-        projects: vec![],
+        manifests_dir: manifests,
+        projects: vec![repo],
         limits: Default::default(),
     };
     let node = agora_node::daemon::Node::start(&cfg).unwrap();
@@ -4940,5 +4972,90 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
                         r.code == "approval.signature_invalid" && r.item_hash == refused_hash
                     })
             })
+    });
+    // An agent of the kind gets the item as a second MCP file, outside its worktree and readable by this user only, and its start says
+    // so; the file goes with the agent.
+    let mut local = agora_node::control::Client::connect(&cfg.socket).unwrap();
+    let started = local
+        .call(v1::command_request::Command::AgentStart(v1::AgentStart {
+            kind: "probe".into(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    let Some(v1::command_ok::Result::AgentStart(a)) = started.result else {
+        panic!("not started");
+    };
+    let shared_file = node.shared.agent_file(&a.agent_id);
+    wait("the agent to say what it was started with", || {
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("probe-"))
+    });
+    let probe = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("probe-"))
+        .unwrap();
+    let said: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(probe.path()).unwrap()).unwrap();
+    let args: Vec<String> = said["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        args.iter().any(|x| x == &shared_file.to_string_lossy()),
+        "{args:?}"
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&shared_file).unwrap()).unwrap();
+    assert_eq!(written["mcpServers"]["db-tools"]["command"], "npx");
+    assert!(
+        written["mcpServers"].get("other-tools").is_none(),
+        "never the refused one"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&shared_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    assert!(
+        !shared_file.starts_with(dir.join("wt")),
+        "outside the worktree"
+    );
+    let given = node
+        .events
+        .events_after(0)
+        .into_iter()
+        .find_map(|e| match e.body {
+            Some(v1::event::Body::AgentStarted(s)) if s.agent_id == a.agent_id => {
+                Some(s.shared_items)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        given.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+        ["db-tools"]
+    );
+    local
+        .call(v1::command_request::Command::AgentStop(v1::AgentStop {
+            agent_id: a.agent_id.clone(),
+            ..Default::default()
+        }))
+        .unwrap()
+        .unwrap();
+    wait("its file of shared servers to go with it", || {
+        !shared_file.exists()
     });
 }

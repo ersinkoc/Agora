@@ -181,6 +181,8 @@ pub struct EventSink {
     set_aside: Option<SetAside>,
     /// ADR-0060: learns from every event recorded (see [`crate::ledger::Ledger::observe`]). Never held with another lock.
     ledger: std::sync::OnceLock<Arc<crate::ledger::Ledger>>,
+    /// ADR-0122: the shared items each agent was given at its launch (`AgentStarted.shared_items`). Set once.
+    shared: std::sync::OnceLock<Arc<crate::shared_items::SharedItems>>,
     /// Usage reports gathered before they are logged ([`crate::usage_merge`]). Never held with `log`.
     usage: Mutex<crate::usage_merge::UsageMerge>,
     /// #1147 (audit of #1157): the node's secret values, replaced in the agent's own words an event carries (see `redact_body`).
@@ -458,6 +460,7 @@ impl EventSink {
             last_online: AtomicU64::new(0),
             set_aside,
             ledger: std::sync::OnceLock::new(),
+            shared: std::sync::OnceLock::new(),
             usage: Mutex::new(crate::usage_merge::UsageMerge::default()),
             secrets: std::sync::OnceLock::new(),
             trusted: Mutex::new(None),
@@ -526,6 +529,19 @@ impl EventSink {
     /// ADR-0060: the session ledger that learns from what this sink records. Set once; a second call is ignored.
     pub fn set_ledger(&self, ledger: Arc<crate::ledger::Ledger>) {
         let _ = self.ledger.set(ledger);
+    }
+
+    /// ADR-0122: where an agent's `AgentStarted.shared_items` come from. Set once; a second call is ignored.
+    pub fn set_shared(&self, shared: Arc<crate::shared_items::SharedItems>) {
+        let _ = self.shared.set(shared);
+    }
+
+    /// The shared items `agent` was given at its launch.
+    fn shared_given(&self, agent: &str) -> Vec<v1::SharedItemRef> {
+        self.shared
+            .get()
+            .map(|s| s.given(agent))
+            .unwrap_or_default()
     }
 
     /// The log this sink found at open and set aside because its events name another producer, if it did.
@@ -699,7 +715,7 @@ impl EventSink {
             .map(|e| (e.parent_node_id, e.parent_node_agent_id))
             .unwrap_or_default();
         record(Body::AgentStarted(v1::AgentStarted {
-            shared_items: Vec::new(),
+            shared_items: self.shared_given(agent),
             launch_settings: settings_of(&view.launch_settings),
             run_id: view.run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.into(),
@@ -896,7 +912,7 @@ impl EventSink {
         remote: Option<&RemoteParent>,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
-            shared_items: Vec::new(),
+            shared_items: self.shared_given(agent.as_str()),
             launch_settings: settings_of(&launch.settings),
             run_id: run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.as_str().to_string(),
@@ -918,6 +934,16 @@ impl EventSink {
     /// Publish lifecycle and reported events using the supervisor's current process/session facts.
     pub fn supervisor_events(&self, events: &[SupervisorEvent], views: &[AgentView]) {
         for e in events {
+            // ADR-0122: an agent that ended, gave up or was stopped (by any path: the tick, a stop command) loses its file of shared
+            // servers, which may hold secrets.
+            if let SupervisorEvent::Exited { agent, .. }
+            | SupervisorEvent::GaveUp { agent, .. }
+            | SupervisorEvent::Stopped { agent } = e
+            {
+                if let Some(shared) = self.shared.get() {
+                    shared.agent_ended(agent.as_str());
+                }
+            }
             match e {
                 SupervisorEvent::Started { agent } | SupervisorEvent::Resumed { agent, .. } => {
                     if let Some(view) = views.iter().find(|v| v.id == *agent) {
@@ -2394,6 +2420,21 @@ impl Node {
             Arc::clone(&approvals),
             policy.share.clone(),
         ));
+        {
+            // ADR-0122 step 3b: each launch gets the shared MCP servers in its scope, judged again and with this node's own secrets.
+            let for_hook = Arc::clone(&shared);
+            let secrets = crate::credentials::SecretStore::in_data(&cfg.data_dir);
+            supervisor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_shared_hook(Box::new(move |id, project, kind| {
+                    let servers = for_hook.servers_for(id.as_str(), project, kind, &|n| {
+                        secrets.get(n).map(|s| s.expose().to_string())
+                    });
+                    Some((for_hook.agent_file(id.as_str()), servers))
+                }));
+            events.set_shared(Arc::clone(&shared));
+        }
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,
         // `<home>/link/panel-port`, home being the data folder's parent).
