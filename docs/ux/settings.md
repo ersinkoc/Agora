@@ -8,6 +8,12 @@
   then not installed, dashed), how each runs (terminal, chat, chat through an adapter) and the settings and options each takes (opening a
   card shows the values), read only: they are chosen when an agent starts, an option that skips permission questions is marked with the
   red bolt, labelled and never a default, and an offline machine shows what it reported last, marked older. Not built yet: installing from the list (ADR-0087), the "Add an agent" list (ADR-0092), saved defaults per agent.
+- **Shared with agents** (ADR-0122, owner only): MCP servers every agent gets at its start, on every machine that trusts the device
+  that published them. In the web window today: Settings → Shared with agents (`#/device/shared`) lists each server (its program or
+  address, every project or one) with what each machine refused, in words; **Add a server** and **Change** open a form (a program
+  with its arguments and environment, or an address with its headers) that this device signs; removing one is asked first. An address
+  warns that agents may send what they read there; a server that names a secret is kept but not given to agents yet. Not built yet:
+  skills, and limiting a server to some agent kinds.
 - **Projects:** default base branch, merge policy, approval policy, retention.
 - **Notifications:** per trigger and channel, quiet hours. In the web window today: This device → **Needs you** (a card, a banner or
   nothing extra, and system notifications) and This device → **Sounds** (off by default; a volume, each sound on or off, also while the

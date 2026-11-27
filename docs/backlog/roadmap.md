@@ -54,7 +54,8 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
 - [ ] **M8.4 Shared skills and MCP servers through the hub** (ADR-0122 Accepted 2026-11-27): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
-  cannot widen it); secrets stay on the node (ADR-0084)
+  cannot widen it); secrets stay on the node (ADR-0084). Built: the hub's store, the node's verification and launch-time injection for
+  Claude Code, and Settings → Shared with agents for MCP servers; left: skills per kind, secrets through the node's launcher
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
   hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
   Recovery (the maintainer, 2026-11-27): a whole-machine power loss (hub, node, supervisors, holder and agents killed at once) brings

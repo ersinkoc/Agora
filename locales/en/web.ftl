@@ -2097,6 +2097,71 @@ password-state-set = Set
 password-state-unset = Not set
 settings-machines-desc = Every machine connected to your Agora, and whether it trusts this browser.
 settings-machines-online = { $online } of { $total } online
+settings-shared = Shared with agents
+shared-desc = MCP servers your agents get when they start, on every machine that trusts this device. Signed by this device.
+shared-add = Add a server
+shared-count = { $count ->
+    [one] { $count } server
+   *[other] { $count } servers
+}
+shared-loading = Loading what is shared…
+shared-load-failed = The hub did not answer. Try again once the connection is back.
+shared-empty = Nothing is shared yet. A server you add here is given to agents at their next start.
+shared-empty-no-device = Nothing is shared yet. Sharing needs a browser with a device key; open Settings in your own browser.
+shared-kind-skill = Skill
+shared-scope-all = Every project
+shared-no-refusals = No machine refused it
+shared-refused-count = { $count ->
+    [one] Refused on { $count } machine
+   *[other] Refused on { $count } machines
+}
+shared-refused-on = { $machine }: { $reason }
+shared-refused-secret-needs-launcher = needs a secret: not given to agents yet
+shared-refused-secret = does not hold the secret { $secret }
+shared-refused-policy-off = this machine does not take shared servers
+shared-refused-command-not-allowed = this machine does not allow that program
+shared-refused-url-not-allowed = this machine does not allow servers at an address
+shared-refused-signer-untrusted = this machine does not trust the device that published it
+shared-refused-older = a newer version reached it first
+shared-refused-invalid = this machine could not read it
+shared-refused-other = refused
+shared-change = Change
+shared-remove-named = Remove { $name }
+shared-remove-title = Stop sharing { $name }?
+shared-remove-body = Agents that start from now on do not get it. Agents already running keep it until they stop.
+shared-remove-keep = Keep it
+shared-remove-confirm = Stop sharing
+shared-form = Share an MCP server
+shared-name = Name
+shared-runs = Runs as
+shared-runs-program = A program
+shared-runs-address = An address
+shared-command = Program
+shared-args = Arguments
+shared-args-hint = One per line
+shared-env = Environment
+shared-url = Address
+shared-headers = Headers
+shared-scope = For
+shared-url-warning-title = Agents may send your code there
+shared-url-warning = An agent can send what it reads in your projects to this address. Share only a server you trust with that.
+shared-secret-title = Not given to agents yet
+shared-secret = A server that names a secret is kept, but machines do not give it to agents until they can fill secrets in themselves.
+shared-publish = Sign and share
+shared-publish-change = Sign and share the change
+shared-cancel = Cancel
+shared-check-name = A name uses lowercase letters, digits and dashes, up to 64.
+shared-check-command = Say which program runs the server.
+shared-check-env = Write each environment line as NAME=value, each name once.
+shared-check-args-secret = A secret cannot be an argument: anyone on the machine can read a program's arguments. Put it in the environment.
+shared-check-url = An address starts with https:// and has no spaces.
+shared-check-headers = Write each header line as Name: value, each name once.
+shared-error-device = The hub did not accept this device's signature. Check that this browser is one of your devices (This device, above).
+shared-error-older = A newer change to this name was shared meanwhile. Reload the page and try again.
+shared-error-limit = Up to 64 items can be shared. Remove one first.
+shared-error-invalid = The hub refused it as written. Check the name, the program and the values.
+shared-error-owner = Only the owner shares servers with agents.
+shared-error-other = It did not go through. Try again in a moment.
 agents-desc = What each machine can start. Choices are made when you start an agent; open a card to see what it takes.
 agents-machine = Machine
 agents-runs-short-terminal = Terminal

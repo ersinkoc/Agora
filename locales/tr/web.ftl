@@ -1991,6 +1991,71 @@ password-state-set = Ayarlı
 password-state-unset = Ayarlı değil
 settings-machines-desc = Agora'nıza bağlı her makine ve bu tarayıcıya güvenip güvenmediği.
 settings-machines-online = { $online } / { $total } çevrimiçi
+settings-shared = Ajanlarla paylaşılanlar
+shared-desc = Ajanlarınızın başlarken aldığı MCP sunucuları; bu cihaza güvenen her makinede. Bu cihaz imzalar.
+shared-add = Sunucu ekle
+shared-count = { $count ->
+    [one] { $count } sunucu
+   *[other] { $count } sunucu
+}
+shared-loading = Paylaşılanlar yükleniyor…
+shared-load-failed = Hub yanıt vermedi. Bağlantı geri gelince yeniden deneyin.
+shared-empty = Henüz bir şey paylaşılmadı. Buraya eklediğiniz sunucu ajanlara bir sonraki başlangıçlarında verilir.
+shared-empty-no-device = Henüz bir şey paylaşılmadı. Paylaşmak için cihaz anahtarı olan bir tarayıcı gerekir; Ayarlar'ı kendi tarayıcınızda açın.
+shared-kind-skill = Beceri
+shared-scope-all = Her proje
+shared-no-refusals = Hiçbir makine reddetmedi
+shared-refused-count = { $count ->
+    [one] { $count } makinede reddedildi
+   *[other] { $count } makinede reddedildi
+}
+shared-refused-on = { $machine }: { $reason }
+shared-refused-secret-needs-launcher = bir gizli değer gerekiyor: ajanlara henüz verilmiyor
+shared-refused-secret = { $secret } gizli değeri bu makinede yok
+shared-refused-policy-off = bu makine paylaşılan sunucuları almıyor
+shared-refused-command-not-allowed = bu makine o programa izin vermiyor
+shared-refused-url-not-allowed = bu makine adresteki sunuculara izin vermiyor
+shared-refused-signer-untrusted = bu makine onu yayınlayan cihaza güvenmiyor
+shared-refused-older = daha yeni bir sürüm önce ulaştı
+shared-refused-invalid = bu makine onu okuyamadı
+shared-refused-other = reddedildi
+shared-change = Değiştir
+shared-remove-named = { $name } kaldır
+shared-remove-title = { $name } paylaşımı durdurulsun mu?
+shared-remove-body = Bundan sonra başlayan ajanlar onu almaz. Çalışan ajanlar durana kadar onu korur.
+shared-remove-keep = Kalsın
+shared-remove-confirm = Paylaşımı durdur
+shared-form = Bir MCP sunucusu paylaş
+shared-name = Ad
+shared-runs = Çalışma biçimi
+shared-runs-program = Bir program
+shared-runs-address = Bir adres
+shared-command = Program
+shared-args = Argümanlar
+shared-args-hint = Her satıra bir tane
+shared-env = Ortam
+shared-url = Adres
+shared-headers = Başlıklar
+shared-scope = Kapsam
+shared-url-warning-title = Ajanlar kodunuzu oraya gönderebilir
+shared-url-warning = Bir ajan projelerinizde okuduklarını bu adrese gönderebilir. Yalnızca buna güvendiğiniz bir sunucuyu paylaşın.
+shared-secret-title = Ajanlara henüz verilmiyor
+shared-secret = Gizli değer adlandıran bir sunucu saklanır, ama makineler gizli değerleri kendileri dolduramadıkça onu ajanlara vermez.
+shared-publish = İmzala ve paylaş
+shared-publish-change = Değişikliği imzala ve paylaş
+shared-cancel = Vazgeç
+shared-check-name = Ad küçük harf, rakam ve tire kullanır; en fazla 64.
+shared-check-command = Sunucuyu hangi programın çalıştırdığını yazın.
+shared-check-env = Her ortam satırını AD=değer olarak yazın, her ad bir kez.
+shared-check-args-secret = Gizli değer argüman olamaz: makinedeki herkes bir programın argümanlarını okuyabilir. Ortama koyun.
+shared-check-url = Adres https:// ile başlar ve boşluk içermez.
+shared-check-headers = Her başlık satırını Ad: değer olarak yazın, her ad bir kez.
+shared-error-device = Hub bu cihazın imzasını kabul etmedi. Bu tarayıcının cihazlarınızdan biri olduğunu kontrol edin (yukarıda, Bu cihaz).
+shared-error-older = Bu ada daha yeni bir değişiklik bu arada paylaşıldı. Sayfayı yenileyip yeniden deneyin.
+shared-error-limit = En fazla 64 öge paylaşılabilir. Önce birini kaldırın.
+shared-error-invalid = Hub bunu yazıldığı haliyle reddetti. Adı, programı ve değerleri kontrol edin.
+shared-error-owner = Sunucuları ajanlarla yalnızca sahip paylaşır.
+shared-error-other = Gerçekleşmedi. Biraz sonra yeniden deneyin.
 agents-desc = Her makinenin başlatabildikleri. Seçimler bir ajanı başlatırken yapılır; neler aldığını görmek için bir kartı açın.
 agents-machine = Makine
 agents-runs-short-terminal = Terminal

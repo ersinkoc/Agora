@@ -846,6 +846,7 @@
   .set-form__row + .set-form__row { @apply border-t border-line; }
   .set-form__label { font-weight: 550; }
   .set-form__row input { @apply w-full min-w-0 bg-surface-0 py-1.5; }
+  .set-form__row textarea { @apply w-full min-w-0 resize-y rounded-s border border-input-line bg-surface-0 px-3 py-1.5 font-mono text-input-ink; font-size: var(--text-caption); }
   .set-form__actions { @apply flex flex-wrap items-center gap-x-3 gap-y-1.5; }
   @container (max-width: 32rem) { .set-form__row { grid-template-columns: minmax(0, 1fr); } .set-form__row > span.set-form__label { @apply hidden; } }
   .set-card .kit-setting__control select { @apply bg-surface-0 py-1.5; }
@@ -862,6 +863,7 @@
   .set-item__end { @apply ms-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-2; }
   .set-item__end .kit-pill { @apply max-w-full overflow-hidden text-ellipsis; }
   .set-item__alert { @apply m-0 basis-full text-danger; font-size: var(--text-caption); }
+  .set-item__note { @apply m-0 basis-full text-muted; font-size: var(--text-caption); padding-inline-start: 2.75rem; }
   .set-os { @apply grid size-8 flex-none place-items-center rounded-s bg-surface-2 text-ink; }
   .set-fp { @apply font-mono tracking-wide; overflow-wrap: anywhere; }
   .set-dot { @apply inline-block size-1.5 flex-none rounded-full; background: currentColor; }

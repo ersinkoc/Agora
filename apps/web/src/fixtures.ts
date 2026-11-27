@@ -147,3 +147,28 @@ export const demoSettingsKinds = [
   { kind: 'registry-goose', name: 'goose', installed: false, level: 3, program: 'goose', settings: [], options: [] },
   { kind: 'registry-kiro', name: 'Kiro CLI', installed: false, level: 3, program: 'kiro-cli', settings: [], options: [] },
 ];
+
+// Settings → Shared on demo data (ADR-0122): a program whose environment names a secret (refused on every machine until the launcher
+// comes), a remote server, and one limited to a project that one machine does not allow. Nothing is signed or sent.
+export const demoSharedProjects = [{ projectId: 'login-fix', label: 'login-fix' }, { projectId: 'docs-site', label: 'docs-site' }];
+export function demoSharedSource(): import('./net/share').SharedSource {
+  let items: import('./net/share').SharedItem[] = [
+    { name: 'docs-search', kind: 'mcp_server', hash: 'a1', issuedMs: demoSettingsNow - 3_600_000, signer: 'web-10a3e055eea9e45f',
+      scope: { projectId: '', kinds: [] }, mcp: { command: 'npx', args: ['-y', 'docs-mcp'], env: [{ name: 'DOCS_TOKEN', value: '{secret:docs}' }], url: '', headers: [] },
+      refused: [{ node: 'blackview', code: 'share.refused', reason: 'secret_needs_launcher' }, { node: 'mac', code: 'share.refused', reason: 'secret_needs_launcher' }] },
+    { name: 'issues', kind: 'mcp_server', hash: 'b2', issuedMs: demoSettingsNow - 86_400_000, signer: 'web-10a3e055eea9e45f',
+      scope: { projectId: '', kinds: [] }, mcp: { command: '', args: [], env: [], url: 'https://mcp.example.com/issues', headers: [] }, refused: [] },
+    { name: 'pg-schema', kind: 'mcp_server', hash: 'c3', issuedMs: demoSettingsNow - 7_200_000, signer: 'web-10a3e055eea9e45f',
+      scope: { projectId: 'login-fix', kinds: [] }, mcp: { command: 'uvx', args: ['pg-schema-mcp'], env: [], url: '', headers: [] },
+      refused: [{ node: 'win', code: 'share.refused', reason: 'command_not_allowed' }] },
+  ];
+  return {
+    list: async () => items,
+    publish: async (item, scope) => {
+      items = [...items.filter((x) => x.name !== item.name), { name: item.name, kind: item.kind, hash: 'demo', issuedMs: Date.now(), signer: 'demo', scope, mcp: item.mcp, refused: [] }]
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return { ok: true };
+    },
+    remove: async (item) => { items = items.filter((x) => x.name !== item.name); return { ok: true }; },
+  };
+}

@@ -53,6 +53,7 @@ import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
 import { catalogAskFor, setCatalogSource } from './themes/catalog';
+import { sharedSourceFor } from './net/share';
 import { themeSync } from './themes/sync';
 import { usableId } from './components/launchChoice';
 import { launchSettingsField } from './components/launchSettingsModel';
@@ -409,6 +410,14 @@ export function App() {
   // ADR-0113 decision 6: the theme editor asks this hub for its community theme catalog once the window has the hub's first view (a
   // question sent before the link is open is refused), and the demo window has a sample one.
   const viewed = live !== undefined;
+  // ADR-0122: Settings → Shared, for the owner once the hub's first view came; this device signs each publish and removal.
+  const sharedSource = useMemo(() => (api && viewed && ownsMachines(role) && device
+    ? sharedSourceFor((body) => api.command('', body as CommandBody) as Promise<Record<string, unknown>>, device) : undefined), [api, viewed, role, device]);
+  const sharedProjects = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const p of live ? projectChoices(live) : []) if (!byId.has(p.projectId)) byId.set(p.projectId, (p.path ?? '').split(/[\\/]/).filter(Boolean).pop() ?? p.projectId);
+    return [...byId].map(([projectId, label]) => ({ projectId, label })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [live]);
   useEffect(() => { setCatalogSource(catalogAskFor(api, viewed, !!hub)); }, [api, viewed, hub]);
   // ADR-0113 step 4: the person's themes, packs and theme choice, read from this hub once the window has its first view and kept the same
   // on all their devices; read again whenever the window comes back into view (another device may have changed them).
@@ -744,7 +753,7 @@ export function App() {
       {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined} heldGrants={hub && api ? heldGrants : undefined} revokeHeld={hub && changes ? revokeHeld : undefined}
         pairing={pairing.ui} onStart={hub && api && live && changes ? (node) => { toWindow(); openStart(node); } : undefined} onNewTerminal={hub && api && live && changes ? (node) => { toWindow(); openStart(node, true); } : undefined} /> : hash === '#/audit' && hub ? <AuditPage load={(who) => loadAudit(hub.token, who)} onBack={() => go('#/')} /> : isSettingsHash(hash) ? <DevicePage section={settingsSectionOf(hash)} device={device} onBack={() => go('#/')} onTheme={editTheme} onAddPasskey={hub && passkeysSupported() ? (password) => addPasskey(hub.token, undefined, password) : undefined} passkeyNeedsPassword={info.passwordRequired}
           fingerprint={device ? prints.get(device.id) : undefined} machines={live ? machines(live) : undefined} trustedOn={trustedOn} others={hub ? others : undefined}
-          loadKinds={hub && api && live ? loadKinds : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}
+          loadKinds={hub && api && live ? loadKinds : undefined} shared={sharedSource ? { source: sharedSource, projects: sharedProjects, canSign: true } : undefined} asked={asked} onAsk={hub && api ? askApproval : undefined} onRemove={hub && api && changes ? removeDevice : undefined}
           security={hub ? <ScreenPasswordSettings passwordSet={info.passwordSet} idle={idle} onIdle={(m) => { setIdleMinutes(m); setIdle(m); }}
             onSet={async (password, current) => { const r = await setPassword(hub.token, password, current); void refreshInfo(); return r; }} /> : undefined} /> : hash === '#/theme' && phone ? <PhoneTheme onBack={() => go('#/')} />
         : phoneDetails ? <PhoneDetails tab={phoneDetails} agents={agents} boards={boardList} messages={live ? recentMessages(live) : []} onOpen={open} onBack={() => go('#/')} />

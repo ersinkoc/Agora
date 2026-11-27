@@ -51,7 +51,9 @@ import type { ApprovalModel, MachineModel, MessageModel } from './net/view';
 import type { Device } from './net/approval';
 import { deviceLabel } from './net/devices';
 import { AgentsSettings } from './components/AgentsSettings';
-import { demoSettingsDevices, demoSettingsKinds, demoSettingsMachines, demoSettingsNow, demoSettingsTrustedOn } from './fixtures';
+import { SharedSettings, type SharedProject } from './components/SharedSettings';
+import type { SharedSource } from './net/share';
+import { demoSettingsDevices, demoSettingsKinds, demoSettingsMachines, demoSettingsNow, demoSettingsTrustedOn, demoSharedProjects, demoSharedSource } from './fixtures';
 import { ScreenPasswordSettings } from './components/Locks';
 import type { IdleMinutes } from './net/idle';
 import { GALLERY_NOW as MACHINES_NOW, galleryMachineAgents, galleryMachines, galleryPairing, demoAgents, demoAlwaysApproval, demoAlwaysOnlyApproval, demoApprovals, demoAsksLess, demoHelper, demoSkipApproval, demoRemoteStartApproval, demoStartApproval, demoStartLongApproval, demoStartSettingsApproval, demoStartNoAskApproval } from './fixtures';
@@ -277,8 +279,9 @@ export function Gallery() {
 const demoSettingsDevice = { id: 'web-10a3e055eea9e45f', publicKeyHex: `04${'5be1c09a7d3f42e8'.repeat(8)}`, keys: undefined as unknown as CryptoKeyPair };
 export function SettingsDemo({ section, onBack }: { section?: string; onBack: () => void }) {
   const [idle, setIdle] = useState<IdleMinutes>(0);
+  const [shared] = useState(demoSharedSource);
   return (
-    <DevicePage base="#/gallery/settings" section={section} onBack={onBack} now={demoSettingsNow} device={demoSettingsDevice} fingerprint="91c2-9a46-6de1-76e1-6bcf-2d47"
+    <DevicePage base="#/gallery/settings" shared={{ source: shared, projects: demoSharedProjects, canSign: true }} section={section} onBack={onBack} now={demoSettingsNow} device={demoSettingsDevice} fingerprint="91c2-9a46-6de1-76e1-6bcf-2d47"
       machines={demoSettingsMachines} trustedOn={demoSettingsTrustedOn} others={demoSettingsDevices} onAsk={async () => true} onRemove={async () => true}
       onAddPasskey={async () => ({ ok: true })} loadKinds={async (node) => (node === 'mac' ? demoSettingsKinds.slice(0, 3) : demoSettingsKinds)}
       security={<ScreenPasswordSettings passwordSet={false} idle={idle} onIdle={setIdle} onSet={async () => ({ ok: true })} />} />
@@ -374,7 +377,7 @@ export interface MyDevice { id: string; name: string; fingerprint: string; lastU
 // password is set, so adding a passkey needs it (ADR-0067).
 // Every section is a settings card (an icon, a title, one line and its state, then setting rows); a side index on a wide screen, a row
 // of links above the content on a narrow one. Removing another device asks first, in a dialog whose safe answer comes first.
-export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds, now: fixedNow, base = '#/device' }: {
+export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, passkeyNeedsPassword = false, security, fingerprint, machines, trustedOn, others, asked, onAsk, onRemove, loadKinds, shared, now: fixedNow, base = '#/device' }: {
   device: Device | undefined;
   onBack: () => void;
   // Opens the theme editor in the window (ADR-0068).
@@ -395,6 +398,8 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
   onRemove?: (id: string) => Promise<boolean>;
   // What a machine can start (Settings → Agents); without it (no live hub) the section is not offered.
   loadKinds?: (node: string) => Promise<KindChoice[]>;
+  // Settings → Shared (ADR-0122), for the owner of a live hub; without it the section is not offered.
+  shared?: { source: SharedSource; projects: readonly SharedProject[]; canSign: boolean };
   // The moment dates are written against (the demo page fixes it, so its screenshots do not move); now by default.
   now?: number;
   // Where the section links point: #/device, or the demo page's own address.
@@ -425,6 +430,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
     { group: 'settings-group-machines', items: [
       { id: 'machines', label: 'settings-machines', icon: 'stack', show: true },
       { id: 'agents', label: 'settings-agents', icon: 'terminal', show: !!loadKinds },
+      { id: 'shared', label: 'settings-shared', icon: 'puzzle', show: !!shared },
     ] },
   ];
   // A deep link (#/device/passkeys) brings its section to the top; the page's own links change the hash, which lands here.
@@ -589,6 +595,7 @@ export function DevicePage({ device, onBack, onTheme, section, onAddPasskey, pas
               ) : <SettingsBlock><p className="muted m-0">{t('machines-empty')}</p></SettingsBlock>}
             </SettingsCard>
             {loadKinds && <div {...anchor('agents')}><AgentsSettings machines={machines ?? []} loadKinds={loadKinds} /></div>}
+            {shared && <SharedSettings source={shared.source} projects={shared.projects} canSign={shared.canSign} machineName={(id) => name(id)} />}
           </div>
         </div>
       </div>
