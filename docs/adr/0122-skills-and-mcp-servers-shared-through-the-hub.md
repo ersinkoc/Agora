@@ -3,6 +3,10 @@ Status: Accepted
 Date: 2026-11-27
 
 Accepted: 2026-11-27 (the maintainer's answer to the question listing the written decisions). The open questions' proposed answers stand.
+Decided later the same day (the maintainer): the additive `ShareItemSigned.name` (7), for a removal that carries no item, is covered
+by this ADR's schema approval; a node's `share.mcp_urls` defaults to `allow` (a URL server is one the owner signed and published,
+and a machine that must not send its code out says `forbid`), and the window warns when the owner publishes one that agents may send
+repository content to that address.
 
 Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP servers shared through the hub"), roadmap M8.4.
 
