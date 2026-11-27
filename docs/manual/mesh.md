@@ -20,6 +20,7 @@ Call `workspace_status` when you start, and before you edit files others may tou
 | `send_message` | `to` (an `agent_id`, `MACHINE/AGENT_ID`, or `#channel`), `body`, `refs`, `reply_to` | `message_id` |
 | `ask` | `to`, `question`, `timeout_s` (default 600) | the reply, or the error `mesh.timeout` |
 | `inbox` | `since` (a `message_id`), `limit` | messages: `message_id`, `from`, `body`, `refs`, `at`, `kind`, `reply_to`, `provenance` |
+| `inbox_wait` | `since`, `limit`, `timeout_s` (default 600, at most 3600) | as `inbox`, as soon as a message arrives; `[]` when the time runs out. Call it when you were asked to stay reachable and have nothing else to do, then again with the last `message_id` |
 | `task_list` | `status` (`open`, `claimed`, `done`), `task_id` | tasks: `task_id`, `title`, `status`, `owner`, `depends_on` |
 | `task_create` | `title`, `detail`, `depends_on` | `task_id` |
 | `task_claim` | `task_id` | `ok`; a task must be open and its dependencies done |

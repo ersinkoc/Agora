@@ -2060,6 +2060,50 @@ impl Drop for ConnectionAsks<'_> {
 
 type WaitingAsk = (Value, String, u64);
 
+/// An `inbox_wait` call waiting for a message after `since` until `deadline_ms`.
+struct InboxWait {
+    request_id: Value,
+    since: Option<String>,
+    limit: usize,
+    deadline_ms: u64,
+}
+
+/// Answers `inbox_wait` calls that have a message now, or whose time ran out (with an empty list).
+fn poll_inbox(
+    waits: &mut Vec<InboxWait>,
+    mesh: &Mutex<Mesh>,
+    conn: &McpConnection,
+    mut reply: impl FnMut(&Message) -> io::Result<()>,
+) -> io::Result<()> {
+    if waits.is_empty() {
+        return Ok(());
+    }
+    let now = now_ms();
+    let mut answers = Vec::new();
+    {
+        let m = mesh.lock().unwrap_or_else(|e| e.into_inner());
+        waits.retain(|w| {
+            match conn.finish_inbox_wait(
+                &m,
+                &w.request_id,
+                w.since.as_deref(),
+                w.limit,
+                now >= w.deadline_ms,
+            ) {
+                Some(msg) => {
+                    answers.push(msg);
+                    false
+                }
+                None => true,
+            }
+        });
+    }
+    for msg in &answers {
+        reply(msg)?;
+    }
+    Ok(())
+}
+
 fn poll_asks(
     waiting: &mut Vec<WaitingAsk>,
     owned: &mut ConnectionAsks<'_>,
@@ -2443,6 +2487,8 @@ struct Session<'a> {
     waiting: Vec<WaitingAsk>,
     owned: ConnectionAsks<'a>,
     spawn_waits: Vec<SpawnWait>,
+    /// `inbox_wait` calls still waiting for a message (at most [`MAX_WAITS`]).
+    inbox_waits: Vec<InboxWait>,
     starts: ConnectionStarts,
     /// Batches (2025-03-26) with a request still waiting; each is sent whole once the last of them is answered (#981). Every one
     /// holds a waiting call, so the limits on those (open asks, `agent_wait`s, starts) bound how many there are.
@@ -2505,7 +2551,30 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
             s.waiting.push((request_id, ask_id, deadline_ms));
             Step::Waits
         }
+        Outcome::InboxWait {
+            request_id,
+            since,
+            limit,
+            deadline_ms,
+        } => {
+            if s.inbox_waits.len() >= MAX_WAITS {
+                let e = agora_protocol::Error::new(agora_protocol::ErrorCode::MeshTooManyAsks)
+                    .with("limit", MAX_WAITS as i64);
+                return Step::Reply(tool_reply(
+                    &request_id,
+                    agora_mesh::mcp::protocol_error_result(&e),
+                ));
+            }
+            s.inbox_waits.push(InboxWait {
+                request_id,
+                since,
+                limit,
+                deadline_ms,
+            });
+            Step::Waits
+        }
         Outcome::Cancelled { request_id } => {
+            s.inbox_waits.retain(|w| w.request_id != request_id);
             cancel_request(
                 &request_id,
                 &mut s.waiting,
@@ -2643,6 +2712,7 @@ fn serve(
             ids: HashSet::new(),
         },
         spawn_waits: Vec::new(),
+        inbox_waits: Vec::new(),
         starts: ConnectionStarts {
             helpers: links.helpers.clone(),
             tickets: HashSet::new(),
@@ -2701,6 +2771,13 @@ fn serve(
             return;
         }
         if poll_spawn(&mut s.spawn_waits, &mut s.starts, agent, |msg| {
+            deliver(&mut writer, batches, msg)
+        })
+        .is_err()
+        {
+            return;
+        }
+        if poll_inbox(&mut s.inbox_waits, s.owned.mesh, &s.conn, |msg| {
             deliver(&mut writer, batches, msg)
         })
         .is_err()
@@ -4619,6 +4696,46 @@ mod tests {
 
     /// #981: 2025-06-18 removed batching (and 2024-11-05 never had it), and before `initialize` nothing is negotiated: a batch is
     /// refused with -32600 for each request in it, never dropped. A batch over the bound is -32600 with id null in every version.
+    #[test]
+    fn an_idle_agent_waiting_on_inbox_wait_gets_a_message_from_another_agent_at_once() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let (server, dir, a, b) = two_agents("inboxwait");
+        let mut ca = Wire::open(&a);
+        ca.initialize("2025-06-18");
+        ca.send(&json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"timeout_s": 30}}}).to_string());
+        assert!(
+            ca.next(Duration::from_millis(300)).is_none(),
+            "answered before any message"
+        );
+        let mut cb = Wire::open(&b);
+        cb.initialize("2025-06-18");
+        let sent = std::time::Instant::now();
+        cb.send(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_message","arguments":{"to": "a1", "body": "are you free?"}}}).to_string());
+        assert_eq!(cb.answer()["id"], 3);
+        let got = ca.next(Duration::from_secs(5)).unwrap(); // an answer to inbox_wait
+        assert!(
+            sent.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            sent.elapsed()
+        );
+        assert_eq!(got["id"], 9);
+        let items = agora_mesh::mcp::tool_result_value(&got["result"]).unwrap();
+        assert_eq!(items[0]["body"], "are you free?");
+        assert_eq!(items[0]["from"], "b1");
+        // A short wait with nothing new ends with an empty list.
+        let last = items[0]["message_id"].as_str().unwrap().to_string();
+        ca.send(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"since": last, "timeout_s": 0.3}}}).to_string());
+        let empty = ca.answer();
+        assert_eq!(empty["id"], 10);
+        assert_eq!(
+            agora_mesh::mcp::tool_result_value(&empty["result"]).unwrap(),
+            json!([])
+        );
+        done(server, dir);
+    }
+
     #[test]
     fn a_batch_without_batching_or_over_the_bound_is_refused() {
         if !agora_platform::LOCAL_SOCKETS_SUPPORTED {

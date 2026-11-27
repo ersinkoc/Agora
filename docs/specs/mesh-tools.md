@@ -11,6 +11,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `send_message` | `{ to: agent_id \| "#channel", body: string, refs?: [path\|commit\|task_id] }` | `{ message_id }` |
 | `ask` | `{ to, question, timeout_s?: number (default 600) }` | `{ reply, from }` or error `mesh.timeout` |
 | `inbox` | `{ since?: message_id, limit?: number }` | `[{ message_id, from, body, refs, at, provenance }]` |
+| `inbox_wait` | `{ since?: message_id, limit?: number, timeout_s?: number (default 600, at most 3600) }` | as `inbox`, once at least one message is there; `[]` when the time runs out (see "Waiting for messages") |
 | `task_list` | `{ status?: "open"\|"claimed"\|"done", task_id? }` | `[{ task_id, title, status, owner, depends_on }]`; with `task_id` that task alone, or `[]` (ADR-0095) |
 | `task_create` | `{ title, detail?, depends_on? }` | `{ task_id }` |
 | `task_claim` | `{ task_id }` | `{ ok }` or `lease.held`-style conflict |
@@ -21,6 +22,19 @@ the node per MCP connection; agents cannot impersonate each other.
 | `agent_start` | `{ kind, prompt?, folder?, worktree?: bool, node?, settings?: { id: value }, options?: [id] }` | `{ agent_id }` after the user's decision (ADR-0057) |
 | `agent_wait` | `{ agent_id, state: "idle"\|"working"\|"blocked"\|"done"\|"exited", timeout_s?: number (default 600, at most 3600) }` | `{ agent_id, state }` or `mesh.timeout` |
 | `agent_output` | `{ agent_id, lines?: number (default 40, at most 200) }` | `{ agent_id, source: "screen"\|"transcript", lines }` |
+
+## Waiting for messages
+
+An agent that is idle does not see a message until it reads its inbox, and nothing is ever typed into its terminal for it (ADR-0031).
+To stay reachable, an agent with nothing else to do calls `inbox_wait` (the maintainer's choice of 2026-11-27, instead of a typed
+nudge). It answers at once with the messages numbered above `since` when there are any; otherwise the node holds the call (polled
+every 100 ms) and answers with them as soon as one arrives, or with `[]` once `timeout_s` passes, so the agent simply calls again.
+Without `since` it waits for what arrives from the moment of the call (messages already in the inbox are not handed back). A
+connection may have 8 calls waiting (`mesh.too_many_asks`); a call the client cancels, or one whose connection ends, is dropped and
+nothing is kept for it. It is opt-in: the standing instructions say to wait on it only when the agent was asked to stay reachable
+(a line in its first prompt or a person's message, as the maintainer chose), since an agent waiting on it keeps its turn open: its
+screen shows it working, so it does not read as idle or finished, and each timeout is one more model turn. It reads exactly what
+`inbox` reads and the content is the same untrusted data.
 
 ## Safety rules
 
