@@ -131,5 +131,6 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    is a program it would start in agents), the node verifies the signed word itself against its own trusted devices (ADR-0061, not
    the hub's list), the content hash and the rules in `agora_protocol::share`, keeps the newest `issued_ms` per name itself, and
    applies `share.items` and `share.mcp_commands` (the hub cannot widen node policy).
-4. The window: not started.
+4. The window: not started. It shows each item's machines' refusals in words, `secret_needs_launcher` as "needs a secret: not given
+   to agents yet", so the owner is never left wondering why a published server does not appear (agora-ac).
 5. Skills per kind: not started.
