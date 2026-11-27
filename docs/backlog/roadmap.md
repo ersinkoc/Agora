@@ -65,8 +65,8 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   that agent, never the node, the holder and the others. Left: the Windows holder (M2.6, asked of the Windows session)
 - [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (ADR-0123 Accepted 2026-11-27, schema with it); plan limits
   for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
-  sizes and free disk in the window (M3.7's schema part). Built: ADR-0123 end to end (snapshot, pane, tile, lists, fleet filter); left:
-  its filter in the board's agent picker
+  sizes and free disk in the window (M3.7's schema part). Built: ADR-0123 in the window end to end (snapshot, pane, tile,
+  lists, the fleet's and the board picker's filter)
 - [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
   and ADR-0118 (M0.3, **decision**)
 - [ ] **M8.8 The map**: a live graph of the hub, machines, windows, agents and helpers, with the mesh messages, tasks and handoffs

@@ -12,8 +12,7 @@ import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
 import { type ApprovalModel, type MachineModel, visible } from '../net/view';
 import { AgentTile, kindOf } from './AgentTile';
-import { providerName } from './ModelChip';
-import { plain } from './boardColumns';
+import { ModelPick } from './ModelPick';
 import { Skeleton } from './EmptyState';
 import { Icon, type IconName } from './Icon';
 import { AgentAvatar, Button, CopyChip, Pill, StatTile, stateTone } from './kit';
@@ -28,24 +27,6 @@ import { isolated, peerText } from './pairChoice';
 
 export const ATTENTION_SHOWN = 6;
 
-// ADR-0123: narrow the fleet to one provider or one model ("Every model" shows them all). The model is the agent's own word, kept short.
-function ModelPick({ value, picks, onChange }: { value?: string; picks: ReturnType<typeof modelPicks>; onChange: (v: string | undefined) => void }) {
-  const id = useId();
-  return (
-    <span className="fleet-tools__pick">
-      <label htmlFor={id} className="sr-only">{t('fleet-model-filter')}</label>
-      <select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value || undefined)}>
-        <option value="">{t('fleet-model-all')}</option>
-        {picks.providers.length > 0 && <optgroup label={t('fleet-model-providers')}>
-          {picks.providers.map((p) => <option key={p.value} value={p.value}>{t('fleet-model-count', { name: providerName(p.id), count: p.count })}</option>)}
-        </optgroup>}
-        {picks.models.length > 0 && <optgroup label={t('fleet-model-models')}>
-          {picks.models.map((m) => <option key={m.value} value={m.value}>{t('fleet-model-count', { name: visible(plain(m.id, 48)), count: m.count })}</option>)}
-        </optgroup>}
-      </select>
-    </span>
-  );
-}
 export type LinkState = 'connecting' | 'live' | 'offline';
 
 // What one filter chip says, in the state words the rest of the window uses.

@@ -669,4 +669,21 @@ describe('the board under another dialog', () => {
     act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('ADR-0123: the picker says each agent\'s model, and narrows to one provider or one model', () => {
+    render(<GiveDialog task={theTask} give={api([
+      agent('n1/a-1', { model: 'opus', effort: 'high', provider: 'anthropic' }),
+      agent('n1/a-2', { model: 'gpt-6', provider: 'openai', kind: 'codex' }),
+      agent('n2/b-1', { model: 'sonnet', provider: 'anthropic', parentId: 'n1/a-2' }),
+    ])} onClose={() => {}} />);
+    const rows = () => [...dialog().querySelectorAll('[data-agent-id]')].map((r) => r.getAttribute('data-agent-id'));
+    expect(rows()).toHaveLength(3);
+    expect(dialog().textContent).toContain('opus · high');
+    const select = dialog().querySelector('select') as HTMLSelectElement;
+    act(() => { select.value = 'p:anthropic'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(rows().sort()).toEqual(['n1/a-1', 'n2/b-1']);
+    expect(dialog().querySelector('[data-agent-id="n2/b-1"]')?.className, 'a helper without its parent shown is not indented').toBe('');
+    act(() => { select.value = 'm:gpt-6'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(rows()).toEqual(['n1/a-2']);
+  });
 });

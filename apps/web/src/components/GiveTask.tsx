@@ -1,4 +1,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
+import { matchesModelPick, modelPicks } from '../net/fleet';
+import { modelWords } from './ModelChip';
+import { ModelPick } from './ModelPick';
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { t } from '../i18n';
 import { sharesName, type AgentTileModel } from '../model';
@@ -72,6 +75,7 @@ export function GiveRow({ agent, depth, machines, onPick }: { agent: AgentTileMo
         </span>
         <span className="min-w-0 break-words text-xs text-muted">
           {depth > 0 && agent.parentId ? t('give-row-helper', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) }) : t('give-row-detail', { kind: plain(agent.kind ?? '', OWNER_MAX), machine: plain(machineName(agent, machines), FULL) })}
+          {modelWords(agent) ? ` · ${modelWords(agent)?.short}` : ''}
         </span>
       </button>
     </li>
@@ -175,7 +179,13 @@ function StartForTaskButton({ main, onClick }: { main: boolean; onClick: () => v
 export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: GiveApi; onClose: () => void }) {
   useGiveSupport();
   const [step, setStep] = useState<Step>({ at: 'pick' });
-  const candidates = giveCandidates(give.agents, task.projectId, give.online);
+  const all = giveCandidates(give.agents, task.projectId, give.online);
+  // ADR-0123: one provider or one model at a time, once the agents that could take it run on more than one. A helper shown without the
+  // agent that started it is not indented under nothing.
+  const [pick, setPick] = useState<string | undefined>();
+  const picks = modelPicks(all.map((c) => c.agent));
+  const candidates = pick ? all.filter((c) => matchesModelPick(c.agent, pick)).map((c) => ({ ...c, depth: 0 })) : all;
+  const offerPick = !!pick || picks.providers.length > 1 || picks.models.length > 1;
   const latest = useRef(give);
   latest.current = give;
   // A key whose press began before the dialog opened (the Enter that chose the palette entry) must not activate the row that has the
@@ -238,13 +248,16 @@ export function GiveDialog({ task, give, onClose }: { task: GiveTask; give: Give
           {step.at === 'pick' && <>
             <p id="give-task-title" dir="auto" className="m-0 break-words rounded-s border border-line bg-surface-0 p-2.5 text-sm text-ink">{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</p>
             {step.refusal && <p role="alert" data-give-refusal="" className="m-0 rounded-s border border-danger/60 p-2.5 text-sm text-ink">{t(step.refusal)}</p>}
-            {candidates.length === 0
+            {candidates.length === 0 && pick
+              ? <><p className="muted m-0 text-sm">{t('fleet-filter-none')}</p><ModelPick value={pick} picks={picks} onChange={setPick} /></>
+              : candidates.length === 0
               ? <>
                 <p className="muted m-0 text-sm">{t(startable ? 'give-none-start' : starter ? 'give-none-plain' : 'give-none', { project: plain(task.project, FULL) })}</p>
                 {startable && <StartForTaskButton main onClick={() => setStep({ at: 'start' })} />}
               </>
               : <>
                 <p className="muted m-0 text-sm">{t('give-pick-hint', { project: plain(task.project, FULL) })}</p>
+                {offerPick && <ModelPick value={pick} picks={picks} onChange={setPick} />}
                 <ul aria-label={t('give-pick-label')} className="m-0 grid list-none gap-2 p-0">
                   {candidates.map(({ agent, depth }) => <GiveRow key={agent.id} agent={agent} depth={depth} machines={give.machines} onPick={() => setStep({ at: 'confirm', agentId: agent.id })} />)}
                 </ul>
