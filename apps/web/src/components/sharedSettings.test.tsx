@@ -127,6 +127,14 @@ describe('draftItem', () => {
   const base = { name: 'x', runs: 'program' as const, command: 'npx', args: '', env: '', url: '', headers: '', projectId: '' };
   it('keeps a secret off the command line and an address to https', () => {
     expect(draftItem({ ...base, args: '--token={secret:t}' })).toBe('shared-check-args-secret');
+    expect(draftItem({ ...base, command: 'rm\u202e -rf' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, args: 'pkg\u200b' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, env: 'A=\u2066x' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, runs: 'address', url: 'https://a.example', headers: 'H: \ufeffv' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, args: 'one\ntwo' })).toMatchObject({ mcp: { args: ['one', 'two'] } });
+    expect(draftItem({ ...base, args: 'one\ttwo' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, env: 'A=x\ty' })).toBe('shared-check-hidden');
+    expect(draftItem({ ...base, runs: 'address', url: 'https://a.example', headers: 'H: v\tX' })).toBe('shared-check-hidden');
     expect(draftItem({ ...base, env: 'NO_SEPARATOR' })).toBe('shared-check-env');
     expect(draftItem({ ...base, runs: 'address', url: 'http://plain.example' })).toBe('shared-check-url');
     expect(draftItem({ ...base, runs: 'address', url: 'https://ok.example/mcp', headers: 'A: 1\nA: 2' })).toBe('shared-check-headers');

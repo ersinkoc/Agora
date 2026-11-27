@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useState } from 'react';
 import { t } from '../i18n';
+import { hasHidden } from '../net/hidden';
 import { namesSecret, parseValues, publishErrorKey, refusalWords, validShareName, type ShareItemDef, type SharedItem, type SharedSource } from '../net/share';
 import { Icon } from './Icon';
 import { Button, Callout, ConfirmDialog, Pill, SegmentedControl } from './kit';
@@ -15,20 +16,29 @@ const EMPTY: Draft = { name: '', runs: 'program', command: '', args: '', env: ''
 /** The item a draft describes, or the locale key of what is wrong with it. */
 export function draftItem(d: Draft): ShareItemDef | string {
   if (!validShareName(d.name)) return 'shared-check-name';
+  // What is signed is what the person sees: an invisible or direction-changing character (pasted from somewhere) is refused here, as
+  // the hub and every machine refuse it (`agora_protocol::share::check_item_shown`).
+  const shown = d.runs === 'program' ? [d.command, d.args, d.env] : [d.url, d.headers];
+  if (shown.some(hasHidden)) return 'shared-check-hidden';
   if (d.runs === 'program') {
     const env = parseValues(d.env, '=');
     if (!d.command.trim()) return 'shared-check-command';
     if (!env) return 'shared-check-env';
     const args = d.args.split('\n').map((a) => a.trim()).filter(Boolean);
     if (args.some(namesSecret)) return 'shared-check-args-secret';
+    if ([d.command, ...args, ...env.flatMap((v) => [v.name, v.value])].some(oneLineBroken)) return 'shared-check-hidden';
     return { name: d.name, kind: 'mcp_server', mcp: { command: d.command.trim(), args, env, url: '', headers: [] } };
   }
   const headers = parseValues(d.headers, ':');
   if (!/^https:\/\/\S+$/.test(d.url.trim())) return 'shared-check-url';
   if (!headers) return 'shared-check-headers';
+  if ([d.url, ...headers.flatMap((v) => [v.name, v.value])].some(oneLineBroken)) return 'shared-check-hidden';
   return { name: d.name, kind: 'mcp_server', mcp: { command: '', args: [], env: [], url: d.url.trim(), headers } };
 }
 
+// A one-line value (a program, an argument, a name or value, an address) never holds a tab or a line break: one in a header value would
+// add a header, and a tab reads differently from how it runs. The hub and every machine refuse them too.
+const oneLineBroken = (v: string) => /[\t\n\r]/.test(v);
 const usesSecret = (d: Draft) => (d.runs === 'program' ? namesSecret(d.env) : namesSecret(d.headers));
 
 // Settings → Shared (ADR-0122): the MCP servers the owner gives every agent at its start, on every machine that trusts the device that

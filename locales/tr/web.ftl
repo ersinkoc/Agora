@@ -2050,6 +2050,7 @@ shared-check-env = Her ortam satırını AD=değer olarak yazın, her ad bir kez
 shared-check-args-secret = Gizli değer argüman olamaz: makinedeki herkes bir programın argümanlarını okuyabilir. Ortama koyun.
 shared-check-url = Adres https:// ile başlar ve boşluk içermez.
 shared-check-headers = Her başlık satırını Ad: değer olarak yazın, her ad bir kez.
+shared-check-hidden = Ekranda görünmeyen ya da metni ters çeviren bir karakter içeriyor. Yapıştırmak yerine yeniden yazın.
 shared-error-device = Hub bu cihazın imzasını kabul etmedi. Bu tarayıcının cihazlarınızdan biri olduğunu kontrol edin (yukarıda, Bu cihaz).
 shared-error-older = Bu ada daha yeni bir değişiklik bu arada paylaşıldı. Sayfayı yenileyip yeniden deneyin.
 shared-error-limit = En fazla 64 öge paylaşılabilir. Önce birini kaldırın.

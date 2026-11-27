@@ -2156,6 +2156,7 @@ shared-check-env = Write each environment line as NAME=value, each name once.
 shared-check-args-secret = A secret cannot be an argument: anyone on the machine can read a program's arguments. Put it in the environment.
 shared-check-url = An address starts with https:// and has no spaces.
 shared-check-headers = Write each header line as Name: value, each name once.
+shared-check-hidden = It holds a character that does not show on screen or turns the text around. Type it again rather than pasting it.
 shared-error-device = The hub did not accept this device's signature. Check that this browser is one of your devices (This device, above).
 shared-error-older = A newer change to this name was shared meanwhile. Reload the page and try again.
 shared-error-limit = Up to 64 items can be shared. Remove one first.

@@ -1667,7 +1667,11 @@ default on) and asks, on its own connection, `ShareItemList` (names, versions an
 refused) and `ShareItemGet`; a node refuses the commands from a client.
 Publish, remove and list are the owner's alone; the hub checks each word as a node will (the owner's unrevoked device, the content
 hash, the rules in `agora_protocol::share`, a newer `issued_ms` than the word it replaces and at most 5 minutes ahead, at most 64 live
-items) and keeps the newest word per name (a removal too); `ShareItemGet` answers a node with that word.
+items) and keeps the newest word per name (a removal too); `ShareItemGet` answers a node with that word. What is signed must read as
+it is: the hub and every node refuse an item with a hidden character (`agora_core::text::is_hidden`: invisible and
+direction-changing characters) or a control character in any one-line text (a program, an argument, a name or value, an address,
+a path: a line break or a tab too), or one other than a line break or a tab in a description or a skill's file
+(`agora_protocol::share::check_item_shown`), and the window refuses it before signing.
 
 - **Messages** (`schema/agora/v1/share.proto`): `ShareItem { name, kind, mcp | skill }` (an MCP server is a program `command`/`args`/`env`
   or a remote `url`/`headers`; secrets as `{secret:NAME}`; a skill is a description and its text files), `ShareScope { project_id,

@@ -262,6 +262,43 @@ fn check_skill(s: &SkillDef) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// The field of an item whose text would show differently from what is signed: a character `hidden` names (the caller passes
+/// `agora_core::text::is_hidden`, the one list of invisible and direction-changing characters) or a control character anywhere in
+/// the program, its arguments, its environment, the address, its headers or a skill's file paths, or one other than a line break or
+/// a tab in a skill's description or its files. A person approves what they see, so a word whose bytes they could not see is refused by the hub and by every node.
+pub fn check_item_shown(item: &ShareItem, hidden: fn(char) -> bool) -> Result<(), &'static str> {
+    // One line (a program, an argument, a name, a value, an address, a path): no control character at all, so a line break cannot
+    // add a header or split an address, and a tab cannot read differently from how it runs. Text (a description, a skill's file):
+    // line breaks and tabs are its own.
+    let line = |t: &str| t.chars().any(|c| hidden(c) || c.is_control());
+    let text = |t: &str| {
+        t.chars()
+            .any(|c| hidden(c) || (c.is_control() && c != '\n' && c != '\t'))
+    };
+    let values = |v: &[crate::v1::ShareValue]| v.iter().any(|x| line(&x.name) || line(&x.value));
+    if let Some(m) = &item.mcp {
+        if line(&m.command) || m.args.iter().any(|a| line(a)) || values(&m.env) {
+            return Err("command");
+        }
+        if line(&m.url) || values(&m.headers) {
+            return Err("url");
+        }
+    }
+    if let Some(sk) = &item.skill {
+        if text(&sk.description) {
+            return Err("description");
+        }
+        if sk
+            .files
+            .iter()
+            .any(|f| line(&f.path) || std::str::from_utf8(&f.content).map_or(true, text))
+        {
+            return Err("files");
+        }
+    }
+    Ok(())
+}
+
 /// The rule a scope breaks, as the field it names.
 pub fn check_scope(scope: &ShareScope) -> Result<(), &'static str> {
     if scope.project_id.len() > MAX_PROJECT || !plain(&scope.project_id) {
@@ -290,6 +327,68 @@ mod tests {
             }),
             skill: None,
         }
+    }
+
+    /// A stand-in for `agora_core::text::is_hidden` (this crate does not depend on it): the direction overrides and zero widths.
+    fn hidden(c: char) -> bool {
+        matches!(u32::from(c), 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF)
+    }
+
+    /// What a person reads is what is signed: an invisible or direction-changing character anywhere in an item refuses it.
+    #[test]
+    fn an_item_with_text_that_shows_differently_is_refused() {
+        assert_eq!(check_item_shown(&mcp("npx", ""), hidden), Ok(()));
+        assert_eq!(
+            check_item_shown(&mcp("rm\u{202e}dliub", ""), hidden),
+            Err("command")
+        );
+        let mut m = mcp("npx", "");
+        m.mcp.as_mut().unwrap().args = vec!["-y".into(), "pkg\u{200b}".into()];
+        assert_eq!(check_item_shown(&m, hidden), Err("command"));
+        let mut m = mcp("npx", "");
+        m.mcp.as_mut().unwrap().env = vec![ShareValue {
+            name: "A".into(),
+            value: "x\u{2066}y".into(),
+        }];
+        assert_eq!(check_item_shown(&m, hidden), Err("command"));
+        let mut m = mcp("", "https://a.example");
+        m.mcp.as_mut().unwrap().headers = vec![ShareValue {
+            name: "H".into(),
+            value: "\u{feff}v".into(),
+        }];
+        assert_eq!(check_item_shown(&m, hidden), Err("url"));
+        assert_eq!(
+            check_item_shown(&mcp("", "https://a.example/\u{1b}[2J"), hidden),
+            Err("url")
+        );
+        let mut m = mcp("", "https://a.example");
+        m.mcp.as_mut().unwrap().headers = vec![ShareValue {
+            name: "H".into(),
+            value: "v\r\nX-Injected: 1".into(),
+        }];
+        assert_eq!(
+            check_item_shown(&m, hidden),
+            Err("url"),
+            "a line break adds a header"
+        );
+        let mut m = mcp("npx", "");
+        m.mcp.as_mut().unwrap().args = vec!["a\nb".into()];
+        assert_eq!(check_item_shown(&m, hidden), Err("command"));
+        let mut m = mcp("npx", "");
+        m.mcp.as_mut().unwrap().args = vec!["a\tb".into()];
+        assert_eq!(check_item_shown(&m, hidden), Err("command"));
+        let mut k = skill(&["SKILL.md"]);
+        k.skill.as_mut().unwrap().files[0].content = b"line one\n\tindented\n".to_vec();
+        assert_eq!(
+            check_item_shown(&k, hidden),
+            Ok(()),
+            "line breaks and tabs are text"
+        );
+        k.skill.as_mut().unwrap().files[0].content = "do this\u{200b}".as_bytes().to_vec();
+        assert_eq!(check_item_shown(&k, hidden), Err("files"));
+        let mut k = skill(&["SKILL.md"]);
+        k.skill.as_mut().unwrap().description = "review\u{202e}".into();
+        assert_eq!(check_item_shown(&k, hidden), Err("description"));
     }
 
     fn skill(paths: &[&str]) -> ShareItem {

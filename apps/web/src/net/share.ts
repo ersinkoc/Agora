@@ -2,6 +2,7 @@
 // (`agora_protocol::share`, vectors in schema/fixtures/signing/share-item-v1.json): an item's content hash, and the signed word
 // `agora-share-item-v1` on a name (a publish, or a removal with an empty hash). The node verifies every word with its own trust.
 import { signedList, signedPairs, toHex, type Device } from './approval';
+import { visible } from './hidden';
 
 export type ShareKind = 'mcp_server' | 'skill';
 export interface ShareValue { name: string; value: string }
@@ -142,7 +143,8 @@ export function sharedSourceFor(ask: Ask, device: Device, now: () => number = Da
 
 /** The words of a machine's refusal (locale key and its arguments). */
 export function refusalWords(r: SharedRefusal): { key: string; args?: Record<string, string> } {
-  if (r.code === 'share.secret_missing') return { key: 'shared-refused-secret', args: { secret: r.reason } };
+  // The secret's name is the machine's word: shown with anything hidden in it made visible, and cut short.
+  if (r.code === 'share.secret_missing') return { key: 'shared-refused-secret', args: { secret: visible(r.reason).slice(0, 64) } };
   const known = ['secret_needs_launcher', 'policy_off', 'command_not_allowed', 'url_not_allowed', 'signer_untrusted', 'signature', 'older', 'invalid'];
   const reason = r.reason === 'signature' ? 'signer_untrusted' : r.reason;
   return { key: known.includes(reason) ? `shared-refused-${reason.replace(/_/g, '-')}` : 'shared-refused-other' };

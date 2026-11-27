@@ -652,6 +652,21 @@ async fn the_owner_publishes_lists_and_removes_a_shared_item_with_a_signed_word(
     .await
     .unwrap();
     assert_eq!(err(&answer(&mut c).await), "approval.signature_invalid");
+    // Signed by the owner, but with text a person would not see as it is (a direction override in an argument): refused.
+    let mut unseen = item.clone();
+    if let Some(m) = unseen.mcp.as_mut() {
+        m.args[1] = "@example/\u{202e}pm-bd".into();
+    }
+    let unseen_hash = agora_hub::shares::item_hash(&unseen);
+    c.send(&command(
+        "p-hidden",
+        cr::Command::ShareItemPublish(v1::ShareItemPublish {
+            signed: Some(word(1, Action::Publish, Some(unseen), &unseen_hash, now)),
+        }),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(err(&answer(&mut c).await), "protocol.invalid_message");
     c.send(&command(
         "p1",
         cr::Command::ShareItemPublish(v1::ShareItemPublish {

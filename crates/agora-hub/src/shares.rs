@@ -75,6 +75,8 @@ impl<'a> Shares<'a> {
         let (action, kind, hash) = match &w.item {
             Some(item) => {
                 check_item(item).map_err(invalid)?;
+                agora_protocol::share::check_item_shown(item, agora_core::text::is_hidden)
+                    .map_err(invalid)?;
                 if item.name != w.name {
                     return Err(invalid("name"));
                 }

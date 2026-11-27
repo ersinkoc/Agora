@@ -89,6 +89,7 @@ describe('the shared items source', () => {
     expect(refusalWords({ node: 'n', code: 'share.refused', reason: 'secret_needs_launcher' }).key).toBe('shared-refused-secret-needs-launcher');
     expect(refusalWords({ node: 'n', code: 'approval.signature_invalid', reason: 'signature' }).key).toBe('shared-refused-signer-untrusted');
     expect(refusalWords({ node: 'n', code: 'share.secret_missing', reason: 'DOCS' })).toEqual({ key: 'shared-refused-secret', args: { secret: 'DOCS' } });
+    expect(refusalWords({ node: 'n', code: 'share.secret_missing', reason: `A\u202eB${'x'.repeat(100)}` }).args?.secret).toBe(`A\\u{202e}B${'x'.repeat(100)}`.slice(0, 64));
     expect(refusalWords({ node: 'n', code: 'share.refused', reason: 'something_new' }).key).toBe('shared-refused-other');
   });
 
