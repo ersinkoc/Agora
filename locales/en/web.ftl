@@ -112,7 +112,24 @@ start-approval-more = Up to { $count } { $kind } agents in this folder while { $
 start-approval-nested = Its helpers may ask to start helpers too (you answer each)
 start-approval-remote-title = { $agentKind } on { $from } asks to start a { $kind } agent here on { $machine }
 start-approval-remote-note = Another machine asks: the folder is on this machine, and { $from } can follow the agent it starts.
-start-approval-remote-more = Later starts like this from { $from } go ahead here without asking: up to { $count } { $kind } agents at a time, for at most 24 hours. You can revoke it.
+start-approval-remote-more = Later starts like this from { $from } go ahead here without asking: up to { $count } { $what } at a time, { $where }, { $time }. You can revoke it.
+start-approval-remote-what-kind = { $kind } agents
+start-approval-remote-what-any = agents of any kind this machine runs
+start-approval-remote-where-folder = in this folder
+start-approval-remote-where-below = in this folder or any folder below it
+start-approval-remote-until-run = until the run that asked ends (24 hours at most)
+start-approval-remote-until-hours = for { $hours ->
+    [one] 1 hour
+   *[other] { $hours } hours
+    }
+start-approval-remote-any-kind = Any kind this machine runs, not only this one
+start-approval-remote-below = Folders below this one too
+start-approval-remote-for = For
+start-approval-remote-for-hours = { $hours ->
+    [one] 1 hour
+   *[other] { $hours } hours
+    }
+start-approval-remote-for-run = Until its run ends
 start-approval-remote-nested = The agents it starts may ask too, from any machine (each within this grant)
 approval-review = Review
 approval-review-for = Read the whole request from { $name }

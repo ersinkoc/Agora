@@ -48,14 +48,40 @@ describe('a start another machine asks for', () => {
     const text = host.textContent ?? '';
     expect(text).toContain('claude-code on mac asks to start a codex agent here on blackview');
     expect(host.querySelector('[data-remote-start]')?.textContent).toContain('the folder is on this machine');
-    expect(text).toContain(`up to ${REMOTE_GRANT_SIZE} codex agents at a time, for at most 24 hours`);
+    expect(text).toContain(`up to ${REMOTE_GRANT_SIZE} codex agents at a time, in this folder, until the run that asked ends (24 hours at most)`);
     const more = [...host.querySelectorAll<HTMLButtonElement>('[role=radio]')].find((b) => b.textContent === 'More like this');
     act(() => { more!.click(); });
     const tick = host.querySelector<HTMLInputElement>('[data-grant-choice] input[type=checkbox]');
     act(() => { tick!.click(); });
     const allow = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Allow');
     act(() => { allow!.click(); });
-    expect(answers).toEqual([[true, { grant: REMOTE_GRANT_SIZE, nested: true }]]);
+    expect(answers).toEqual([[true, { grant: REMOTE_GRANT_SIZE, nested: true, remote: { anyKind: false, belowFolder: false, hours: 0 } }]]);
+  });
+
+  // ADR-0119 decision 12: the rest of the grant's scope is chosen on the card, said in full under it, and sent with the answer.
+  it('lets the person pick any kind, the folders below and a time, and says so', () => {
+    const answers: [boolean, StartChoice][] = [];
+    act(() => root.render(<StartApproval approval={approval} start={approval.start!} onResolve={(ok, c) => answers.push([ok, c])} />));
+    const more = [...host.querySelectorAll<HTMLButtonElement>('[role=radio]')].find((b) => b.textContent === 'More like this');
+    act(() => { more!.click(); });
+    act(() => { host.querySelector<HTMLInputElement>('[data-remote-any-kind]')!.click(); });
+    act(() => { host.querySelector<HTMLInputElement>('[data-remote-below]')!.click(); });
+    const eight = [...host.querySelectorAll<HTMLButtonElement>('[role=radio]')].find((b) => b.textContent === '8 hours');
+    act(() => { eight!.click(); });
+    expect(host.querySelector('[data-grant-more]')?.textContent).toContain(
+      `up to ${REMOTE_GRANT_SIZE} agents of any kind this machine runs at a time, in this folder or any folder below it, for 8 hours`);
+    const allow = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Allow');
+    act(() => { allow!.click(); });
+    expect(answers).toEqual([[true, { grant: REMOTE_GRANT_SIZE, nested: false, remote: { anyKind: true, belowFolder: true, hours: 8 } }]]);
+  });
+
+  it('sends no scope when the answer is this one start only', () => {
+    const answers: [boolean, StartChoice][] = [];
+    act(() => root.render(<StartApproval approval={approval} start={approval.start!} onResolve={(ok, c) => answers.push([ok, c])} />));
+    act(() => { host.querySelector<HTMLInputElement>('[data-remote-any-kind]')!.click(); });
+    const allow = [...host.querySelectorAll('button')].find((b) => b.textContent === 'Allow');
+    act(() => { allow!.click(); });
+    expect(answers).toEqual([[true, { grant: 0, nested: false }]]);
   });
 });
 

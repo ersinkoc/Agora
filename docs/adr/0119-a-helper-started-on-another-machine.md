@@ -348,7 +348,9 @@ New threat-model rows (numbers are the next free ones when built):
    this one start and that more starts are allowed from the window, and signs v4 for this start only (no grant). The live grants an agent was given on other
    machines are listed in its panel beside its local helper grants ("On Beta: up to 6 codex at a time without asking (4 free)"), each
    revoked on the machine that keeps it, whether or not helpers are listed; and each machine's card on the Machines page lists the
-   grants that machine keeps ("agent-3 on Mac may start up to 6 codex here at a time without asking"), with Revoke. Not built yet: the choice of a time, "any integrated kind" and "folders below" on the card. Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
+   grants that machine keeps ("agent-3 on Mac may start up to 6 codex here at a time without asking"), with Revoke. Under "More like this" the card also offers "any kind this machine runs", "folders below this one too" and a time (1
+   hour, 8 hours, or until the asking run ends, 24 hours at most), says the whole scope in one sentence under the choice, and signs
+   and sends exactly that scope (`StartChoice.remote`, `App.tsx`). Screenshots: the gallery's `[data-start-remote]` in both themes (visual baselines).
 
 ## Consequences
 

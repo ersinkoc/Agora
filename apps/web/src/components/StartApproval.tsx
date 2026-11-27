@@ -6,7 +6,13 @@ import { visible, type ApprovalModel, type StartRequest, type StartSetting } fro
 import { ApprovalRequest, ASK_ICON, type ApprovalDensity } from './ApprovalRequest';
 import { Button, KeyValue, SegmentedControl } from './kit';
 
-export interface StartChoice { grant: number; nested: boolean }
+// ADR-0119 decision 12: the scope of a standing grant for a start another machine asked for, beyond its size: any kind this machine
+// runs with an agent integration, this folder or any below it, and for how many hours (0: until the asking run ends, 24 hours at most).
+export interface RemoteScope { anyKind: boolean; belowFolder: boolean; hours: number }
+export interface StartChoice { grant: number; nested: boolean; remote?: RemoteScope }
+
+// The times a standing grant can be given for, in hours; 0 is "until the run that asked ends" (the node ends it after 24 hours anyway).
+export const REMOTE_GRANT_HOURS = [1, 8, 0] as const;
 
 // How many starts a "more like this" answer allows, this one included (the node takes at most 10).
 export const GRANT_SIZE = 3;
@@ -80,6 +86,9 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
 }) {
   const [more, setMore] = useState(false);
   const [nested, setNested] = useState(false);
+  const [anyKind, setAnyKind] = useState(false);
+  const [below, setBelow] = useState(false);
+  const [hours, setHours] = useState<number>(0);
   // ADR-0059 decision 5: a helper that would act without asking is allowed only after the same confirmation a start from the window
   // asks for, with "Keep asking" as the primary button (which goes back to the card, where it can be denied).
   const skipping = start.options.filter((o) => o.skipsPermissions);
@@ -90,9 +99,16 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
   const who = visible(approvalName(approval));
   const title = startTitle(approval, start);
   const size = start.remote ? REMOTE_GRANT_SIZE : GRANT_SIZE;
-  const choice = (): StartChoice => (start.grantAllowed ? { grant: more ? size : 0, nested: nested && start.depth < 2 } : { grant: 0, nested: false });
+  const choice = (): StartChoice => (start.grantAllowed
+    ? { grant: more ? size : 0, nested: nested && start.depth < 2, ...(start.remote && more ? { remote: { anyKind, belowFolder: below, hours } } : {}) }
+    : { grant: 0, nested: false });
   const moreText = start.remote
-    ? t('start-approval-remote-more', { count: size, kind: visible(start.kind), from: visible(start.remote.originNode) })
+    ? t('start-approval-remote-more', {
+      count: size, from: visible(start.remote.originNode),
+      what: anyKind ? t('start-approval-remote-what-any') : t('start-approval-remote-what-kind', { kind: visible(start.kind) }),
+      where: t(below ? 'start-approval-remote-where-below' : 'start-approval-remote-where-folder'),
+      time: hours > 0 ? t('start-approval-remote-until-hours', { hours }) : t('start-approval-remote-until-run'),
+    })
     : t('start-approval-more', { count: size, kind: visible(start.kind), name: who });
   const facts = [
     { label: t('start-approval-folder'), value: <span dir="ltr">{visible(start.folder)}{start.worktree ? ` · ${t('start-approval-worktree')}` : ''}</span>, mono: true },
@@ -132,6 +148,14 @@ export function StartApproval({ approval, start, busy, onResolve, density = 'car
             items={[{ value: 'once', label: t('start-approval-once') }, { value: 'more', label: t('start-approval-more-short'), title: moreText }]} />
           <p className="m-0 min-w-0 break-words text-muted" data-grant-more>{moreText}</p>
           {start.depth < 2 && <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /><span className="min-w-0 break-words">{t(start.remote ? 'start-approval-remote-nested' : 'start-approval-nested')}</span></label>}
+          {/* ADR-0119 decision 12: the rest of a standing grant's scope, chosen here and signed with it; always shown, so nothing moves. */}
+          {start.remote && <div className="flex min-w-0 flex-col items-start gap-1.5" data-remote-scope>
+            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={anyKind} onChange={(e) => setAnyKind(e.target.checked)} data-remote-any-kind /><span className="min-w-0 break-words">{t('start-approval-remote-any-kind')}</span></label>
+            <label className="touch-row flex min-w-0 items-center gap-2"><input className="flex-none" type="checkbox" checked={below} onChange={(e) => setBelow(e.target.checked)} data-remote-below /><span className="min-w-0 break-words">{t('start-approval-remote-below')}</span></label>
+            <span id={`${scope}-for`} className="text-muted">{t('start-approval-remote-for')}</span>
+            <SegmentedControl labelledBy={`${scope}-for`} value={String(hours)} onChange={(v) => setHours(Number(v))}
+              items={REMOTE_GRANT_HOURS.map((h) => ({ value: String(h), label: h > 0 ? t('start-approval-remote-for-hours', { hours: h }) : t('start-approval-remote-for-run') }))} />
+          </div>}
         </div>}
         {onResolve && confirming && <div role="alertdialog" aria-label={t('session-confirm-title')} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-s border border-danger/60 bg-surface-2 px-3 py-2">
           <div className="min-w-0 flex-1 basis-64"><strong className="block">{t('session-confirm-title')}</strong>

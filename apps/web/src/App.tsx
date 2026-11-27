@@ -271,8 +271,12 @@ export function App() {
       // ADR-0119: a start another machine asked for is decided over v4; "more like this" is a standing grant (its N, and whether the
       // helpers may ask too), signed field by field. The local grant fields stay 0 there.
       const remote = a.start?.remote;
+      // ADR-0119 decision 12: the scope chosen on the card; a time in hours ends that many hours from now (the node ends it after 24
+      // hours whatever is sent), 0 when the run that asked ends.
+      const scope = choice?.remote;
       const remoteGrant: RemoteGrantChoice = remote && approved && helperGrant > 0
-        ? { maxRunning: Math.min(helperGrant, 20), anyKind: false, belowFolder: false, chain: helpersMayStart, untilMs: 0 }
+        ? { maxRunning: Math.min(helperGrant, 20), anyKind: !!scope?.anyKind, belowFolder: !!scope?.belowFolder, chain: helpersMayStart,
+          untilMs: scope && scope.hours > 0 ? Date.now() + scope.hours * 3_600_000 : 0 }
         : NO_REMOTE_GRANT;
       const fields = await answerFields(device, a, approved, always, () => (a.skip
         ? signSkip(device, a.node, a.localId, approved, a.skip, a.detail)
@@ -287,7 +291,7 @@ export function App() {
       if (a.skip) recordSkipAnswer(a.id, { approved, agent: `${a.node}/${a.skip.agent}`, option: a.skip.option, value: a.skip.value });
       await api.command(a.node, { approvalResolve: { approvalId: a.localId, approved, signerDeviceId: device.id, signature,
         ...(remote
-          ? { helperGrant: 0, helpersMayStart: false, ...(remoteGrant.maxRunning > 0 ? { remoteGrant: { maxRunning: remoteGrant.maxRunning, anyKind: false, belowFolder: false, chain: remoteGrant.chain, untilMs: 0 } } : {}) }
+          ? { helperGrant: 0, helpersMayStart: false, ...(remoteGrant.maxRunning > 0 ? { remoteGrant: { ...remoteGrant } } : {}) }
           : { helperGrant, helpersMayStart }),
         ...(fields.scope ? { scope: fields.scope } : {}) } });
       return true;
