@@ -16,6 +16,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use agora_protocol::v1::event::Body;
+use agora_protocol::v1::TaskHandoffDeliveryState as DeliveryState;
 use agora_protocol::v1::{Event, NodeLink, NodeLinkReason, NodeOffline};
 use prost::Message;
 
@@ -288,6 +289,8 @@ impl Hub {
                 )?;
             }
         }
+        // Upgrade queues created before ADR-0121. The write also initializes expired rows.
+        hub.refresh_handoff_statuses(now_ms, true, |_| false)?;
         Ok(hub)
     }
 
@@ -919,7 +922,7 @@ impl Hub {
         if a.events.is_empty() {
             return a;
         }
-        let events = std::mem::take(&mut a.events);
+        let mut events = std::mem::take(&mut a.events);
         let pending = match self.prepare_handoff(&g, a.handoff.as_ref(), &events, now_ms) {
             Ok(pending) => pending,
             Err(error) => {
@@ -932,7 +935,10 @@ impl Hub {
                 return r;
             }
         };
-        let settings = pending.as_ref().map(|p| (p.key(), p.encode_to_vec()));
+        let settings = pending.as_ref().map(|p| {
+            events.push(p.status(DeliveryState::Pending, now_ms, ""));
+            (p.key(), p.encode_to_vec())
+        });
         // Only once stored does anyone hear of it: the view, the windows and the nodes.
         match self.store_board(
             &mut g,
@@ -1050,39 +1056,122 @@ impl Hub {
         mut ready: impl FnMut(&crate::handoff::Pending) -> bool,
         limit: usize,
     ) -> Vec<crate::handoff::Pending> {
-        self.lock()
-            .handoffs
+        let g = self.lock();
+        g.handoffs
             .values()
-            .filter(|p| p.delivery.valid_until_ms > now_ms && ready(p))
+            .filter(|p| Self::handoff_can_send(&g.view, p, now_ms) && ready(p))
             .take(limit)
             .cloned()
             .collect()
     }
 
     pub(crate) fn handoff_is_pending(&self, id: &[u8], now_ms: u64) -> bool {
-        self.lock()
-            .handoffs
+        let g = self.lock();
+        g.handoffs
             .get(id)
-            .is_some_and(|p| p.delivery.valid_until_ms > now_ms)
+            .is_some_and(|p| Self::handoff_can_send(&g.view, p, now_ms))
     }
 
-    pub(crate) fn report_unresolved_handoffs(
+    fn handoff_can_send(view: &View, pending: &crate::handoff::Pending, now_ms: u64) -> bool {
+        pending.delivery.valid_until_ms > now_ms
+            && view
+                .handoff_deliveries
+                .get(&pending.id())
+                .is_some_and(|(_, status)| status.state() == DeliveryState::Pending)
+    }
+
+    pub(crate) fn expire_handoffs(
         &self,
         now_ms: u64,
-        reported: &mut std::collections::BTreeSet<Vec<u8>>,
-    ) {
-        for pending in self.lock().handoffs.values() {
-            let delivery = &pending.delivery;
-            if delivery.valid_until_ms <= now_ms && reported.insert(delivery.delivery_id.clone()) {
-                eprintln!(
-                    "task handoff unresolved: {} project={:?} task={:?} receiver={:?}",
-                    pending.key(),
-                    pending.board_project,
-                    delivery.task_id,
-                    pending.receiver_node,
-                );
-            }
+        settling: impl Fn(&[u8]) -> bool,
+    ) -> Result<(), StoreError> {
+        self.refresh_handoff_statuses(now_ms, false, settling)
+    }
+
+    fn refresh_handoff_statuses(
+        &self,
+        now_ms: u64,
+        initialize: bool,
+        settling: impl Fn(&[u8]) -> bool,
+    ) -> Result<(), StoreError> {
+        let mut g = self.lock();
+        let events: Vec<_> = g
+            .handoffs
+            .values()
+            .filter_map(|pending| {
+                let deadline = pending.delivery.valid_until_ms;
+                if !initialize && (deadline > now_ms || settling(&pending.delivery.delivery_id)) {
+                    return None;
+                }
+                let existing = g.view.handoff_deliveries.get(&pending.id());
+                if deadline <= now_ms {
+                    if existing
+                        .is_some_and(|(_, status)| status.state() == DeliveryState::Unresolved)
+                    {
+                        return None;
+                    }
+                    Some(pending.status(DeliveryState::Unresolved, deadline, ""))
+                } else if initialize && existing.is_none() {
+                    Some(pending.status(
+                        DeliveryState::Pending,
+                        deadline.saturating_sub(crate::handoff::WINDOW_MS),
+                        "",
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if events.is_empty() {
+            return Ok(());
         }
+        self.write_unrecorded(&mut g)?;
+        self.store_hub_events(&mut g, events, &[], None, now_ms)
+    }
+
+    pub(crate) fn acknowledge_task_handoff(
+        &self,
+        id: &str,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let invalid = || Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "delivery_id");
+        let mut g = self.lock();
+        let Some((_, status)) = g.view.handoff_deliveries.get(id) else {
+            return Err(invalid());
+        };
+        if status.state() != DeliveryState::Unresolved {
+            return Err(invalid());
+        }
+        if status.acknowledged {
+            return Ok(());
+        }
+        let mut updated = status.clone();
+        updated.acknowledged = true;
+        updated.changed_at_ms = now_ms;
+        let mut delivery_id = Vec::with_capacity(16);
+        let (pairs, remainder) = id.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() || pairs.len() != 16 {
+            return Err(invalid());
+        }
+        for chunk in pairs {
+            let text = std::str::from_utf8(chunk).map_err(|_| invalid())?;
+            delivery_id.push(u8::from_str_radix(text, 16).map_err(|_| invalid())?);
+        }
+        let internal = || Error::new(ErrorCode::Internal).with("incident_id", "board.handoff");
+        let pending = g.handoffs.get(&delivery_id).ok_or_else(invalid)?;
+        let key = pending.key();
+        self.write_unrecorded(&mut g).map_err(|_| internal())?;
+        self.store_hub_events(
+            &mut g,
+            vec![Body::TaskHandoffDeliveryChanged(updated)],
+            &[],
+            Some(&key),
+            now_ms,
+        )
+        .map_err(|_| internal())?;
+        g.handoffs.remove(&delivery_id);
+        Ok(())
     }
 
     /// Persist intent before the wire write. After a lost response or a restart, a later error can
@@ -1090,12 +1179,14 @@ impl Hub {
     pub(crate) fn begin_handoff_attempt(
         &self,
         pending: &crate::handoff::Pending,
+        now_ms: u64,
     ) -> Result<bool, StoreError> {
         let mut g = self.lock();
         let record = g
             .handoffs
-            .get_mut(&pending.delivery.delivery_id)
-            .ok_or_else(|| StoreError("missing pending task handoff".into()))?;
+            .get(&pending.delivery.delivery_id)
+            .filter(|record| Self::handoff_can_send(&g.view, record, now_ms))
+            .ok_or_else(|| StoreError("task handoff is no longer pending".into()))?;
         if record.attempted {
             return Ok(true);
         }
@@ -1103,25 +1194,31 @@ impl Hub {
         started.attempted = true;
         self.store
             .set_setting(&started.key(), &started.encode_to_vec())?;
-        *record = started;
+        g.handoffs
+            .insert(started.delivery.delivery_id.clone(), started);
         Ok(false)
     }
 
     pub(crate) fn settle_handoff(
         &self,
         pending: &crate::handoff::Pending,
-        outcome: crate::handoff::Attempt,
+        outcome: &crate::handoff::Attempt,
         now_ms: u64,
     ) -> Result<(), StoreError> {
         use crate::handoff::Attempt;
         let id = &pending.delivery.delivery_id;
         let mut g = self.lock();
-        if outcome == Attempt::Retry || !g.handoffs.contains_key(id) {
+        if *outcome == Attempt::Retry || !g.handoffs.contains_key(id) {
             return Ok(());
         }
+        self.write_unrecorded(&mut g)?;
         let key = pending.key();
-        if outcome == Attempt::Rejected {
-            self.write_unrecorded(&mut g)?;
+        let status = match outcome {
+            Attempt::Delivered => pending.status(DeliveryState::Delivered, now_ms, ""),
+            Attempt::Rejected(code) => pending.status(DeliveryState::Failed, now_ms, code.as_str()),
+            Attempt::Retry => return Ok(()),
+        };
+        if matches!(outcome, Attempt::Rejected(_)) {
             let project = &pending.board_project;
             let task = format!("{project}/{}", pending.delivery.task_id);
             let still_current = |g: &Inner| {
@@ -1138,8 +1235,9 @@ impl Hub {
                 }
                 if still_current(&g) {
                     let before = self.boards.checkpoint(project);
-                    let events = self.boards.revert_tracked(pending, &g.view, now_ms);
+                    let mut events = self.boards.revert_tracked(pending, &g.view, now_ms);
                     if !events.is_empty() {
+                        events.push(status);
                         if let Err(error) = self.store_board(
                             &mut g,
                             project,
@@ -1157,7 +1255,7 @@ impl Hub {
                 }
             }
         }
-        self.store.remove_setting(&key)?;
+        self.store_hub_events(&mut g, vec![status], &[], Some(&key), now_ms)?;
         g.handoffs.remove(id);
         Ok(())
     }
@@ -1308,6 +1406,20 @@ impl Hub {
             .boards
             .snapshot(project, now_ms)
             .ok_or_else(|| StoreError(format!("no board for {project}")))?;
+        let all: Vec<(&str, &[u8])> = std::iter::once((key, snapshot.as_slice()))
+            .chain(settings.iter().map(|(k, v)| (k.as_str(), v.as_slice())))
+            .collect();
+        self.store_hub_events(g, bodies, &all, remove, now_ms)
+    }
+
+    fn store_hub_events(
+        &self,
+        g: &mut Inner,
+        bodies: Vec<Body>,
+        settings: &[(&str, &[u8])],
+        remove: Option<&str>,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
         let first = g.hub_seq + 1;
         let events: Vec<Event> = bodies
             .into_iter()
@@ -1321,14 +1433,11 @@ impl Hub {
             .collect();
         let payloads: Vec<(u64, Vec<u8>)> =
             events.iter().map(|e| (now_ms, e.encode_to_vec())).collect();
-        let all: Vec<(&str, &[u8])> = std::iter::once((key, snapshot.as_slice()))
-            .chain(settings.iter().map(|(k, v)| (k.as_str(), v.as_slice())))
-            .collect();
         let positions = self.store.append_batch_with_setting_changes(
             RESERVED_HUB_ID,
             first,
             &payloads,
-            &all,
+            settings,
             remove,
         )?;
         g.hub_seq += events.len() as u64;
@@ -3409,7 +3518,9 @@ mod tests {
             .pop()
             .unwrap();
         assert_eq!(pending, before);
-        assert!(!hub.begin_handoff_attempt(&pending).unwrap());
+        assert!(!hub
+            .begin_handoff_attempt(&pending, crate::server::now_ms())
+            .unwrap());
         let router = hub.router();
         let receive = |command| {
             let ToNode::Command { request, reply, .. } = command else {
@@ -3439,7 +3550,9 @@ mod tests {
             .pending_handoffs(crate::server::now_ms(), |_| true, 1)
             .pop()
             .unwrap();
-        assert!(hub.begin_handoff_attempt(&pending).unwrap());
+        assert!(hub
+            .begin_handoff_attempt(&pending, crate::server::now_ms())
+            .unwrap());
         let router = hub.router();
 
         let (result, ()) = tokio::join!(handoff::send_on(router, &pending), async {
@@ -3463,12 +3576,79 @@ mod tests {
                 .unwrap();
         });
         assert_eq!(result, handoff::Attempt::Delivered);
-        hub.settle_handoff(&pending, result, crate::server::now_ms())
+        hub.settle_handoff(&pending, &result, crate::server::now_ms())
             .unwrap();
         drop(hub);
         let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let (view, pos) = hub.view();
+        let snapshot = crate::server::snapshot_of(&view, pos);
+        assert_eq!(snapshot.task_handoff_deliveries.len(), 1);
+        assert_eq!(
+            snapshot.task_handoff_deliveries[0].state(),
+            DeliveryState::Delivered
+        );
         assert!(hub.store().handoff_settings().unwrap().is_empty());
         assert_eq!(hub.view().0.tasks[&format!("p/{task}")].owner, "receiver/a");
+        drop(hub);
+        remove_db(&path);
+    }
+
+    #[test]
+    fn an_expired_handoff_is_visible_and_acknowledgment_frees_its_reservation_after_restart() {
+        let (hub, path) = hub_on_file("handoff-status");
+        let (task, _links) = stage_handoff(
+            &hub,
+            vec![agora_protocol::handshake::TASK_HANDOFF_V1.into()],
+        );
+        board_result(transfer(&hub, &task));
+        let (view, pos) = hub.view();
+        let owner = crate::server::snapshot_of(&view, pos);
+        let queued = &owner.task_handoff_deliveries[0];
+        assert_eq!(queued.state(), DeliveryState::Pending);
+        assert!(hub
+            .acknowledge_task_handoff(&queued.delivery_id, queued.changed_at_ms)
+            .is_err());
+        let deadline = queued.changed_at_ms + crate::handoff::WINDOW_MS;
+        let pending = hub
+            .pending_handoffs(deadline - 1, |_| true, 1)
+            .pop()
+            .unwrap();
+        hub.expire_handoffs(deadline, |_| false).unwrap();
+        assert!(hub.pending_handoffs(deadline - 1, |_| true, 1).is_empty());
+        assert!(hub.begin_handoff_attempt(&pending, deadline - 1).is_err());
+        let (view, pos) = hub.view();
+        let snapshot = crate::server::snapshot_of(&view, pos);
+        let outcome = &snapshot.task_handoff_deliveries[0];
+        assert_eq!(outcome.state(), DeliveryState::Unresolved);
+        assert!(!outcome.acknowledged);
+        assert_eq!(view.tasks[&format!("p/{task}")].owner, "receiver/a");
+        assert_eq!(hub.store().handoff_settings().unwrap().len(), 1);
+        let member =
+            crate::scope::Scope::from_view(["giver/p".into(), "receiver/p".into()].into(), &view);
+        assert!(crate::server::snapshot_of(&member.filter_view(&view), pos)
+            .task_handoff_deliveries
+            .is_empty());
+        drop(hub);
+
+        let hub = Hub::open_at(SqliteStore::open(&path).unwrap(), deadline + 1).unwrap();
+        let before = hub.view().1;
+        hub.acknowledge_task_handoff(&outcome.delivery_id, deadline + 2)
+            .unwrap();
+        hub.acknowledge_task_handoff(&outcome.delivery_id, deadline + 2)
+            .unwrap();
+        let (view, pos) = hub.view();
+        assert_eq!(pos, before + 1, "a repeat does not record a second event");
+        assert_eq!(view.tasks[&format!("p/{task}")].owner, "receiver/a");
+        assert!(hub.store().handoff_settings().unwrap().is_empty());
+        drop(hub);
+
+        let hub = Hub::open_at(SqliteStore::open(&path).unwrap(), deadline + 3).unwrap();
+        let (view, pos) = hub.view();
+        let snapshot = crate::server::snapshot_of(&view, pos);
+        let outcome = &snapshot.task_handoff_deliveries[0];
+        assert_eq!(outcome.state(), DeliveryState::Unresolved);
+        assert!(outcome.acknowledged);
+        assert_eq!(view.tasks[&format!("p/{task}")].owner, "receiver/a");
         drop(hub);
         remove_db(&path);
     }
@@ -3506,8 +3686,12 @@ mod tests {
         let now = crate::server::now_ms();
         let pending = || hub.pending_handoffs(now, |_| true, 1).pop().unwrap();
         board_result(transfer(&hub, &task));
-        hub.settle_handoff(&pending(), crate::handoff::Attempt::Rejected, now)
-            .unwrap();
+        hub.settle_handoff(
+            &pending(),
+            &crate::handoff::Attempt::Rejected(agora_protocol::ErrorCode::MeshRecipientUnknown),
+            now,
+        )
+        .unwrap();
         let key = format!("p/{task}");
         assert_eq!(hub.view().0.tasks[&key].owner, "giver/a");
 
@@ -3519,8 +3703,12 @@ mod tests {
             "task_complete",
             serde_json::json!({"task_id": task, "summary": "finished"}),
         ));
-        hub.settle_handoff(&rejected, crate::handoff::Attempt::Rejected, now)
-            .unwrap();
+        hub.settle_handoff(
+            &rejected,
+            &crate::handoff::Attempt::Rejected(agora_protocol::ErrorCode::MeshRecipientUnknown),
+            now,
+        )
+        .unwrap();
         assert!(hub.view().0.tasks[&key].done);
         assert_eq!(hub.view().0.tasks[&key].owner, "receiver/a");
     }

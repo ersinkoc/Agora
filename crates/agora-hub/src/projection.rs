@@ -198,6 +198,9 @@ pub struct TaskView {
 pub struct View {
     /// Shared-board tasks (ADR-0040), keyed `<project>/<task id>`.
     pub tasks: BTreeMap<String, TaskView>,
+    // Shared with subscription snapshots. Delivery events are the only writers.
+    pub(crate) handoff_deliveries:
+        Arc<BTreeMap<String, (u64, agora_protocol::v1::TaskHandoffDeliveryChanged)>>,
     /// Held paths, keyed `<agent>\0<path>` → expiry (ms).
     pub leases: BTreeMap<String, (String, String, u64)>,
     pub workspaces: BTreeMap<String, agora_protocol::v1::WorkspaceRegistered>,
@@ -478,6 +481,7 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         // ADR-0070, ADR-0073, ADR-0053: presence, forgetting a machine and forgetting an agent (named by its hub-wide key, which
         // holds its node) are the hub's own facts.
         Body::NodeLink(_) => return Err("node_link"),
+        Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
         Body::NodeForgotten(_) => return Err("node_forgotten"),
         Body::AgentForgotten(_) => return Err("agent_forgotten"),
         Body::NodeOnline(e) => &e.node_id,
@@ -1253,6 +1257,22 @@ impl View {
                 }
             }
             // Mesh and file events are not part of this view (the mesh broker and clients consume them).
+            Body::TaskHandoffDeliveryChanged(status) if producer == RESERVED_HUB_ID => {
+                let rows = Arc::make_mut(&mut self.handoff_deliveries);
+                rows.insert(status.delivery_id.clone(), (ev.seq, status.clone()));
+                if crate::handoff::is_settled(status) {
+                    let settled = || rows.values().filter(|(_, status)| crate::handoff::is_settled(status));
+                    if settled().nth(crate::handoff::MAX_SETTLED).is_some() {
+                        let oldest = settled()
+                            .min_by_key(|(seq, _)| *seq)
+                            .map(|(_, status)| status.delivery_id.clone());
+                        if let Some(id) = oldest {
+                            rows.remove(&id);
+                        }
+                    }
+                }
+            }
+            Body::TaskHandoffDeliveryChanged(_) => {}
             Body::TaskChanged(t) => {
                 // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
                 let owner = match (

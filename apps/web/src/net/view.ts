@@ -87,6 +87,38 @@ export interface ApprovalV { agentId: string; action: string; detail: string; ex
 const alwaysFields = (p: { scopes?: readonly (number | null)[] | null; alwaysLabel?: string | null; alwaysOptionId?: string | null }): Pick<ApprovalV, 'scopes' | 'alwaysLabel' | 'alwaysOptionId'> =>
   p.scopes?.length ? { scopes: p.scopes.map((x) => Number(x ?? 0)), alwaysLabel: p.alwaysLabel ?? '', alwaysOptionId: p.alwaysOptionId ?? '' } : {};
 
+const HANDOFF_STATES = ['pending', 'delivered', 'failed', 'unresolved'] as const;
+type HandoffState = typeof HANDOFF_STATES[number];
+
+export interface HandoffDeliveryModel {
+  id: string;
+  receiver: string;
+  state: HandoffState;
+  errorCode: string;
+  acknowledged: boolean;
+}
+interface HandoffDeliveryV extends HandoffDeliveryModel { taskKey: string }
+
+const HANDOFF_SETTLED_MAX = 256;
+export const handoffSettled = (delivery: HandoffDeliveryModel) =>
+  delivery.state === 'delivered' || delivery.state === 'failed' || delivery.acknowledged;
+
+function recordHandoff(v: View, row: agora.v1.TaskHandoffDeliveryChanged.$Properties): void {
+  const id = row.deliveryId ?? '';
+  const state = HANDOFF_STATES[Number(row.state ?? 0) - 1];
+  if (!id || !state || !row.projectId || !row.taskId) return;
+  const delivery = {
+    id, state, taskKey: `${row.projectId}/${row.taskId}`, receiver: row.receiverAgentId ?? '',
+    errorCode: row.errorCode ?? '', acknowledged: row.acknowledged ?? false,
+  };
+  v.handoffDeliveries.delete(id);
+  v.handoffDeliveries.set(id, delivery);
+  if (handoffSettled(delivery)) {
+    const settled = [...v.handoffDeliveries.values()].filter(handoffSettled);
+    if (settled.length > HANDOFF_SETTLED_MAX) v.handoffDeliveries.delete(settled[0]!.id);
+  }
+}
+
 export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
 // `producer` is the machine that recorded it; `paired` marks a copy already matched with its twin (#905). `via` is the machine whose
@@ -104,6 +136,7 @@ export interface View {
   worktrees: Map<string, WorktreeV>;
   agents: Map<string, AgentV>;
   approvals: Map<string, ApprovalV>;
+  handoffDeliveries: Map<string, HandoffDeliveryV>;
   tasks: Map<string, TaskV>; // the shared board's tasks seen since this window opened (ADR-0039)
   leases: Map<string, LeaseV>;
   withTerminal: Set<string>; // agents that have a terminal; the others (chat agents) are talked to with prompts
@@ -126,7 +159,7 @@ const MAX_MESSAGES = 50;
 const RESOLVED_KEPT = 256; // decided approvals remembered per machine, as the hub (`RESOLVED_APPROVALS_KEPT`)
 
 export function emptyView(): View {
-  return { pos: 0, workspaces: new Map(), agentWorkspaces: new Map(), messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), leases: new Map(), withTerminal: new Set() };
+  return { pos: 0, workspaces: new Map(), agentWorkspaces: new Map(), messages: [], nodes: new Map(), checkouts: new Map(), worktrees: new Map(), agents: new Map(), approvals: new Map(), tasks: new Map(), handoffDeliveries: new Map(), leases: new Map(), withTerminal: new Set() };
 }
 
 export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
@@ -188,6 +221,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       agentId: p.agentId ?? '', action: p.action ?? '', detail: p.detail ?? '', expiresAtMs: num(p.expiresAtMs), ...alwaysFields(p),
     });
   }
+  for (const row of s.taskHandoffDeliveries ?? []) recordHandoff(v, row);
   foldRecentMessages(v, s.recentMessages ?? []);
   return v;
 }
@@ -239,8 +273,8 @@ function foldRecentMessages(v: View, recent: readonly agora.v1.PositionedEvent.$
 export function applyEvent(v: View, pos: number, ev: Ev): void {
   // ADR-0090: the hub sends an agent's last settings and slash commands right after a snapshot, AT the snapshot's position (the snapshot
   // has no field for them). These two replace what is held, so they are applied at the window's own position too; every other event
-  // at or before it was already seen.
-  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands' || ev.body === 'agentQuotaObserved');
+  // at or before it was already seen. Active handoffs that exceeded the snapshot frame also follow at its position.
+  const replacing = pos === v.pos && (ev.body === 'agentSessionConfig' || ev.body === 'agentCommands' || ev.body === 'agentQuotaObserved' || (ev.body === 'taskHandoffDeliveryChanged' && ev.producerId === 'hub'));
   if (pos <= v.pos && !replacing) return;
   v.pos = pos;
   const producer = ev.producerId ?? '';
@@ -514,6 +548,9 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       postMessage(v, producer, at, e.messagePosted);
       break;
     // The hub writes board events with ids that are already `<node>/<agent>`.
+    case 'taskHandoffDeliveryChanged':
+      if (producer === 'hub') recordHandoff(v, e.taskHandoffDeliveryChanged);
+      break;
     case 'taskChanged': {
       const b = e.taskChanged;
       v.tasks.set(`${b.projectId ?? ''}/${b.taskId ?? ''}`, { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done });
@@ -777,7 +814,7 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
 }
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.
-export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[] }
+export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'done'; owner: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[]; handoffs?: HandoffDeliveryModel[] }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -808,9 +845,16 @@ export function boards(v: View): BoardModel[] {
   };
   const heldBy = new Map<string, string[]>();
   for (const l of v.leases.values()) { const list = heldBy.get(l.agentId); if (list) list.push(l.path); else heldBy.set(l.agentId, [l.path]); }
+  const handoffsByTask = new Map<string, HandoffDeliveryModel[]>();
+  for (const delivery of v.handoffDeliveries.values()) {
+    const row = { ...delivery, receiver: label(delivery.receiver) };
+    const list = handoffsByTask.get(delivery.taskKey);
+    if (list) list.push(row);
+    else handoffsByTask.set(delivery.taskKey, [row]);
+  }
   for (const [id, t] of v.tasks) {
     const owner = t.ownerId ? agents.get(t.ownerId) : undefined;
-    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [] });
+    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: t.done ? 'done' : t.ownerId ? 'claimed' : 'open', owner: t.ownerId ? label(t.ownerId) : '', ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [], handoffs: handoffsByTask.get(id)?.reverse() });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

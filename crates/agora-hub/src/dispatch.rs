@@ -43,6 +43,9 @@ pub enum Route {
     },
     /// ADR-0033: the hub answers from its own view and prices.
     UsageReport,
+    AcknowledgeTaskHandoff {
+        delivery_id: String,
+    },
     /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
     ThemeCatalogList,
     ThemeCatalogGet {
@@ -65,6 +68,7 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
     let may = req.command.as_ref().is_some_and(|c| {
         // ADR-0109: only the hub can issue a durable handoff delivery.
         !matches!(c, C::DeliverTaskHandoff(_))
+            && (!matches!(c, C::AcknowledgeTaskHandoff(_)) || who.role == Role::Owner)
             && (who.role != Role::Viewer || viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
     });
@@ -88,6 +92,10 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         Some(C::NodeForget(f)) => Route::ForgetNode {
             node_id: f.node_id.clone(),
             refuse_return: f.refuse_return,
+        },
+        Some(C::AcknowledgeTaskHandoff(_)) if names_a_node => Route::TargetNotAllowed,
+        Some(C::AcknowledgeTaskHandoff(cmd)) => Route::AcknowledgeTaskHandoff {
+            delivery_id: cmd.delivery_id.clone(),
         },
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
@@ -229,6 +237,31 @@ mod tests {
             projects: None,
             session: String::new(),
         }
+    }
+
+    #[test]
+    fn only_the_owner_can_acknowledge_a_handoff_without_a_target() {
+        let mut request = CommandRequest {
+            command: Some(C::AcknowledgeTaskHandoff(v1::AcknowledgeTaskHandoff {
+                delivery_id: "opaque".into(),
+            })),
+            ..Default::default()
+        };
+        for role in [Role::Viewer, Role::Member] {
+            assert!(matches!(
+                route(&who(role), None, &request),
+                Route::Forbidden { .. }
+            ));
+        }
+        assert!(matches!(
+            route(&who(Role::Owner), None, &request),
+            Route::AcknowledgeTaskHandoff { .. }
+        ));
+        request.target_node = "node".into();
+        assert!(matches!(
+            route(&who(Role::Owner), None, &request),
+            Route::TargetNotAllowed
+        ));
     }
 
     /// A person's writes past the limit are refused until the span has passed; only the first refusal of a span is worth a row; other

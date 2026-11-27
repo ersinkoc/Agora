@@ -4,6 +4,7 @@ import { setLanguage } from '../i18n';
 import type { BoardModel, BoardTaskModel } from '../net/view';
 import { COLUMN_PAGE, TITLE_MAX, columnsOf, plain } from './boardColumns';
 import { BoardColumns } from './BoardView';
+import { AcknowledgeHandoffContext } from './BoardHandoffs';
 
 const task = (id: string, status: BoardTaskModel['status'], extra: Partial<BoardTaskModel> = {}): BoardTaskModel => ({ id, title: `T${id}`, status, owner: status === 'open' ? '' : 'Ada', ...extra });
 const board = (tasks: BoardTaskModel[]): BoardModel => ({ projectId: 'p', project: 'proj', folders: [], tasks, leases: [] });
@@ -81,3 +82,17 @@ describe('the board look (redesign PR 12)', () => {
   });
 });
 beforeEach(() => setLanguage('en'));
+
+it('shows unresolved handoffs and only offers acknowledgment when an action is available', () => {
+  setLanguage('en');
+  const data = board([task('1', 'claimed', { handoffs: [
+    { id: 'one', receiver: 'West agent', state: 'unresolved', acknowledged: false, errorCode: '' },
+    { id: 'two', receiver: 'Old agent', state: 'failed', acknowledged: false, errorCode: 'mesh.recipient_unknown' },
+  ] })]);
+  const columns = <BoardColumns board={data} />;
+  expect(renderToStaticMarkup(columns)).not.toContain('Acknowledge unconfirmed handoff');
+  const html = renderToStaticMarkup(<AcknowledgeHandoffContext.Provider value={async () => {}}>{columns}</AcknowledgeHandoffContext.Provider>);
+  expect(html).toContain('Acknowledge unconfirmed handoff');
+  expect(html).toContain('Handoff history');
+  expect(html).toContain('mesh.recipient_unknown');
+});

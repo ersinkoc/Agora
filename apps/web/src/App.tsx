@@ -1,3 +1,4 @@
+import { AcknowledgeHandoffContext } from './components/BoardHandoffs';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
@@ -677,6 +678,9 @@ export function App() {
     <QuotaProvider obs={quotaList} machines={quotaMachines}>
     <CloseAgentContext.Provider value={hub && api && changes ? closeAgent : undefined}>
     <ChatActionsContext.Provider value={chatActions}>
+    <AcknowledgeHandoffContext.Provider value={api && ownsMachines(role) ? async (deliveryId) => {
+      await api.command('', { acknowledgeTaskHandoff: { deliveryId } });
+    } : undefined}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
       {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined}
@@ -718,6 +722,7 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </GiveContext.Provider>
+    </AcknowledgeHandoffContext.Provider>
     </ChatActionsContext.Provider>
     </CloseAgentContext.Provider>
     </QuotaProvider>

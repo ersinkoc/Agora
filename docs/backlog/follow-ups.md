@@ -8,11 +8,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **Task handoff delivery on the board** (ADR-0109, ADR-0121 Accepted): the hub retries the durable queue and logs an
-  unresolved delivery after its deadline. Add visible delivery states and reconciliation before treating the board as the
-  operator's view of delivery. Unresolved entries count toward the queue limit. When the receiver's node process restarts instead
-  of reconnecting, the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the
-  claim of a still-running receiver across holder reattachment without giving it to a replacement run.
+- **Task ownership across receiver reattachment** (ADR-0109): when the receiver's node process restarts instead of reconnecting,
+  the existing board restart path releases its claims even if a holder keeps the run and its inbox. Preserve the claim of a
+  still-running receiver across holder reattachment without giving it to a replacement run.
 - **Durable node handoff writes**: the node writes, syncs and prunes records while it holds the broker mutex. Measure worst-case contention before moving I/O out of the lock.
 - **Board handoffs and members** (**decision**): a handoff made with the hub board's `handoff` tool is stamped `producer_id: "hub"`, so
   `Scope::admit` hides it from a member even when both ends are theirs (`lease_visible` special-cases the hub id; messages and handoffs do

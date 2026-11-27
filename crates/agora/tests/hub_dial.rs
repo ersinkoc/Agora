@@ -2068,6 +2068,16 @@ command = [{:?}, "--adapter"]
         hub.state.hub.view().0.tasks[&format!("{project}/{id}")].owner,
         receiver
     );
+    wait(
+        "a matching durable receipt reaches the web snapshot",
+        || {
+            let (view, pos) = hub.state.hub.view();
+            let snapshot = server::snapshot_of(&view, pos);
+            matches!(snapshot.task_handoff_deliveries.as_slice(), [delivery]
+            if delivery.state() == agora_protocol::v1::TaskHandoffDeliveryState::Delivered
+                && delivery.task_id == id && delivery.receiver_agent_id == receiver)
+        },
+    );
 }
 
 /// ADR-0112: three machines with different projects on a real hub. An agent on a solo hub sees every machine that agreed on the view

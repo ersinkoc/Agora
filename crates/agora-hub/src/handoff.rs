@@ -15,6 +15,7 @@ use crate::store::{SqliteStore, StoreError};
 pub(crate) const WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_COUNT: usize = 1_024;
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_SETTLED: usize = 256;
 const MAX_IN_FLIGHT: usize = 16;
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -42,15 +43,44 @@ impl Pending {
         self.encoded_len() + 2 * usize::from(!self.attempted)
     }
 
-    pub(crate) fn key(&self) -> String {
-        let id: String = self
-            .delivery
-            .delivery_id
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        format!("task-handoff.{id}")
+    pub(crate) fn id(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(self.delivery.delivery_id.len() * 2);
+        for &byte in &self.delivery.delivery_id {
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 0xf)]));
+        }
+        out
     }
+
+    pub(crate) fn key(&self) -> String {
+        format!("task-handoff.{}", self.id())
+    }
+
+    pub(crate) fn status(
+        &self,
+        state: v1::TaskHandoffDeliveryState,
+        changed_at_ms: u64,
+        error_code: &str,
+    ) -> v1::event::Body {
+        v1::event::Body::TaskHandoffDeliveryChanged(v1::TaskHandoffDeliveryChanged {
+            delivery_id: self.id(),
+            project_id: self.board_project.clone(),
+            task_id: self.delivery.task_id.clone(),
+            receiver_agent_id: format!("{}/{}", self.receiver_node, self.delivery.agent_id),
+            state: state as i32,
+            changed_at_ms,
+            error_code: error_code.to_string(),
+            acknowledged: false,
+        })
+    }
+}
+
+pub(crate) fn is_settled(status: &v1::TaskHandoffDeliveryChanged) -> bool {
+    matches!(
+        status.state(),
+        v1::TaskHandoffDeliveryState::Delivered | v1::TaskHandoffDeliveryState::Failed
+    ) || status.acknowledged
 }
 
 pub(crate) type Queue = BTreeMap<Vec<u8>, Pending>;
@@ -91,10 +121,10 @@ pub(crate) fn reserve(queue: &Queue, pending: &Pending) -> Result<(), Error> {
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Attempt {
     Delivered,
-    Rejected,
+    Rejected(ErrorCode),
     Retry,
 }
 
@@ -108,20 +138,20 @@ fn classify(pending: &Pending, response: v1::CommandResponse) -> Attempt {
             Attempt::Delivered
         }
         Some(command_response::Result::Err(err)) => match ErrorCode::parse(&err.code) {
-            ErrorCode::ApprovalGrantRequired
+            code @ (ErrorCode::ApprovalGrantRequired
             | ErrorCode::NodePolicyDenied
             | ErrorCode::MeshRecipientUnknown
             | ErrorCode::MeshBodyTooLarge
             | ErrorCode::MeshTooManyRefs
             | ErrorCode::ProtocolInvalidMessage
-            | ErrorCode::ProtocolCapabilityMissing => Attempt::Rejected,
+            | ErrorCode::ProtocolCapabilityMissing) => Attempt::Rejected(code),
             ErrorCode::NodeResourceLimit
                 if err.params.get("resource").is_some_and(|p| {
                     matches!(&p.value, Some(v1::param_value::Value::Str(s)) if
                         matches!(s.as_str(), "handoff_records" | "handoff_bytes"))
                 }) =>
             {
-                Attempt::Rejected
+                Attempt::Rejected(ErrorCode::NodeResourceLimit)
             }
             _ => Attempt::Retry,
         },
@@ -154,18 +184,23 @@ pub(crate) async fn run(hub: &Hub) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut retry = BTreeMap::<Vec<u8>, (u64, u64)>::new();
-    let mut reported = std::collections::BTreeSet::new();
+    let mut settling = BTreeMap::new();
     loop {
         tick.tick().await;
         let now = now_ms();
-        hub.report_unresolved_handoffs(now, &mut reported);
+        // Keep answers while their transactions are unavailable, without retrying or expiring those deliveries.
+        settling.retain(|_, (pending, outcome)| hub.settle_handoff(pending, outcome, now).is_err());
+        if let Err(error) = hub.expire_handoffs(now, |id| settling.contains_key(id)) {
+            eprintln!("task handoff expiry: {error}");
+        }
         let mut nodes = std::collections::BTreeSet::new();
         let batch = hub.pending_handoffs(
             now,
             |p| {
-                retry
-                    .get(&p.delivery.delivery_id)
-                    .is_none_or(|(at, _)| now >= *at)
+                !settling.contains_key(&p.delivery.delivery_id)
+                    && retry
+                        .get(&p.delivery.delivery_id)
+                        .is_none_or(|(at, _)| now >= *at)
                     && hub
                         .router()
                         .has_capability(&p.receiver_node, TASK_HANDOFF_V1)
@@ -175,13 +210,13 @@ pub(crate) async fn run(hub: &Hub) {
         );
         let mut sends = tokio::task::JoinSet::new();
         for pending in batch {
-            let Ok(may_have_arrived) = hub.begin_handoff_attempt(&pending) else {
+            let Ok(may_have_arrived) = hub.begin_handoff_attempt(&pending, now_ms()) else {
                 continue;
             };
             let router = hub.router().clone();
             sends.spawn(async move {
                 let outcome = match send_on(&router, &pending).await {
-                    Attempt::Rejected if may_have_arrived => Attempt::Retry,
+                    Attempt::Rejected(_) if may_have_arrived => Attempt::Retry,
                     outcome => outcome,
                 };
                 (pending, outcome)
@@ -192,9 +227,12 @@ pub(crate) async fn run(hub: &Hub) {
                 continue;
             };
             let id = pending.delivery.delivery_id.clone();
-            if outcome != Attempt::Retry && hub.settle_handoff(&pending, outcome, now_ms()).is_ok()
-            {
+            if outcome != Attempt::Retry {
                 retry.remove(&id);
+                if let Err(error) = hub.settle_handoff(&pending, &outcome, now_ms()) {
+                    eprintln!("task handoff settlement: {error}");
+                    settling.insert(id, (pending, outcome));
+                }
             } else {
                 let entry = retry.entry(id).or_insert((0, 500));
                 entry.1 = (entry.1 * 2).min(60_000);

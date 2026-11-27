@@ -903,9 +903,29 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 expires_at_ms: *exp,
             })
             .collect(),
+        task_handoff_deliveries: Vec::new(),
     };
+    let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
+    if owner {
+        let mut statuses: Vec<_> = view.handoff_deliveries.values().collect();
+        statuses.sort_unstable_by_key(|(seq, status)| {
+            (crate::handoff::is_settled(status), std::cmp::Reverse(*seq))
+        });
+        let mut selected = Vec::new();
+        for (seq, status) in statuses {
+            let len = status.encoded_len();
+            let size = prost::encoding::key_len(13)
+                + prost::encoding::encoded_len_varint(len as u64)
+                + len;
+            if size <= remaining {
+                remaining -= size;
+                selected.push((*seq, status.clone()));
+            }
+        }
+        selected.sort_unstable_by_key(|(seq, _)| *seq);
+        snapshot.task_handoff_deliveries = selected.into_iter().map(|(_, status)| status).collect();
+    }
     if !recent_messages.is_empty() {
-        let mut remaining = DEFAULT_MAX_PAYLOAD.saturating_sub(snapshot.encoded_len());
         // Each size includes the repeated field's tag and length. Keep the newest messages that fit, then send them oldest first.
         for message in recent_messages.iter().rev() {
             if message.size > remaining {
@@ -1044,6 +1064,38 @@ where
         };
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
+        if owner && scope.is_none() && !view.handoff_deliveries.is_empty() {
+            // Active reservations must stay reachable even when the base snapshot fills the frame.
+            let included: std::collections::BTreeSet<_> = body
+                .task_handoff_deliveries
+                .iter()
+                .map(|status| status.delivery_id.as_str())
+                .collect();
+            let mut overflow: Vec<_> = view
+                .handoff_deliveries
+                .values()
+                .filter(|(_, status)| {
+                    !crate::handoff::is_settled(status)
+                        && !included.contains(status.delivery_id.as_str())
+                })
+                .collect();
+            overflow.sort_unstable_by_key(|(seq, _)| *seq);
+            for (seq, status) in overflow {
+                send_positioned(
+                    &mut conn,
+                    &crate::hub::Delivered {
+                        pos: *pos,
+                        event: v1::Event {
+                            producer_id: crate::ca::RESERVED_HUB_ID.into(),
+                            seq: *seq,
+                            at_ms: status.changed_at_ms,
+                            body: Some(v1::event::Body::TaskHandoffDeliveryChanged(status.clone())),
+                        },
+                    },
+                )
+                .await?;
+            }
+        }
     }
     // ADR-0090: the snapshot has no field for an agent's config options and slash commands; the last report of each follows it as
     // the event the node sent, at the snapshot's position (a window applies these two, which replace, at its own position). Only
@@ -1317,6 +1369,15 @@ where
                 refuse(e)
             }
         }),
+        crate::dispatch::Route::AcknowledgeTaskHandoff { delivery_id } => {
+            let result = hub.acknowledge_task_handoff(&delivery_id, now_ms());
+            let outcome = result.as_ref().map_or_else(|e| e.code.as_str(), |()| "ok");
+            audit(hub, who, "task_handoff.acknowledge", "", outcome);
+            Some(match result {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
         // Answered by the hub itself from its own view and prices (ADR-0033); it names no node.
         crate::dispatch::Route::UsageReport => Some(v1::CommandResponse {
             request_id: client_request_id.clone(),
@@ -1580,6 +1641,14 @@ async fn send_shown<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    if !owner
+        && matches!(
+            d.event.body,
+            Some(v1::event::Body::TaskHandoffDeliveryChanged(_))
+        )
+    {
+        return Ok(());
+    }
     // ADR-0115: a window gets an older node's project id folded, as the snapshot has it.
     let folded = crate::projection::fold_event(&d.event);
     let event = folded.as_ref().unwrap_or(&d.event);

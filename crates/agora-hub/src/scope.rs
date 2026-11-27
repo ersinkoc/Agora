@@ -409,7 +409,7 @@ impl Scope {
             Body::LeaseGranted(e) => self.lease_visible(node, &e.agent_id),
             Body::LeaseReleased(e) => self.lease_visible(node, &e.agent_id),
             // The shared board spans machines, so no single grant covers it.
-            Body::TaskChanged(_) => false,
+            Body::TaskChanged(_) | Body::TaskHandoffDeliveryChanged(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.
             Body::TaskDispatched(e) => self.granted(self.agents.get(&q(&e.agent_id))),
         }

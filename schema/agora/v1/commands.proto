@@ -132,6 +132,8 @@ message CommandRequest {
     HelperStartResult helper_start_result = 123;
     HelperFollow helper_follow = 124;
     HelperRelease helper_release = 125;
+    // ADR-0121: the signed-in owner clears an unresolved reservation on the hub.
+    AcknowledgeTaskHandoff acknowledge_task_handoff = 126;
   }
 }
 
@@ -1120,4 +1122,8 @@ message ThemeCatalogGet {
 message ThemeCatalogTheme {
   ThemeCatalogEntry entry = 1;
   string data = 2;
+}
+
+message AcknowledgeTaskHandoff {
+  string delivery_id = 1;
 }

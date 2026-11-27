@@ -1,0 +1,14 @@
+{
+  "producerId": "hub",
+  "seq": "41",
+  "atMs": "1700000000010",
+  "taskHandoffDeliveryChanged": {
+    "deliveryId": "00112233445566778899aabbccddeeff",
+    "projectId": "p",
+    "taskId": "t-1",
+    "receiverAgentId": "west/a",
+    "state": "TASK_HANDOFF_DELIVERY_STATE_FAILED",
+    "changedAtMs": "1700000000010",
+    "errorCode": "mesh.recipient_unknown"
+  }
+}

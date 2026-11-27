@@ -9,6 +9,7 @@ import { giveTaskOf } from '../net/give';
 import { Icon, type IconName } from './Icon';
 import { EmptyState, StatusPill, Tag, type Tone } from './kit';
 import { NoAskBadge } from './NoAskBadge';
+import { BoardHandoffs } from './BoardHandoffs';
 
 // Each column's mark and hue (the kit's tones): Backlog is a neutral fact, Doing is working blue, Done is finished green. The word and the
 // count say the same, so the colour is never the only sign.
@@ -31,6 +32,7 @@ function Card({ task, give }: { task: BoardTaskModel; give?: { projectId: string
         {held.slice(0, HELD_SHOWN).map((path) => <code key={path} dir="ltr" className="truncate font-mono">{plain(path, 80)}</code>)}
         {held.length > HELD_SHOWN && <span>{t('board-card-more-paths', { count: held.length - HELD_SHOWN })}</span>}
       </span>}
+      {task.handoffs && <BoardHandoffs deliveries={task.handoffs} />}
       {give && task.status === 'open' && <GiveButton task={giveTaskOf(give, task)} />}
     </li>
   );

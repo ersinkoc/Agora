@@ -55,7 +55,10 @@ Per project. Backed by the mesh task model (`docs/specs/mesh-tools.md`).
 - Card: title, owner agent or human, dependencies, linked branch/worktree, messages count.
 - Humans can create tasks, assign them to an agent kind or a specific agent, and reorder priority.
 - Assigning to an agent kind can start a new agent automatically on a chosen node (policy permitting).
-- Handoffs appear as card history.
+- **Task handoff delivery** (ADR-0121). The owner sees waiting and unconfirmed deliveries on the task card. The latest
+  finished delivery appears when there is no active one. Earlier results appear under **Handoff history**. A refused delivery
+  includes its stable error code. Acknowledging an unconfirmed delivery frees its place in the queue and keeps its outcome in
+  history. The task stays with its current owner.
 
 The Home sidebar groups a board by its logical project identity. Its folder name is a display label;
 two different projects with the same name stay separate. Each card shows its full selectable **Project identity**

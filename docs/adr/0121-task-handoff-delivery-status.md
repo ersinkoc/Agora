@@ -19,7 +19,8 @@ ADR-0109 makes the queue durable. A change of task owner and a receipt from the 
 
 The hub emits `TaskHandoffDeliveryChanged` and includes recent delivery states in the snapshot. The snapshot keeps active
 deliveries (up to the existing ADR-0109 queue limit) and up to 256 settled deliveries, newest by hub event sequence.
-During snapshot serialization delivery states fit within the negotiated frame ceiling before optional recent messages.
+During snapshot serialization delivery states fit within the frame ceiling before optional recent messages. Active rows that do
+not fit follow as positioned events at the snapshot cursor.
 The shared board is owner-only under current team rules. Delivery events and snapshot rows have that same visibility.
 
 `AcknowledgeTaskHandoff` is a hub-only command for the signed-in owner. It accepts the opaque delivery id and rejects a

@@ -151,6 +151,8 @@ message Snapshot {
   // and `MessagePosted` body). Positions are at or before `pos`. A client folds them in as it would the live events, and ignores any
   // other body.
   repeated PositionedEvent recent_messages = 12;
+  // ADR-0121: bounded delivery states, oldest to newest by hub event sequence.
+  repeated TaskHandoffDeliveryChanged task_handoff_deliveries = 13;
 }
 
 // hub -> client for every live or replayed event.

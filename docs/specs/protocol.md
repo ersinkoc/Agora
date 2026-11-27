@@ -1692,8 +1692,27 @@ could not load yields `mesh.unavailable` before the grant check because its acce
   events and the encoded delivery together in SQLite. An acceptance from the board means the hub queued the delivery. The hub
   retries the exact persisted request on a capable connection until a matching receipt, a definitive refusal, or expiry. It
   compensates a definitive refusal only for the same shared-board task revision and when no earlier attempt may have arrived.
-  A lost reply or expiry never rolls back the task. Expired deliveries stay in the queue for reconciliation and are reported in the
-  hub log. A receiver node process restart still applies the board's normal claim cleanup, including for runs taken up from a
+  A lost reply or expiry never rolls back the task. Expired deliveries stay in the queue for reconciliation on the project board
+  (ADR-0121). A receiver node process restart still applies the board's normal claim cleanup, including for runs taken up from a
   holder. The inbox receipt is independent of that cleanup.
 - **Golden fixtures.** `schema/fixtures/task-handoff/` covers the run identity, request and response. The published `AgentStarted`
   fixture keeps its original bytes.
+
+## Task handoff delivery status (ADR-0121)
+
+`TaskHandoffDeliveryChanged` is a hub-owned `Event` arm (91). It names the delivery, project, task and hub-wide recipient key.
+The delivery ID is 32 lowercase hex digits. States are pending (1), delivered (2), failed (3) and unresolved (4).
+A definitive failure can carry the receiver's stable error code. An unresolved delivery whose reservation has been cleared
+has `acknowledged = true`, with no change to task ownership. The hub records queue and delivery transitions with any related
+board mutations in the same transaction. An older hub's pending queue is restated when the upgraded hub opens it.
+
+`Snapshot.task_handoff_deliveries` (13) is ordered oldest first by the hub's event sequence. The hub keeps all active
+deliveries plus the newest 256 settled outcomes (delivered, failed, and acknowledged unresolved). At the frame limit the hub
+prefers active rows and then the newest settled rows. Active rows that do not fit follow as positioned delivery events at the
+snapshot's position, before live events. The initial ping reply acknowledges the full snapshot, including these rows. Only the owner receives the delivery events and snapshot rows, matching the existing
+shared board's team access. Once the hub persists expiry it never retries the delivery, even if its clock moves back.
+
+`AcknowledgeTaskHandoff` (`CommandRequest` arm 126) is answered by the hub with `Empty`. It requires a signed-in owner and an
+empty target node. A delivery must be unresolved. The hub removes its reservation and records acknowledgment in one
+transaction. A repeated request for an acknowledged outcome succeeds while that outcome remains in history. A missing,
+invalid or ineligible delivery ID is `protocol.invalid_message` with `field = delivery_id`.

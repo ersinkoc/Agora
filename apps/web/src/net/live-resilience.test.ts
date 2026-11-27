@@ -151,6 +151,7 @@ describe('coming back quickly', () => {
   it('a reconnect the hub has nothing new for goes live when the hub answers its ping, not at the next event', () => {
     const t = setup();
     t.goLive();
+    t.last().frame(STREAM_CONTROL, CONTROL_KIND.PONG, new Uint8Array());
     t.last().close(); // the hub restarted
     vi.advanceTimersByTime(1000);
     t.last().onopen?.();

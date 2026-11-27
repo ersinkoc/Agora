@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { agora } from '../gen/agora.js';
-import { decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_EVENTS } from './frame';
+import { CONTROL_KIND, decodeFrame, encodeFrame, EVENT_KIND, STREAM_CLOSE, STREAM_COMMANDS, STREAM_CONTROL, STREAM_EVENTS } from './frame';
 import { connectLive, type LinkState, type Socket } from './live';
 import { HISTORY_PENDING_MAX, snapshotAfterSize, type TerminalEvent } from '../terminal/frames';
 import { boards, costByProject, applyEvent, emptyView, fromSnapshot, machines, recentMessages, machinesOnline, projectChoices, tiles, type View } from './view';
@@ -429,8 +429,8 @@ class FakeSocket implements Socket {
   constructor(readonly url: string, readonly protocols: string[]) {}
   send(d: Uint8Array) { this.sent.push(d); }
   close() { this.closed = true; this.onclose?.(); }
-  deliver(kind: number, payload: Uint8Array) {
-    const b = encodeFrame({ streamId: STREAM_EVENTS, kind, payload });
+  deliver(kind: number, payload: Uint8Array, streamId = STREAM_EVENTS) {
+    const b = encodeFrame({ streamId, kind, payload });
     this.onmessage?.({ data: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
   }
 }
@@ -470,6 +470,41 @@ describe('live connection', () => {
     expect(v1.Subscribe.decode(decodeFrame(s2.sent[0] as Uint8Array)?.payload as Uint8Array).afterPos).toBeTruthy();
     live.close();
     expect(s2.closed).toBe(true);
+  });
+
+  it('requests a fresh snapshot after a disconnect during same-cursor handoff delivery replay', async () => {
+    const sockets: FakeSocket[] = [];
+    const live = connectLive({
+      url: 'ws://hub/', token: 't', backoffMs: () => 0,
+      socket: (u, p) => { const s = new FakeSocket(u, p); sockets.push(s); return s; },
+      onState: () => {}, onView: () => {},
+    });
+    try {
+      const resume = (socket: FakeSocket) => v1.Subscribe.decode(decodeFrame(socket.sent[0]!)!.payload).afterPos;
+      const snapshot = () => v1.Snapshot.encode({ pos: 30 }).finish();
+      const [first] = sockets;
+      first!.onopen?.();
+      first!.deliver(EVENT_KIND.SNAPSHOT, snapshot());
+      first!.deliver(EVENT_KIND.POSITIONED_EVENT, v1.PositionedEvent.encode({
+        pos: 30, event: ev('hub', 40, { taskHandoffDeliveryChanged: {
+          deliveryId: 'first', projectId: 'p', taskId: 't-1', state: 4,
+        } }),
+      }).finish());
+      first!.close();
+      await new Promise((r) => setTimeout(r, 5));
+      const second = sockets[1]!;
+      second.onopen?.();
+      expect(resume(second)).toBeFalsy();
+      second.deliver(EVENT_KIND.SNAPSHOT, snapshot());
+      second.deliver(CONTROL_KIND.PONG, new Uint8Array(), STREAM_CONTROL);
+      second.close();
+      await new Promise((r) => setTimeout(r, 5));
+      const third = sockets[2]!;
+      third.onopen?.();
+      expect(Number(resume(third))).toBe(30);
+    } finally {
+      live.close();
+    }
   });
 
   it('closes on a malformed frame and starts over from a snapshot', async () => {
@@ -781,4 +816,24 @@ describe('terminal history (ADR-0100 decision 2)', () => {
     expect(asked(first)).toEqual([2000, 2000, 0]);
     live.close();
   });
+});
+
+it('folds handoff delivery status from snapshot and hub events without changing the task owner', () => {
+  const row = { deliveryId: 'one', projectId: 'p', taskId: 't-1', receiverAgentId: 'west/a', state: 1 };
+  const view = fromSnapshot({
+    pos: 10, tasks: [{ taskId: 't-1', projectId: 'p', title: 'Review', claimedByAgentId: 'current/a' }],
+    taskHandoffDeliveries: [row],
+  });
+  const card = () => boards(view)[0]?.tasks[0];
+  expect(card()?.handoffs?.[0]?.state).toBe('pending');
+  applyEvent(view, 10, ev('hub', 5, { taskHandoffDeliveryChanged: { ...row, deliveryId: 'overflow', state: 4 } }));
+  expect(card()?.handoffs?.find((delivery) => delivery.id === 'overflow')?.state).toBe('unresolved');
+  applyEvent(view, 11, ev('west', 1, { taskHandoffDeliveryChanged: { ...row, state: 2 } }));
+  expect(card()?.handoffs?.find((delivery) => delivery.id === 'one')?.state).toBe('pending');
+  applyEvent(view, 12, ev('hub', 1, { taskHandoffDeliveryChanged: { ...row, state: 4 } }));
+  expect(card()?.handoffs?.[0]).toMatchObject({ state: 'unresolved', acknowledged: false });
+  applyEvent(view, 13, ev('hub', 2, { taskHandoffDeliveryChanged: { ...row, state: 4, acknowledged: true } }));
+  expect(card()?.handoffs).toHaveLength(2);
+  expect(card()?.owner).toBe('current/a');
+  expect(card()?.handoffs?.[0]).toMatchObject({ state: 'unresolved', acknowledged: true });
 });

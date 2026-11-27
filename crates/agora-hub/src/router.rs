@@ -845,6 +845,7 @@ pub fn forwardable(req: &v1::CommandRequest) -> Result<&str, Error> {
             | command_request::Command::BoardJoin(_)
             // ADR-0109: the hub's own durable handoff delivery; a client forwarding one would place work in an agent's inbox.
             | command_request::Command::DeliverTaskHandoff(_)
+            | command_request::Command::AcknowledgeTaskHandoff(_)
             // ADR-0061: answered or carried by the hub itself, never forwarded as a client's command.
             | command_request::Command::DeviceRegister(_)
             | command_request::Command::DeviceList(_)

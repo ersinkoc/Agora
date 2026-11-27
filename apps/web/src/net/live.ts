@@ -128,6 +128,7 @@ export function connectLive(o: LiveOptions): Live {
   const open = o.socket ?? browserSocket;
   const backoff = o.backoffMs ?? defaultBackoff;
   let view = emptyView();
+  let snapshotInProgress = false;
   let synced = false; // false until a snapshot or a first event proves our position is the hub's
   let attempt = 0;
   let closed = false;
@@ -302,6 +303,7 @@ export function connectLive(o: LiveOptions): Live {
       o.onPair?.({ type: 'reset' });
       quiet();
       pinger = setInterval(() => probe(s), PING_EVERY_MS);
+      snapshotInProgress = false;
       const sub = agora.v1.Subscribe.encode(synced ? { afterPos: view.pos } : {}).finish();
       s.send(encodeFrame({ streamId: STREAM_EVENTS, kind: EVENT_KIND.SUBSCRIBE, payload: sub }));
       // The hub answers a subscription with nothing when nothing happened since our position (a hub that restarted with no
@@ -370,9 +372,17 @@ export function connectLive(o: LiveOptions): Live {
         settle(welcomeRole(f.payload));
         return;
       }
-      if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PONG && synced) {
-        attempt = 0;
-        o.onState('live');
+      if (f.streamId === STREAM_CONTROL && f.kind === CONTROL_KIND.PONG) {
+        // The initial ping follows Subscribe. Its reply comes after the snapshot and any
+        // owner-only delivery rows sent at the snapshot cursor. Only then can we resume there.
+        if (snapshotInProgress) {
+          snapshotInProgress = false;
+          synced = true;
+        }
+        if (synced) {
+          attempt = 0;
+          o.onState('live');
+        }
         return;
       }
       if (f.streamId !== STREAM_EVENTS) return;
@@ -384,11 +394,15 @@ export function connectLive(o: LiveOptions): Live {
       try {
         if (f.kind === EVENT_KIND.SNAPSHOT) {
           view = fromSnapshot(agora.v1.Snapshot.decode(f.payload));
-          synced = true;
+          snapshotInProgress = true;
+          synced = false;
         } else if (f.kind === EVENT_KIND.POSITIONED_EVENT) {
           const pe = agora.v1.PositionedEvent.decode(f.payload);
-          if (pe.event) applyEvent(view, num(pe.pos), pe.event);
-          synced = true;
+          const pos = num(pe.pos);
+          // A later log position also proves all same-cursor snapshot rows preceded it.
+          if (pos > view.pos) snapshotInProgress = false;
+          if (pe.event) applyEvent(view, pos, pe.event);
+          synced = !snapshotInProgress;
         } else {
           return; // unknown kinds are ignored: a newer hub may add some
         }

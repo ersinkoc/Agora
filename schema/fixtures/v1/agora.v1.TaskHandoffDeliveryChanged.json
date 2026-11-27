@@ -1,0 +1,10 @@
+{
+  "deliveryId": "x",
+  "projectId": "x",
+  "taskId": "x",
+  "receiverAgentId": "x",
+  "state": "TASK_HANDOFF_DELIVERY_STATE_PENDING",
+  "changedAtMs": "1",
+  "errorCode": "x",
+  "acknowledged": true
+}

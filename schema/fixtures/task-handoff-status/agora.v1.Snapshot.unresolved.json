@@ -1,0 +1,13 @@
+{
+  "pos": "24",
+  "tasks": [{ "taskId": "t-1", "projectId": "p", "title": "Review", "claimedByAgentId": "west/a" }],
+  "taskHandoffDeliveries": [{
+    "deliveryId": "10112233445566778899aabbccddeeff",
+    "projectId": "p",
+    "taskId": "t-1",
+    "receiverAgentId": "west/a",
+    "state": "TASK_HANDOFF_DELIVERY_STATE_UNRESOLVED",
+    "changedAtMs": "1700000000020",
+    "acknowledged": true
+  }]
+}

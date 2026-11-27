@@ -69,6 +69,8 @@ message Event {
     LeaseGranted lease_granted = 62;
     LeaseReleased lease_released = 63;
     HandoffCreated handoff_created = 64;
+    // ADR-0121: only the hub writes delivery outcomes for the shared board.
+    TaskHandoffDeliveryChanged task_handoff_delivery_changed = 91;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -422,6 +424,29 @@ message HandoffCreated {
   string to_agent_id = 3;
   string summary = 4;
   repeated string refs = 5;
+}
+
+// ADR-0121: delivery state is independent of the task's current owner.
+enum TaskHandoffDeliveryState {
+  TASK_HANDOFF_DELIVERY_STATE_UNSPECIFIED = 0;
+  TASK_HANDOFF_DELIVERY_STATE_PENDING = 1;
+  TASK_HANDOFF_DELIVERY_STATE_DELIVERED = 2;
+  TASK_HANDOFF_DELIVERY_STATE_FAILED = 3;
+  TASK_HANDOFF_DELIVERY_STATE_UNRESOLVED = 4;
+}
+
+message TaskHandoffDeliveryChanged {
+  // Opaque 16-byte id as lowercase hex.
+  string delivery_id = 1;
+  string project_id = 2;
+  string task_id = 3;
+  // Hub-wide key.
+  string receiver_agent_id = 4;
+  TaskHandoffDeliveryState state = 5;
+  uint64 changed_at_ms = 6;
+  string error_code = 7;
+  // True only for an unresolved delivery whose reservation the owner cleared.
+  bool acknowledged = 8;
 }
 
 // ADR-0057. `code` is the error code the asking agent received (`mesh.helper_limit`, `mesh.folder_not_allowed`,
