@@ -1,1 +1,0 @@
-- Each agent in the left list is one line again: a shared folder is a small icon instead of the word "Shared", and the facts give way before the state (web)

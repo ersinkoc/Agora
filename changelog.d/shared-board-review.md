@@ -1,1 +1,0 @@
-- Shared boards can now keep an agent’s completion report in Review until the owner accepts it or returns the task to Backlog.

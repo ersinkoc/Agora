@@ -6,6 +6,43 @@ Each release lists what a person using Agora can now do. The reasons are in `doc
 
 _Nothing yet._
 
+## 0.3.43
+
+- A **Preview** pane shows an agent's local web app from any of your machines in the window, on an origin of its own: open the port it
+  listens on (or press Open on an agent's suggestion), browse it at full, tablet or phone width, and close it when done. Only the
+  person who opened a preview can see it; the hub reads each request's head to keep its cookies and your session apart (ADR-0088).
+  A preview needs the window to reach the hub at its own address and port (not through a proxy or `tailscale serve`); the hub
+  gives previews the 16 ports after its own (`agora hub run --preview-ports FIRST-LAST`).
+- The fleet tiles, the agent list and the phone list show each agent's model and reasoning effort, with its provider named in the
+  tooltip, and the fleet view and the board's Give to an agent picker can show only the agents of one provider or one model (ADR-0123).
+- On Windows, Ctrl-C typed into an agent's terminal now reaches the program running there (a `ping`, a build, a script), also when
+  Agora runs as a service: the node's own detached start had switched Ctrl-C off for everything it started (M2.6).
+- Settings → **Shared with agents**: the owner shares an MCP server (a program or an address) with every agent, or with one project's
+  agents, signed by this device; each machine's refusal is shown on the server in words.
+- On Linux, each terminal agent runs in a systemd scope of its own (`systemd-run --user --scope`, when the user manager offers it),
+  so when memory runs out the system ends the one agent that used it, not the node with every agent. A confined agent, or a machine
+  without a user manager or with a systemd older than 254, starts its agents as before.
+- Review-enabled shared boards can notify a cross-machine helper's parent agent when its task is accepted. The same parent run can receive the notice in its inbox after reconnecting.
+- The owner's web window shows recently accepted tasks across shared boards, with the project, acceptance time and a shortcut to the board.
+- Machines verify the owner's shared MCP servers themselves (ADR-0122): each item must be signed by a device the machine trusts,
+  match its content and be newer than what it saw. Claude Code agents then get them at start, as a second MCP file the machine keeps
+  outside the repository, readable only by its user. A server that needs a secret is not given yet (it waits for a launcher that
+  keeps the secret out of any file the agent can read). A machine can say no with `share.items = off`, limit the programs with
+  `share.mcp_commands`, or forbid servers at a URL with `share.mcp_urls = forbid`.
+- Agents can create subtasks on Review-enabled shared boards. Child cards show their parent, and the parent card shows how many direct subtasks have been accepted.
+- Shared boards can now keep an agent’s completion report in Review until the owner accepts it or returns the task to Backlog.
+- A machine whose disk fills up no longer loses its hub link for good: writing a line to the node's or the hub's log could stop the
+  thread that wrote it when the log file could not be written, and the node then never reconnected after space was freed (seen on a
+  real machine). A log line that cannot be written is now dropped.
+- Each agent in the left list is one line again: a shared folder is a small icon instead of the word "Shared", and the facts give way before the state (web)
+- A pending handoff keeps its task assigned when the receiving agent stays alive in the terminal holder through a node restart.
+- When a browser asks a machine for a permission (typing into an agent, sending it a prompt) and that machine does not trust the
+  browser's device yet (a new browser, or the same one at a new address such as the Tailscale name), the window now says so and how to
+  fix it ("Open This device and run the command it shows on the machine") instead of "The permission did not go through. Try again".
+- Each agent's pane shows the model it runs on and its reasoning effort ("opus · high"): from the model and effort it was started with,
+  from what it reported with its usage, or from its adapter, the same way for every kind (ADR-0123). Claude Code, Codex and Antigravity
+  manifests now say who serves their models.
+
 ## 0.3.42
 
 - `agora remote tailscale --serve` now says what to do when Tailscale refuses `serve` because your user is not its operator:

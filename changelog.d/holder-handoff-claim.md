@@ -1,1 +1,0 @@
-- A pending handoff keeps its task assigned when the receiving agent stays alive in the terminal holder through a node restart.
