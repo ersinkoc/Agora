@@ -1223,6 +1223,15 @@ impl EventSink {
         self.record(Body::NodeTrustedDevices(said));
     }
 
+    /// ADR-0088: an agent says its app listens on `port` (a card with Open for the person; never an open, no authority).
+    pub fn preview_suggested(&self, agent_id: &str, port: u32, note: &str) {
+        self.record(Body::PreviewSuggested(v1::PreviewSuggested {
+            agent_id: agent_id.to_string(),
+            port,
+            note: note.to_string(),
+        }));
+    }
+
     /// ADR-0088: a preview forward opened or ended (the port and who opened it, never what went through it).
     pub fn preview_changed(&self, forward: v1::PreviewForward) {
         self.record(Body::PreviewChanged(v1::PreviewChanged {
@@ -2449,6 +2458,13 @@ impl Node {
                     Some((for_hook.agent_file(id.as_str()), servers))
                 }));
             events.set_shared(Arc::clone(&shared));
+            // ADR-0088: an agent's `preview_suggest` becomes `PreviewSuggested`, bounded per agent.
+            let say = Arc::clone(&events);
+            mesh.set_preview_suggest(Arc::new(crate::preview::Suggestions::new(Box::new(
+                move |agent, port, note| {
+                    say.preview_suggested(agent, port, note);
+                },
+            ))));
             // ADR-0122 Amendment A: a shared server that names a secret gets it from this node's store, through its launcher.
             let store = crate::credentials::SecretStore::in_data(&cfg.data_dir);
             shared.set_secrets(Box::new(move |name| {

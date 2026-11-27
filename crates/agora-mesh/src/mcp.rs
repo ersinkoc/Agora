@@ -88,6 +88,26 @@ pub struct McpConnection {
     /// allows it). Can change while the connection lives (the hub reconnects); `tools/list` says what holds at that moment.
     fleet: bool,
     subtasks: bool,
+    /// ADR-0088: the node takes `preview_suggest` (it has a hub to tell, and previews).
+    preview: bool,
+}
+
+/// ADR-0088: an agent says its app listens on a port; the node raises `PreviewSuggested` (a card with Open, never an open).
+pub const PREVIEW_TOOL: &str = "preview_suggest";
+
+/// The `preview_suggest` tool as `tools/list` names it.
+pub fn preview_tool() -> Value {
+    json!({
+        "name": PREVIEW_TOOL,
+        "description": "Tell the person that your app or dev server listens on a port of this machine, so they can open it in a preview. This never opens anything by itself; the person decides.",
+        "inputSchema": schema(
+            &[
+                ("port", json!({"type": "integer", "minimum": 1, "maximum": 65535, "description": "The port on this machine's loopback"})),
+                ("note", string("A short note shown with it (at most 200 characters), such as what runs there")),
+            ],
+            &["port"],
+        ),
+    })
 }
 
 fn schema(props: &[(&str, Value)], required: &[&str]) -> Value {
@@ -637,6 +657,7 @@ pub fn board_tool(
         spawn: false,
         fleet: false,
         subtasks: false,
+        preview: false,
     };
     let params = json!({"name": name, "arguments": args});
     match conn.call(&Value::Null, &params, mesh, now_ms) {
@@ -665,7 +686,13 @@ impl McpConnection {
             spawn: false,
             fleet: false,
             subtasks: false,
+            preview: false,
         }
+    }
+
+    /// ADR-0088: whether `preview_suggest` is listed. The node sets it before each line.
+    pub fn set_preview(&mut self, on: bool) {
+        self.preview = on;
     }
 
     /// ADR-0112: whether `machines_list` is listed and `agents_list` takes `scope`. The node sets it before each line.
@@ -763,6 +790,9 @@ impl McpConnection {
                 }
                 if self.spawn {
                     list.extend(spawn_tools());
+                }
+                if self.preview {
+                    list.push(preview_tool());
                 }
                 reply(&id, json!({"tools": list}))
             }
@@ -1182,6 +1212,11 @@ mod tests {
                 .collect()
         };
         assert!(!names(&mut a, &mut mesh).iter().any(|n| n == "agent_start"));
+        // ADR-0088: `preview_suggest` only where the node takes it.
+        assert!(!names(&mut a, &mut mesh).iter().any(|n| n == PREVIEW_TOOL));
+        a.set_preview(true);
+        assert!(names(&mut a, &mut mesh).iter().any(|n| n == PREVIEW_TOOL));
+        a.set_preview(false);
         a.enable_spawn();
         // The standing instruction says what the node offers.
         let Outcome::Reply(Message::Response { result, .. }) = a.handle(

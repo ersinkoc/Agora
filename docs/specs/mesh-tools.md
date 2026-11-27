@@ -10,6 +10,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `machines_list` | `{}` | `{ machines: [{ id, online, os, build, agents_running, last_seen_ms }], partial }` (ADR-0112; listed only when the node offers it, see "The hub-wide view") |
 | `send_message` | `{ to: agent_id \| "#channel", body: string, refs?: [path\|commit\|task_id] }` | `{ message_id }` |
 | `ask` | `{ to, question, timeout_s?: number (default 600) }` | `{ reply, from }` or error `mesh.timeout` |
+| `preview_suggest` | `{ port: 1..65535, note?: string (at most 200 bytes) }` | `{ suggested: true, port }`, or `mesh.rate_limited` (ADR-0088: the node raises `PreviewSuggested`, a card with Open for the person; it never opens anything; the same port is said once a minute per agent, at most 10 different an hour; listed only where the node takes it) |
 | `inbox` | `{ since?: message_id, limit?: number }` | `[{ message_id, from, body, refs, at, provenance }]` |
 | `inbox_wait` | `{ since?: message_id, limit?: number, timeout_s?: number (default 600, at most 3600) }` | as `inbox`, once at least one message is there; `[]` when the time runs out (see "Waiting for messages") |
 | `task_list` | `{ status?: "open"\|"claimed"\|"done", task_id? }` | `[{ task_id, title, status, owner, depends_on }]`; with `task_id` that task alone, or `[]` (ADR-0095) |

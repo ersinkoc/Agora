@@ -225,6 +225,66 @@ pub trait SharedLaunch: Send + Sync {
 
 type LaunchSlot = Mutex<Option<Arc<dyn SharedLaunch>>>;
 
+/// ADR-0088: who raises `PreviewSuggested` for an agent's `preview_suggest` (the node, with its limits). `Err` is a stable code.
+pub trait PreviewSuggest: Send + Sync {
+    fn suggest(
+        &self,
+        agent: &AgentId,
+        port: u32,
+        note: &str,
+    ) -> Result<(), agora_protocol::ErrorCode>;
+}
+
+type SuggestSlot = Mutex<Option<Arc<dyn PreviewSuggest>>>;
+
+/// The answer to an agent's `preview_suggest`; `None` when the line is not one.
+fn preview_reply(
+    conn: &McpConnection,
+    line: &str,
+    suggest: &dyn PreviewSuggest,
+) -> Option<Message> {
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    if method != "tools/call"
+        || params.get("name").and_then(Value::as_str) != Some(agora_mesh::mcp::PREVIEW_TOOL)
+    {
+        return None;
+    }
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let port = args
+        .get("port")
+        .and_then(Value::as_u64)
+        .filter(|p| (1..=65535).contains(p));
+    let note = args.get("note").map_or(Some(""), Value::as_str);
+    let (Some(port), Some(note)) = (port, note) else {
+        return Some(Message::ErrorResponse {
+            id,
+            code: agora_mesh::mcp::invalid_params_error(),
+            data: None,
+        });
+    };
+    // The note is the agent's words: shown as text only, without control or hidden format characters, at most 200 bytes, cut at a
+    // character boundary.
+    let clean: String = note
+        .chars()
+        .filter(|c| !c.is_control() && !agora_core::text::is_hidden(*c))
+        .collect();
+    let mut end = clean.len().min(200);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    let result = match suggest.suggest(conn.agent(), port as u32, &clean[..end]) {
+        Ok(()) => agora_mesh::mcp::ok_tool_result(&json!({"suggested": true, "port": port})),
+        Err(code) => agora_mesh::mcp::protocol_error_result(&agora_protocol::Error::new(code)),
+    };
+    Some(Message::Response { id, result })
+}
+
 /// The answer to one [`SHARED_LAUNCH_METHOD`] request on `agent`'s socket; `None` when the line is not one. The answer to a refusal
 /// is a JSON-RPC error (-32001) whose data names the reason; never the secret's value in either.
 fn launch_reply(text: &str, agent: &AgentId, launcher: &dyn SharedLaunch) -> Option<Message> {
@@ -1138,6 +1198,7 @@ pub struct MeshServer {
     /// ADR-0057: answers `agent_start`, `agent_wait` and `agent_output`; without it those tools are not listed.
     helpers: Arc<HelpersSlot>,
     shared_launch: Arc<LaunchSlot>,
+    preview_suggest: Arc<SuggestSlot>,
     /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
     remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
@@ -1267,6 +1328,7 @@ impl MeshServer {
         Ok(Self {
             helpers: Arc::new(Mutex::new(None)),
             shared_launch: Arc::new(Mutex::new(None)),
+            preview_suggest: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote,
             subtasks_agreed: Arc::new(AtomicBool::new(false)),
@@ -1296,6 +1358,14 @@ impl MeshServer {
     /// ADR-0122 Amendment A: who answers the launcher of a shared server that names a secret. Connections made after this ask it.
     pub fn set_shared_launch(&self, launcher: Arc<dyn SharedLaunch>) {
         *self.shared_launch.lock().unwrap_or_else(|e| e.into_inner()) = Some(launcher);
+    }
+
+    /// ADR-0088: who raises an agent's preview suggestions. Connections made after this list `preview_suggest`.
+    pub fn set_preview_suggest(&self, suggest: Arc<dyn PreviewSuggest>) {
+        *self
+            .preview_suggest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(suggest);
     }
 
     /// ADR-0057: who answers the spawn tools. Connections made after this list them.
@@ -2174,6 +2244,7 @@ impl MeshServer {
             let typed = Arc::clone(&typed);
             let subtasks_agreed = Arc::clone(&self.subtasks_agreed);
             let launch_slot = Arc::clone(&self.shared_launch);
+            let suggest_slot = Arc::clone(&self.preview_suggest);
             let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
@@ -2222,6 +2293,10 @@ impl MeshServer {
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
                                     .clone();
+                                let preview = suggest_slot
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone();
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
                                     .spawn(move || {
@@ -2238,6 +2313,7 @@ impl MeshServer {
                                                 subtasks_agreed: &subtasks_agreed,
                                                 helpers,
                                                 launch,
+                                                preview,
                                                 typed: &typed,
                                             },
                                             &stop,
@@ -2550,6 +2626,8 @@ struct Links<'a> {
     helpers: Option<Arc<dyn Helpers>>,
     /// ADR-0122 Amendment A: the shared servers' launcher.
     launch: Option<Arc<dyn SharedLaunch>>,
+    /// ADR-0088: the agents' preview suggestions.
+    preview: Option<Arc<dyn PreviewSuggest>>,
     /// [`AgentServer::typed`].
     typed: &'a AtomicU64,
 }
@@ -2997,6 +3075,12 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
     let fleet = links.fleet.offered(allowed);
     s.conn.set_fleet(fleet);
     s.conn.set_subtasks(links.subtasks_offered());
+    s.conn.set_preview(links.preview.is_some());
+    if let Some(p) = &links.preview {
+        if let Some(msg) = preview_reply(&s.conn, text, p.as_ref()) {
+            return Step::Reply(msg);
+        }
+    }
     // ADR-0122 Amendment A: the node's own launcher asks for a shared server's program; never the broker's, never a tool.
     if let Some(l) = &links.launch {
         if let Some(msg) = launch_reply(text, s.conn.agent(), l.as_ref()) {
@@ -3308,6 +3392,77 @@ fn serve(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0088: `preview_suggest` is answered by the node for the asking agent, with the port checked and the note cut to 200 bytes.
+    #[test]
+    fn an_agents_preview_suggestion_is_checked_and_raised_for_it() {
+        struct Log(Mutex<Vec<(String, u32, String)>>);
+        impl PreviewSuggest for Log {
+            fn suggest(
+                &self,
+                agent: &AgentId,
+                port: u32,
+                note: &str,
+            ) -> Result<(), agora_protocol::ErrorCode> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((agent.as_str().to_string(), port, note.to_string()));
+                Ok(())
+            }
+        }
+        let log = Log(Mutex::new(Vec::new()));
+        let mut conn = McpConnection::new(AgentId::new("agent-7"));
+        let _ = conn.handle(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#, &mut Mesh::new(Limits::default()), 0);
+        let call = |args: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"preview_suggest","arguments":{args}}}}}"#
+            )
+        };
+        let ok = preview_reply(&conn, &call(r#"{"port":5173,"note":"vite"}"#), &log).unwrap();
+        assert!(matches!(ok, Message::Response { .. }));
+        let long = "é".repeat(150);
+        let _ = preview_reply(
+            &conn,
+            &call(&format!(r#"{{"port":3000,"note":"{long}"}}"#)),
+            &log,
+        )
+        .unwrap();
+        for bad in [
+            r#"{"port":0}"#,
+            r#"{"port":70000}"#,
+            r#"{"port":"80"}"#,
+            r#"{}"#,
+            r#"{"port":80,"note":5}"#,
+        ] {
+            assert!(
+                matches!(
+                    preview_reply(&conn, &call(bad), &log),
+                    Some(Message::ErrorResponse { .. })
+                ),
+                "{bad}"
+            );
+        }
+        assert!(preview_reply(
+            &conn,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inbox"}}"#,
+            &log
+        )
+        .is_none());
+        let said = log.0.lock().unwrap();
+        assert_eq!(said.len(), 2);
+        assert_eq!(said[0], ("agent-7".to_string(), 5173, "vite".to_string()));
+        assert!(said[1].2.len() <= 200 && said[1].2.chars().all(|c| c == 'é'));
+        drop(said);
+        // Control and hidden format characters never reach the window.
+        let _ = preview_reply(
+            &conn,
+            &call(r#"{"port":4000,"note":"a\u001b[2Jb\u202ec\u200bd"}"#),
+            &log,
+        )
+        .unwrap();
+        assert_eq!(log.0.lock().unwrap()[2].2, "a[2Jbcd");
+    }
 
     /// ADR-0122 Amendment A: the launcher's ask is answered by the node on the asking agent's own socket: the program and its filled
     /// environment, or a refusal naming its reason; any other line is not taken.

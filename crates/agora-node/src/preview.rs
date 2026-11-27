@@ -790,6 +790,70 @@ pub fn signed_message(
     out
 }
 
+/// ADR-0088: an agent's `preview_suggest`, raised as `PreviewSuggested` (a card with Open for the person; no authority). The same port
+/// from the same agent is said once a minute at most (a repeat is taken quietly), and an agent says at most
+/// [`SUGGESTIONS_PER_HOUR`] different ones an hour (`mesh.rate_limited` beyond).
+pub struct Suggestions {
+    say: SaySuggestion,
+    recent: Mutex<BTreeMap<String, VecDeque<(u32, std::time::Instant)>>>,
+}
+
+/// Records one suggestion: the agent's id, the port, the note.
+pub type SaySuggestion = Box<dyn Fn(&str, u32, &str) + Send + Sync>;
+
+/// Different suggestions one agent raises in an hour.
+pub const SUGGESTIONS_PER_HOUR: usize = 10;
+
+impl Suggestions {
+    /// `say(agent id, port, note)` records the event.
+    pub fn new(say: SaySuggestion) -> Self {
+        Self {
+            say,
+            recent: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn suggest_at(
+        &self,
+        agent: &str,
+        port: u32,
+        note: &str,
+        now: std::time::Instant,
+    ) -> Result<(), ErrorCode> {
+        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        // Older than an hour is forgotten, and an agent with nothing left is dropped, so the table holds only the last hour.
+        recent.retain(|_, said| {
+            while said
+                .front()
+                .is_some_and(|(_, at)| now.duration_since(*at) >= Duration::from_secs(3600))
+            {
+                said.pop_front();
+            }
+            !said.is_empty()
+        });
+        let mine = recent.entry(agent.to_string()).or_default();
+        if mine
+            .iter()
+            .any(|(p, at)| *p == port && now.duration_since(*at) < Duration::from_secs(60))
+        {
+            return Ok(());
+        }
+        if mine.len() >= SUGGESTIONS_PER_HOUR {
+            return Err(ErrorCode::MeshRateLimited);
+        }
+        mine.push_back((port, now));
+        drop(recent);
+        (self.say)(agent, port, note);
+        Ok(())
+    }
+}
+
+impl crate::mesh_server::PreviewSuggest for Suggestions {
+    fn suggest(&self, agent: &agora_core::AgentId, port: u32, note: &str) -> Result<(), ErrorCode> {
+        self.suggest_at(agent.as_str(), port, note, std::time::Instant::now())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1105,5 +1169,54 @@ mod tests {
             .iter()
             .all(|a| a.ip().is_loopback() && a.port() == 3000));
         assert_ne!(order[0].ip(), order[1].ip());
+    }
+
+    /// ADR-0088: an agent's suggestion is said once a minute per port, and at most ten different ones an hour.
+    #[test]
+    fn suggestions_are_said_once_and_bounded() {
+        let said = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&said);
+        let s = Suggestions::new(Box::new(move |a, p, n| {
+            log.lock().unwrap().push((a.to_string(), p, n.to_string()))
+        }));
+        let t0 = std::time::Instant::now();
+        assert_eq!(s.suggest_at("agent-1", 5173, "vite", t0), Ok(()));
+        assert_eq!(
+            s.suggest_at("agent-1", 5173, "vite", t0 + Duration::from_secs(10)),
+            Ok(()),
+            "a repeat is taken quietly"
+        );
+        assert_eq!(said.lock().unwrap().len(), 1);
+        assert_eq!(
+            s.suggest_at("agent-1", 5173, "vite", t0 + Duration::from_secs(61)),
+            Ok(())
+        );
+        assert_eq!(said.lock().unwrap().len(), 2);
+        for p in 0..8 {
+            assert_eq!(
+                s.suggest_at("agent-1", 3000 + p, "", t0 + Duration::from_secs(70)),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            s.suggest_at("agent-1", 4000, "", t0 + Duration::from_secs(70)),
+            Err(ErrorCode::MeshRateLimited)
+        );
+        assert_eq!(
+            s.suggest_at("agent-2", 4000, "", t0 + Duration::from_secs(70)),
+            Ok(()),
+            "per agent"
+        );
+        assert_eq!(
+            s.suggest_at("agent-1", 4000, "", t0 + Duration::from_secs(3700)),
+            Ok(()),
+            "an hour later"
+        );
+        let held = s.recent.lock().unwrap();
+        assert_eq!(
+            held.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["agent-1"],
+            "an agent quiet for an hour is dropped"
+        );
     }
 }

@@ -110,6 +110,7 @@ machine; `PreviewChanged` keeps them current.
 ## Not decided by the ADR (left open for the next steps)
 - How the per-forward token is minted and presented to the preview origin (an HTTP surface, not a protocol message here).
 - The exact subdomain or separate-port scheme and its configuration.
-- Whether `PreviewSuggested` is raised by a mesh tool, by detecting a listening port, or both.
+- Whether the node also raises `PreviewSuggested` by itself on noticing a listening port (an agent's mesh tool `preview_suggest` raises
+  it today).
 - Who may see `PreviewSuggested` and `PreviewChanged` (until decided, the hub's scope filter sends them to nobody).
 - The owner's per-project port allow-list (the ADR allows it "later").

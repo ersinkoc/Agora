@@ -161,3 +161,7 @@ the head parser (bounded, rejects malformed heads, never reads bodies).
    `preview-action-v1` signature (vectors shared); the machines' suggestions as cards with Open; another device's forward listed with
    Close only; refusals in words (`no_origin` says to open the hub at its own address). The window asks each online machine for its
    open forwards once (`PreviewList`) and follows `PreviewChanged` after that.
+5. Suggestions: done (2026-11-27). The mesh tool `preview_suggest {port, note?}` (listed where the node takes it) raises
+   `PreviewSuggested` for the asking agent, the note cut to 200 bytes and shown as text only, the same port once a minute per agent and
+   at most 10 different an hour (`crates/agora-node/src/preview.rs` `Suggestions`); the window shows it as a card with Open.
+

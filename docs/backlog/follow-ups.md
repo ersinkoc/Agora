@@ -20,9 +20,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 - **Board handoffs and members** (**decision**): a handoff made with the hub board's `handoff` tool is stamped `producer_id: "hub"`, so
   `Scope::admit` hides it from a member even when both ends are theirs (`lease_visible` special-cases the hub id; messages and handoffs do
   not).
-- **A request restated after its decision.** The announcer copies `approvals.waiting()` and records it later (`EventSink::announce_present`);
-  an adapter or skip request is queued before `ApprovalRequested` is recorded. Either way a card can come back stale until the next
-  announcement. Cleanest fix: the hub ignores an `ApprovalRequested` for an id it has already seen resolved.
 - **Helper-start request race** (node): the re-announce path can send a request between `approvals.request_start` and `requests.insert`
   (`spawn.rs`); decided in that window, it is filed afterwards and never expires.
 - **Linked-worktree pinning and a rewritten `commondir`** (needs a proof): with git 2.53, refs (`HEAD`, `refs/heads/<wt>`) may still
