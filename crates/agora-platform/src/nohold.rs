@@ -5,22 +5,15 @@
 use std::io;
 use std::time::Duration;
 
+#[cfg(not(windows))]
 use crate::held::Collected;
 use crate::held::HeldSignal;
-use crate::{ExitStatus, PtyConfig};
+use crate::ExitStatus;
+#[cfg(not(windows))]
+use crate::PtyConfig;
 
 fn unsupported() -> io::Error {
     io::Error::from(io::ErrorKind::Unsupported)
-}
-
-/// A terminal's master as one passable thing (Unix only for now).
-#[derive(Debug)]
-pub struct TerminalHandle(());
-
-impl TerminalHandle {
-    pub fn into_file(self) -> io::Result<std::fs::File> {
-        Err(unsupported())
-    }
 }
 
 /// A held agent's terminal as a [`crate::Pty`] (Unix only for now).
@@ -32,10 +25,28 @@ pub fn held_pty(
     Err(unsupported())
 }
 
+/// M2.6: on Windows the holder's terminal, its reader and its passable pipe ends are `conpty`'s.
+#[cfg(windows)]
+pub use crate::conpty::{HeldTerminal, TerminalHandle, TerminalReader};
+
+/// A terminal's master as one passable thing (Unix only for now).
+#[cfg(not(windows))]
+#[derive(Debug)]
+pub struct TerminalHandle(());
+
+#[cfg(not(windows))]
+impl TerminalHandle {
+    pub fn into_file(self) -> io::Result<std::fs::File> {
+        Err(unsupported())
+    }
+}
+
 /// A program on a terminal the holder owns (Unix only for now).
+#[cfg(not(windows))]
 #[derive(Debug)]
 pub struct HeldTerminal(());
 
+#[cfg(not(windows))]
 impl HeldTerminal {
     pub fn start(_config: &PtyConfig) -> io::Result<Self> {
         Err(unsupported())
@@ -65,8 +76,10 @@ impl HeldTerminal {
 }
 
 /// A terminal read into a bounded buffer (Unix only for now).
+#[cfg(not(windows))]
 pub struct TerminalReader(());
 
+#[cfg(not(windows))]
 impl TerminalReader {
     pub fn ended(&self) -> bool {
         false

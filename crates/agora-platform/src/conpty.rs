@@ -13,11 +13,13 @@ use std::sync::mpsc::{sync_channel, Receiver};
 use std::sync::{Arc, Mutex};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    CloseHandle, DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE,
+    ERROR_OPERATION_ABORTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows_sys::Win32::System::Console::{
-    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
+    ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, SetConsoleCtrlHandler, COORD,
+    HPCON,
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -25,12 +27,13 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     JOB_OBJECT_LIMIT_PROCESS_TIME,
 };
-use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOEXW,
 };
 use windows_sys::Win32::System::IO::CancelIoEx;
 
@@ -51,6 +54,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[derive(Debug)]
 struct Handle(HANDLE);
 
 // SAFETY: a handle is an opaque id the system lets any thread use.
@@ -373,7 +377,19 @@ pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
 
 /// The pseudo-console, its process and job, and the read end of its output: everything of a terminal but the reading. Shared by
 /// [`spawn`] and [`HeldTerminal::start`].
+/// Lets what a terminal starts take Ctrl-C, whatever this process inherited. A process started with `CREATE_NEW_PROCESS_GROUP` has Ctrl-C
+/// turned off, and passes that on to everything it starts: every detached start does that ([`crate::winproc::DETACHED_FLAGS`]: the
+/// node under its supervisor, the front door's node, the holder), so a `ping` or a build in an agent's terminal never stopped at the
+/// Ctrl-C typed into it (measured on Windows 11: `0x03` into the pseudo-console stopped `ping -t` only after this). A detached process
+/// has no console of its own, so this changes nothing for it; asked before every start (one cheap call), so nothing that turned it
+/// off again in between can keep it from an agent.
+fn let_ctrl_c_reach_agents() {
+    // SAFETY: plain call; with no handler, FALSE restores normal Ctrl-C processing for this process and what it starts.
+    unsafe { SetConsoleCtrlHandler(None, 0) };
+}
+
 fn start_terminal(config: &PtyConfig) -> io::Result<(Arc<Inner>, Handle)> {
+    let_ctrl_c_reach_agents();
     let (in_read, in_write) = pipe()?;
     let (out_read, out_write) = pipe()?;
     let size = COORD {
@@ -425,140 +441,198 @@ fn watch_exit(inner: &Arc<Inner>) -> io::Result<()> {
     Ok(())
 }
 
-/// ADR-0079 (decisions 1, 3, 4): a terminal the terminal holder owns. It starts like [`spawn`]'s, but its output is read by the holder
-/// only while no node is attached, into a buffer of at most `limit` bytes that drops the oldest first, so the agent never blocks on a
-/// full pipe. When a node attaches, the holder stops reading ([`Self::stop_reading`]: a read in flight is cancelled, nothing written
-/// to the pipe is lost) and hands it duplicates of the two pipe ends; the pseudo-console itself, its size and its end stay here (an
-/// `HPCON` is not a handle another process can use).
-#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
-pub(crate) struct HeldTerminal {
-    inner: Arc<Inner>,
-    output: Arc<Handle>,
-    reader: Option<std::thread::JoinHandle<()>>,
-    stop: Arc<AtomicBool>,
-    buffer: Arc<Mutex<std::collections::VecDeque<u8>>>,
-    limit: usize,
+// ----- ADR-0079 M2.6: the holder's terminals, in the shape of the Unix holder's (`unixhold.rs`) -----
+
+/// Duplicates `handle` within this process (same access, not inheritable).
+fn duplicate_here(handle: HANDLE) -> io::Result<Handle> {
+    let mut copy: HANDLE = null_mut();
+    // SAFETY: `handle` is live in this process; this process's pseudo-handle is valid; a valid out pointer.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut copy,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Handle(copy))
 }
 
-#[allow(dead_code)] // ADR-0079 W2 calls it; until then only the tests do.
-impl HeldTerminal {
-    /// Starts the program of `config` on a new pseudo-console, and starts reading it.
-    pub(crate) fn start(config: &PtyConfig, limit: usize) -> io::Result<Self> {
-        let (inner, output) = start_terminal(config)?;
-        watch_exit(&inner)?;
-        let mut held = Self {
-            inner,
-            output: Arc::new(output),
-            reader: None,
-            stop: Arc::new(AtomicBool::new(false)),
-            buffer: Arc::new(Mutex::new(std::collections::VecDeque::new())),
-            limit,
-        };
-        held.start_reading()?;
-        Ok(held)
+/// A held terminal's two pipe ends as one passable thing: this process's duplicates of the input's write end and the output's read end
+/// (ADR-0079 decision 3). The pseudo-console itself never leaves the holder (an `HPCON` is not a handle another process can use).
+#[derive(Debug)]
+pub struct TerminalHandle {
+    input: Handle,
+    output: Handle,
+}
+
+impl TerminalHandle {
+    /// The terminal's output to read as a file; its input end is closed.
+    pub fn into_file(self) -> io::Result<std::fs::File> {
+        use std::os::windows::io::FromRawHandle;
+        let Self { input, output } = self;
+        drop(input);
+        let raw = output.0;
+        std::mem::forget(output);
+        // SAFETY: an owned pipe handle, given up by `output` just above, so it is closed once, by the file.
+        Ok(unsafe { std::fs::File::from_raw_handle(raw.cast()) })
     }
 
-    /// Reads the output into the buffer again (no node attached). Nothing when it is already reading.
-    pub(crate) fn start_reading(&mut self) -> io::Result<()> {
-        if self.reader.is_some() {
-            return Ok(());
-        }
-        self.stop.store(false, Ordering::Release);
-        let (output, stop, buffer, limit) = (
-            Arc::clone(&self.output),
-            Arc::clone(&self.stop),
-            Arc::clone(&self.buffer),
-            self.limit,
-        );
-        self.reader = Some(
-            std::thread::Builder::new()
-                .name("agora-held-reader".into())
-                .spawn(move || {
-                    let mut buf = vec![0u8; CHUNK];
-                    while !stop.load(Ordering::Acquire) {
-                        let mut n = 0u32;
-                        // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle the Arc keeps open.
-                        let ok = unsafe {
-                            ReadFile(
-                                output.0,
-                                buf.as_mut_ptr().cast(),
-                                CHUNK as u32,
-                                &mut n,
-                                null_mut(),
-                            )
-                        };
-                        if ok == 0 || n == 0 {
-                            // Cancelled by `stop_reading`, or the end of the output.
-                            break;
-                        }
-                        // Kept even when the read completed as it was being cancelled: those bytes are out of the pipe now.
-                        let Ok(mut held) = buffer.lock() else { break };
-                        held.extend(&buf[..n as usize]);
-                        let over = held.len().saturating_sub(limit);
-                        held.drain(..over);
-                    }
-                })?,
-        );
-        Ok(())
+    #[allow(dead_code)] // M2.6's terminal transfer (`export_to`) duplicates these into the node; until then only the tests do.
+    pub(crate) fn input_raw(&self) -> HANDLE {
+        self.input.0
     }
 
-    /// Stops reading (a node attaches) and returns what was read since the last call. A read in flight is cancelled, so whatever the
-    /// agent writes from now on stays in the pipe for the node.
-    pub(crate) fn stop_reading(&mut self) -> Vec<u8> {
-        if let Some(reader) = self.reader.take() {
-            self.stop.store(true, Ordering::Release);
-            // The reader may be between two reads when the first cancel comes: cancel until it has ended.
-            while !reader.is_finished() {
-                // SAFETY: a live pipe handle; cancels the reads in flight on it, from any thread.
-                unsafe { CancelIoEx(self.output.0, null()) };
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            let _ = reader.join();
-        }
-        self.buffer
-            .lock()
-            .map(|mut b| b.drain(..).collect())
-            .unwrap_or_default()
-    }
-
-    /// The write end of the terminal's input, to duplicate into the node. Valid while `self` lives.
-    pub(crate) fn input_handle(&self) -> io::Result<HANDLE> {
-        self.inner
-            .input
-            .lock()
-            .map(|h| h.0)
-            .map_err(|_| io::Error::other("poisoned"))
-    }
-
-    /// The read end of the terminal's output, to duplicate into the node. Valid while `self` lives; read it only when this terminal
-    /// is not reading ([`Self::stop_reading`]).
-    pub(crate) fn output_handle(&self) -> HANDLE {
+    #[allow(dead_code)] // As `input_raw`.
+    pub(crate) fn output_raw(&self) -> HANDLE {
         self.output.0
     }
+}
 
-    pub(crate) fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
-        self.inner.write_input(bytes)
+/// ADR-0079 (decisions 1, 3, 4): a program on a pseudo-console the terminal holder owns. Nothing reads its output until the holder starts
+/// a [`TerminalReader`] (no node attached) or [`Self::drain`]s it; a node attached gets duplicates of the two pipe ends
+/// ([`Self::handle`]) and reads and writes them itself. The pseudo-console, its size and its end stay here.
+pub struct HeldTerminal {
+    inner: Arc<Inner>,
+    output: Arc<Handle>,
+    exit: Option<ExitStatus>,
+}
+
+impl HeldTerminal {
+    /// Starts the program of `config` on a new pseudo-console, in a kill-on-close job with the request's limits.
+    pub fn start(config: &PtyConfig) -> io::Result<Self> {
+        let (inner, output) = start_terminal(config)?;
+        watch_exit(&inner)?;
+        Ok(Self {
+            inner,
+            output: Arc::new(output),
+            exit: None,
+        })
     }
 
-    pub(crate) fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        self.inner.resize(cols, rows)
-    }
-
-    pub(crate) fn kill(&self) -> io::Result<()> {
-        self.inner.kill()
-    }
-
-    pub(crate) fn pid(&self) -> u32 {
+    pub fn pid(&self) -> u32 {
         self.inner.pid
     }
 
-    /// `Some` with the exit code once the agent's process is over.
-    pub(crate) fn exited(&self) -> Option<i32> {
-        if self.inner.exited() {
-            self.inner.exit_code()
-        } else {
-            None
+    /// Ends the agent (its whole job) and waits for its process, so nothing is left of an agent that never got to a node.
+    pub fn kill_and_reap(&mut self) {
+        let _ = self.inner.kill();
+        // SAFETY: a live process handle (`inner` keeps it open).
+        unsafe { WaitForSingleObject(self.inner.process.0, 5_000) };
+        let _ = self.try_wait();
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.inner.resize(cols, rows)
+    }
+
+    /// What a signal is on Windows (M2.6): `Interrupt` types Ctrl-C (`0x03`) into the pseudo-console, which raises `CTRL_C_EVENT` in
+    /// its console processes; `Hangup` and `Terminate` close the pseudo-console, which sends them `CTRL_CLOSE_EVENT` and ends what does
+    /// not end by itself (the holder's grace before `Kill` is its own); `Kill` ends the agent's whole job. Nothing once the agent ended.
+    pub fn signal(&self, signal: crate::held::HeldSignal) -> io::Result<()> {
+        use crate::held::HeldSignal;
+        if self.exit.is_some() || self.inner.exited() {
+            return Ok(());
         }
+        match signal {
+            HeldSignal::Interrupt => self.inner.write_input(&[0x03]),
+            HeldSignal::Hangup | HeldSignal::Terminate => {
+                self.inner.close_console();
+                Ok(())
+            }
+            HeldSignal::Kill => self.inner.kill(),
+        }
+    }
+
+    /// The agent's exit status once it ended, kept from then on.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        if self.exit.is_none() && self.inner.exited() {
+            self.exit = Some(status(self.inner.exit_code().unwrap_or(1)));
+        }
+        Ok(self.exit)
+    }
+
+    /// Duplicates of the two pipe ends, for the node; the holder keeps its own.
+    pub fn handle(&self) -> io::Result<TerminalHandle> {
+        let input = {
+            let held = self
+                .inner
+                .input
+                .lock()
+                .map_err(|_| io::Error::other("poisoned"))?;
+            duplicate_here(held.0)?
+        };
+        Ok(TerminalHandle {
+            input,
+            output: duplicate_here(self.output.0)?,
+        })
+    }
+
+    /// Starts reading this terminal into a bounded buffer (ADR-0079 decision 4).
+    pub fn start_reader(&self) -> io::Result<TerminalReader> {
+        TerminalReader::start(Arc::clone(&self.output))
+    }
+
+    /// Reads what is waiting now into `buf`, never blocking. `true` at the end of the terminal (every write end of its output closed,
+    /// which the pseudo-console does once its program ended). Only with no reader running.
+    pub fn drain(&self, buf: &mut crate::held::HeldBuffer) -> io::Result<bool> {
+        let mut chunk = vec![0u8; CHUNK];
+        loop {
+            let mut waiting = 0u32;
+            // SAFETY: a live pipe handle; only the count of waiting bytes is asked for.
+            let peeked = unsafe {
+                PeekNamedPipe(
+                    self.output.0,
+                    null_mut(),
+                    0,
+                    null_mut(),
+                    &mut waiting,
+                    null_mut(),
+                )
+            };
+            if peeked == 0 {
+                return broken_is_end(unsafe { GetLastError() });
+            }
+            if waiting == 0 {
+                return Ok(false);
+            }
+            let want = (waiting as usize).min(CHUNK) as u32;
+            let mut n = 0u32;
+            // SAFETY: `chunk` is valid for CHUNK bytes; at most what is waiting is read, so the call does not block.
+            let ok = unsafe {
+                ReadFile(
+                    self.output.0,
+                    chunk.as_mut_ptr().cast(),
+                    want,
+                    &mut n,
+                    null_mut(),
+                )
+            };
+            if ok == 0 {
+                return broken_is_end(unsafe { GetLastError() });
+            }
+            buf.push(&chunk[..n as usize]);
+        }
+    }
+
+    #[allow(dead_code)] // Types into the terminal without a node; the tests do.
+    pub(crate) fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_input(bytes)
+    }
+}
+
+/// A pipe whose writers all closed is the terminal's end (`Ok(true)`); any other failure is an error.
+fn broken_is_end(error: u32) -> io::Result<bool> {
+    if error == ERROR_BROKEN_PIPE {
+        Ok(true)
+    } else {
+        Err(io::Error::from_raw_os_error(error as i32))
     }
 }
 
@@ -566,7 +640,106 @@ impl Drop for HeldTerminal {
     /// ADR-0079 decision 8: a terminal the holder lets go of ends with it, as a dropped [`spawn`] terminal does.
     fn drop(&mut self) {
         let _ = self.inner.kill();
-        let _ = self.stop_reading();
+    }
+}
+
+/// A held terminal read into a bounded buffer while no node is attached (ADR-0079 decision 4): the oldest bytes go first, so the agent
+/// never blocks on a full pipe. [`Self::end`] cancels a read in flight and waits for the thread, so no byte is left in it.
+pub struct TerminalReader {
+    output: Arc<Handle>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    shared: Arc<Mutex<crate::held::Collected>>,
+}
+
+impl TerminalReader {
+    fn start(output: Arc<Handle>) -> io::Result<Self> {
+        use crate::held::{Collected, HeldBuffer};
+        let stop = Arc::new(AtomicBool::new(false));
+        let shared = Arc::new(Mutex::new(Collected {
+            buffer: HeldBuffer::default(),
+            ended: false,
+        }));
+        let (pipe, halt, kept) = (Arc::clone(&output), Arc::clone(&stop), Arc::clone(&shared));
+        let thread = std::thread::Builder::new()
+            .name("agora-held-reader".into())
+            .spawn(move || {
+                let mut buf = vec![0u8; CHUNK];
+                while !halt.load(Ordering::Acquire) {
+                    let mut n = 0u32;
+                    // SAFETY: `buf` is valid for CHUNK bytes; a synchronous pipe handle the Arc keeps open.
+                    let ok = unsafe {
+                        ReadFile(
+                            pipe.0,
+                            buf.as_mut_ptr().cast(),
+                            CHUNK as u32,
+                            &mut n,
+                            null_mut(),
+                        )
+                    };
+                    let error = if ok == 0 {
+                        unsafe { GetLastError() }
+                    } else {
+                        0
+                    };
+                    let Ok(mut held) = kept.lock() else { break };
+                    // Kept even when the read completed as it was being cancelled: those bytes are out of the pipe now.
+                    held.buffer.push(&buf[..n as usize]);
+                    if ok == 0 || n == 0 {
+                        // A cancel (`end`) is not the terminal's end; anything else is (the pipe broken: its writers closed).
+                        held.ended |= error != ERROR_OPERATION_ABORTED;
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            output,
+            stop,
+            thread: Some(thread),
+            shared,
+        })
+    }
+
+    /// Whether the reader saw the terminal's end.
+    pub fn ended(&self) -> bool {
+        self.shared.lock().map(|c| c.ended).unwrap_or(true)
+    }
+
+    /// How many bytes it holds.
+    pub fn buffered(&self) -> usize {
+        self.shared.lock().map(|c| c.buffer.len()).unwrap_or(0)
+    }
+
+    /// Ends the read (waiting for it, so no byte is in flight) and gives what it read.
+    pub fn end(mut self) -> crate::held::Collected {
+        self.halt();
+        let mut kept = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::held::Collected {
+            buffer: std::mem::take(&mut kept.buffer),
+            ended: kept.ended,
+        }
+    }
+
+    fn halt(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            self.stop.store(true, Ordering::Release);
+            // The thread may be between two reads when the first cancel comes: cancel until it has ended.
+            while !thread.is_finished() {
+                // SAFETY: a live pipe handle; cancels the reads in flight on it, from any thread.
+                unsafe { CancelIoEx(self.output.0, null()) };
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for TerminalReader {
+    fn drop(&mut self) {
+        self.halt();
     }
 }
 
@@ -1027,5 +1200,171 @@ mod tests {
         p.kill().unwrap();
         p.wait().unwrap();
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+}
+
+/// M2.6: the holder's terminal in the shape the holder uses on every system (`agora hold`): no reading until a reader starts, a reader
+/// whose end leaves nothing in flight, `drain` for an ended agent, the signals, and the passable pipe ends.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod held_tests {
+    use super::*;
+    use crate::held::{HeldBuffer, HeldSignal};
+    use std::time::{Duration, Instant};
+
+    fn config(argv: &[&str]) -> PtyConfig {
+        PtyConfig::new(argv.iter().map(|a| (*a).to_string()).collect())
+    }
+
+    /// Waits up to 20 s for the agent's end.
+    fn ended(term: &mut HeldTerminal) -> Option<ExitStatus> {
+        let end = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < end {
+            if let Some(s) = term.try_wait().unwrap() {
+                return Some(s);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    #[test]
+    fn a_reader_keeps_the_output_and_its_end_leaves_nothing_in_flight() {
+        let term = HeldTerminal::start(&config(&["cmd.exe"])).unwrap();
+        let mut seen = String::new();
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut typed = false;
+        while Instant::now() < end && !seen.contains("one-Windows_NT") {
+            let reader = term.start_reader().unwrap();
+            if !typed {
+                term.write_input(b"echo one-%OS%\r\n").unwrap();
+                typed = true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            let c = reader.end();
+            assert!(!c.ended, "a cancelled read is not the terminal's end");
+            seen.push_str(&String::from_utf8_lossy(&c.buffer.into_vec()));
+        }
+        assert!(seen.contains("one-Windows_NT"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_reader_sees_the_end_of_an_agent_that_ends() {
+        let mut term = HeldTerminal::start(&config(&["cmd.exe", "/c", "echo last-%OS%"])).unwrap();
+        let reader = term.start_reader().unwrap();
+        assert!(ended(&mut term).is_some());
+        let end = Instant::now() + Duration::from_secs(20);
+        while !reader.ended() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(reader.ended());
+        assert!(reader.buffered() > 0);
+        let c = reader.end();
+        assert!(c.ended);
+        let text = String::from_utf8_lossy(&c.buffer.into_vec()).into_owned();
+        assert!(text.contains("last-Windows_NT"), "{text:?}");
+    }
+
+    #[test]
+    fn drain_takes_what_an_ended_agent_left_without_blocking() {
+        let mut term = HeldTerminal::start(&config(&["cmd.exe", "/c", "echo left-%OS%"])).unwrap();
+        assert_eq!(ended(&mut term).map(|s| s.code), Some(Some(0)));
+        let mut buf = HeldBuffer::default();
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut eof = false;
+        while !eof && Instant::now() < end {
+            let before = Instant::now();
+            eof = term.drain(&mut buf).unwrap();
+            assert!(before.elapsed() < Duration::from_secs(2), "drain blocked");
+            if !eof {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(eof, "the end of the terminal was not seen");
+        let text = String::from_utf8_lossy(&buf.into_vec()).into_owned();
+        assert!(text.contains("left-Windows_NT"), "{text:?}");
+    }
+
+    #[test]
+    fn drain_of_a_running_quiet_agent_returns_at_once() {
+        let mut term = HeldTerminal::start(&config(&["ping", "-n", "30", "127.0.0.1"])).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let mut buf = HeldBuffer::default();
+        let before = Instant::now();
+        assert!(!term.drain(&mut buf).unwrap());
+        assert!(before.elapsed() < Duration::from_secs(1));
+        term.kill_and_reap();
+        assert!(term.try_wait().unwrap().is_some());
+    }
+
+    /// A detached start (`CREATE_NEW_PROCESS_GROUP`) turns Ctrl-C off for the starter and what it starts; `Interrupt` must reach the
+    /// agent anyway. The test turns it off for its own process first, as such a start would have.
+    #[test]
+    fn interrupt_reaches_the_agent_even_from_a_starter_that_ignores_ctrl_c() {
+        // SAFETY: plain call; ignore Ctrl-C in this process, as a process in a new process group does.
+        unsafe { SetConsoleCtrlHandler(None, 1) };
+        let mut term = HeldTerminal::start(&config(&["cmd.exe"])).unwrap();
+        // Reads with a holder's reader, ended and started again, until `needle` was read or 20 s passed.
+        let read_until = |seen: &mut String, needle: &str| {
+            let end = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < end && !seen.contains(needle) {
+                let reader = term.start_reader().unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+                seen.push_str(&String::from_utf8_lossy(&reader.end().buffer.into_vec()));
+            }
+        };
+        let mut seen = String::new();
+        read_until(&mut seen, ">");
+        term.write_input(b"ping -t 127.0.0.1\r\n").unwrap();
+        read_until(&mut seen, "Reply from");
+        assert!(seen.contains("Reply from"), "ping did not start: {seen:?}");
+        term.signal(HeldSignal::Interrupt).unwrap();
+        read_until(&mut seen, "Control-C");
+        assert!(seen.contains("Control-C"), "{seen:?}");
+        let end = Instant::now() + Duration::from_secs(10);
+        while !crate::process_children(term.pid())
+            .unwrap_or_default()
+            .is_empty()
+            && Instant::now() < end
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(crate::process_children(term.pid())
+            .unwrap_or_default()
+            .is_empty());
+        term.kill_and_reap();
+    }
+
+    #[test]
+    fn each_signal_ends_the_program_and_none_reaches_an_ended_one() {
+        for signal in [
+            HeldSignal::Interrupt,
+            HeldSignal::Terminate,
+            HeldSignal::Kill,
+        ] {
+            let mut term = HeldTerminal::start(&config(&["ping", "-t", "127.0.0.1"])).unwrap();
+            // The pseudo-console takes a moment before Ctrl-C reaches the program in it.
+            let reader = term.start_reader().unwrap();
+            let wait = Instant::now() + Duration::from_secs(10);
+            while reader.buffered() == 0 && Instant::now() < wait {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            term.signal(signal).unwrap();
+            assert!(ended(&mut term).is_some(), "{signal:?} did not end it");
+            drop(reader);
+            // Ended: a signal is nothing now.
+            term.signal(HeldSignal::Kill).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_passable_ends_read_the_terminal_as_a_file() {
+        use std::io::Read;
+        let mut term = HeldTerminal::start(&config(&["cmd.exe", "/c", "echo file-%OS%"])).unwrap();
+        let mut file = term.handle().unwrap().into_file().unwrap();
+        assert!(ended(&mut term).is_some());
+        let mut text = Vec::new();
+        file.read_to_end(&mut text).unwrap();
+        assert!(String::from_utf8_lossy(&text).contains("file-Windows_NT"));
     }
 }

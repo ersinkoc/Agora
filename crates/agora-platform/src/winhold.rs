@@ -308,14 +308,14 @@ mod tests {
         println!("READER {}", seen.contains("from-reader-Windows_NT"));
     }
 
-    /// Stops and starts the holder's reading until `needle` was read, and returns everything read.
-    fn held_until(held: &mut HeldTerminal, needle: &str) -> String {
+    /// Reads the terminal with a holder's reader, ended and started again, until `needle` was read; returns everything read.
+    fn held_until(held: &HeldTerminal, needle: &str) -> String {
         let mut seen = String::new();
         let end = Instant::now() + Duration::from_secs(20);
         while Instant::now() < end && !seen.contains(needle) {
+            let reader = held.start_reader().unwrap();
             std::thread::sleep(Duration::from_millis(100));
-            seen.push_str(&String::from_utf8_lossy(&held.stop_reading()));
-            held.start_reading().unwrap();
+            seen.push_str(&String::from_utf8_lossy(&reader.end().buffer.into_vec()));
         }
         seen
     }
@@ -325,13 +325,12 @@ mod tests {
     /// reads again and sees what comes next. `%OS%` is expanded by `cmd`, so the answer is told from the echo of the typed line.
     #[test]
     fn a_terminal_is_handed_to_another_process_and_back_without_losing_output() {
-        let mut held =
-            HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()]), HELD_BUFFER).unwrap();
+        let mut held = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
         held.write_input(b"echo before-%OS%\r\n").unwrap();
-        let before = held_until(&mut held, "before-Windows_NT");
+        let before = held_until(&held, "before-Windows_NT");
         assert!(before.contains("before-Windows_NT"), "{before:?}");
-        // Attach: the holder stops reading, the other process gets the ends.
-        let _ = held.stop_reading();
+        // Attach: no reader runs now; the other process gets the ends.
+        let ends = held.handle().unwrap();
         let mut node = helper("winhold::tests::reader_helper", "reader")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -340,8 +339,8 @@ mod tests {
             .unwrap();
         let started = crate::process_start_time(node.id()).unwrap();
         let other = OtherProcess::open(node.id(), started).unwrap();
-        let input = other.duplicate_into(held.input_handle().unwrap()).unwrap();
-        let output = other.duplicate_into(held.output_handle()).unwrap();
+        let input = other.duplicate_into(ends.input_raw()).unwrap();
+        let output = other.duplicate_into(ends.output_raw()).unwrap();
         writeln!(node.stdin.take().unwrap(), "{input} {output}").unwrap();
         let mut report = String::new();
         let mut out = BufReader::new(node.stdout.take().unwrap());
@@ -359,11 +358,11 @@ mod tests {
         );
         let _ = node.wait();
         // Detach: the holder reads again, and nothing written from now on is lost.
-        held.start_reading().unwrap();
         held.write_input(b"echo after-%OS%\r\n").unwrap();
-        let after = held_until(&mut held, "after-Windows_NT");
+        let after = held_until(&held, "after-Windows_NT");
         assert!(after.contains("after-Windows_NT"), "{after:?}");
-        held.kill().unwrap();
+        held.kill_and_reap();
+        assert!(held.try_wait().unwrap().is_some());
     }
 
     /// The node's process is checked by its start time on the handle that is then used: a wrong start time (its pid taken by another
