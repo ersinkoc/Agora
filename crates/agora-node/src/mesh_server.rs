@@ -201,6 +201,62 @@ pub trait Helpers: Send + Sync {
 
 type HelpersSlot = Mutex<Option<Arc<dyn Helpers>>>;
 
+/// ADR-0122 Amendment A: the node's launcher for a shared MCP server that names a secret asks over the agent's own mesh socket, with
+/// this JSON-RPC method (never a tool: no agent's tool list names it), for what to start.
+pub const SHARED_LAUNCH_METHOD: &str = "agora/shared_launch";
+
+/// What a launcher starts: the item's program, its arguments and its environment with the secrets filled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlan {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// Who answers [`SHARED_LAUNCH_METHOD`] (the node's shared items). `Err` is a stable reason (`unknown_launch`, `secret_missing`, ...).
+pub trait SharedLaunch: Send + Sync {
+    fn launch(
+        &self,
+        agent: &AgentId,
+        item: &str,
+        launch_id: &str,
+    ) -> Result<LaunchPlan, &'static str>;
+}
+
+type LaunchSlot = Mutex<Option<Arc<dyn SharedLaunch>>>;
+
+/// The answer to one [`SHARED_LAUNCH_METHOD`] request on `agent`'s socket; `None` when the line is not one. The answer to a refusal
+/// is a JSON-RPC error (-32001) whose data names the reason; never the secret's value in either.
+fn launch_reply(text: &str, agent: &AgentId, launcher: &dyn SharedLaunch) -> Option<Message> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    if v.get("method").and_then(Value::as_str) != Some(SHARED_LAUNCH_METHOD) {
+        return None;
+    }
+    let id = v.get("id").cloned().unwrap_or(Value::Null);
+    let param = |k: &str| {
+        v.get("params")
+            .and_then(|p| p.get(k))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
+    let (item, launch_id) = (param("item"), param("launch_id"));
+    Some(match launcher.launch(agent, item, launch_id) {
+        Ok(plan) => Message::Response {
+            id,
+            result: json!({
+                "command": plan.command,
+                "args": plan.args,
+                "env": plan.env.into_iter().map(|(k, v)| (k, Value::String(v))).collect::<serde_json::Map<String, Value>>(),
+            }),
+        },
+        Err(reason) => Message::ErrorResponse {
+            id,
+            code: -32001,
+            data: Some(json!({"code": "share.refused", "reason": reason})),
+        },
+    })
+}
+
 /// The hub's answer to a board call (ADR-0039): not shared (run it locally) or the tool's MCP result as JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoardReply {
@@ -1081,6 +1137,7 @@ fn acceptance_message(
 pub struct MeshServer {
     /// ADR-0057: answers `agent_start`, `agent_wait` and `agent_output`; without it those tools are not listed.
     helpers: Arc<HelpersSlot>,
+    shared_launch: Arc<LaunchSlot>,
     /// Whether messages may cross to and from other nodes (node policy `mesh.remote`, ADR-0031).
     remote_allowed: Arc<AtomicBool>,
     remote: Arc<RemoteSlot>,
@@ -1209,6 +1266,7 @@ impl MeshServer {
         };
         Ok(Self {
             helpers: Arc::new(Mutex::new(None)),
+            shared_launch: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote,
             subtasks_agreed: Arc::new(AtomicBool::new(false)),
@@ -1233,6 +1291,11 @@ impl MeshServer {
             ids_file,
             dispatches: crate::task_dispatch::Dispatches::default(),
         })
+    }
+
+    /// ADR-0122 Amendment A: who answers the launcher of a shared server that names a secret. Connections made after this ask it.
+    pub fn set_shared_launch(&self, launcher: Arc<dyn SharedLaunch>) {
+        *self.shared_launch.lock().unwrap_or_else(|e| e.into_inner()) = Some(launcher);
     }
 
     /// ADR-0057: who answers the spawn tools. Connections made after this list them.
@@ -2110,6 +2173,7 @@ impl MeshServer {
         let thread = {
             let typed = Arc::clone(&typed);
             let subtasks_agreed = Arc::clone(&self.subtasks_agreed);
+            let launch_slot = Arc::clone(&self.shared_launch);
             let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
@@ -2154,6 +2218,10 @@ impl MeshServer {
                                 );
                                 let helpers =
                                     helpers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                                let launch = launch_slot
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone();
                                 if let Ok(h) = std::thread::Builder::new()
                                     .name("agora-mesh-conn".into())
                                     .spawn(move || {
@@ -2169,6 +2237,7 @@ impl MeshServer {
                                                 fleet: &fleet,
                                                 subtasks_agreed: &subtasks_agreed,
                                                 helpers,
+                                                launch,
                                                 typed: &typed,
                                             },
                                             &stop,
@@ -2479,6 +2548,8 @@ struct Links<'a> {
     fleet: &'a Fleet,
     subtasks_agreed: &'a AtomicBool,
     helpers: Option<Arc<dyn Helpers>>,
+    /// ADR-0122 Amendment A: the shared servers' launcher.
+    launch: Option<Arc<dyn SharedLaunch>>,
     /// [`AgentServer::typed`].
     typed: &'a AtomicU64,
 }
@@ -2926,6 +2997,12 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
     let fleet = links.fleet.offered(allowed);
     s.conn.set_fleet(fleet);
     s.conn.set_subtasks(links.subtasks_offered());
+    // ADR-0122 Amendment A: the node's own launcher asks for a shared server's program; never the broker's, never a tool.
+    if let Some(l) = &links.launch {
+        if let Some(msg) = launch_reply(text, s.conn.agent(), l.as_ref()) {
+            return Step::Reply(msg);
+        }
+    }
     // ADR-0057: starting and following helpers is the node's, not the broker's.
     if let Some(h) = &links.helpers {
         if let Some(answer) = spawn_call(&s.conn, text, h, &mut s.spawn_waits, &mut s.starts) {
@@ -3231,6 +3308,54 @@ fn serve(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// ADR-0122 Amendment A: the launcher's ask is answered by the node on the asking agent's own socket: the program and its filled
+    /// environment, or a refusal naming its reason; any other line is not taken.
+    #[test]
+    fn the_launchers_ask_is_answered_for_the_agent_whose_socket_it_came_on() {
+        struct One;
+        impl SharedLaunch for One {
+            fn launch(
+                &self,
+                agent: &AgentId,
+                item: &str,
+                id: &str,
+            ) -> Result<LaunchPlan, &'static str> {
+                if agent.as_str() == "agent-1" && item == "db" && id == "abc" {
+                    Ok(LaunchPlan {
+                        command: "npx".into(),
+                        args: vec!["db".into()],
+                        env: vec![("T".into(), "s".into())],
+                    })
+                } else {
+                    Err("unknown_launch")
+                }
+            }
+        }
+        let ask = |agent: &str, id: &str| {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"agora/shared_launch","params":{{"item":"db","launch_id":"{id}"}}}}"#
+            );
+            launch_reply(&line, &AgentId::new(agent), &One)
+                .map(|m| agora_protocol::jsonrpc::to_line(&m))
+        };
+        let ok = ask("agent-1", "abc").unwrap();
+        assert!(
+            ok.contains(r#""result":{"args":["db"],"command":"npx","env":{"T":"s"}}"#)
+                || ok.contains(r#""command":"npx""#),
+            "{ok}"
+        );
+        let v: Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["result"]["env"]["T"], "s");
+        let refused: Value = serde_json::from_str(&ask("agent-2", "abc").unwrap()).unwrap();
+        assert_eq!(refused["error"]["data"]["reason"], "unknown_launch");
+        assert!(launch_reply(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            &AgentId::new("agent-1"),
+            &One
+        )
+        .is_none());
+    }
 
     /// A test's folder, removed when the test ends, whether it passed or not.
     struct TempDir(PathBuf);

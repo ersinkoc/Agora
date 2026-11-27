@@ -2178,7 +2178,8 @@ shared-refused-count = { $count ->
    *[other] Refused on { $count } machines
 }
 shared-refused-on = { $machine }: { $reason }
-shared-refused-secret-needs-launcher = needs a secret: not given to agents yet
+shared-refused-secret-needs-launcher = a server at an address that needs a secret is not given to agents yet
+shared-refused-secret-not-allowed = this machine does not let that secret go to shared servers (its policy's share.secrets)
 shared-refused-secret = does not hold the secret { $secret }
 shared-refused-policy-off = this machine does not take shared servers
 shared-refused-command-not-allowed = this machine does not allow that program
@@ -2207,8 +2208,8 @@ shared-headers = Headers
 shared-scope = For
 shared-url-warning-title = Agents may send your code there
 shared-url-warning = An agent can send what it reads in your projects to this address. Share only a server you trust with that.
-shared-secret-title = Not given to agents yet
-shared-secret = A server that names a secret is kept, but machines do not give it to agents until they can fill secrets in themselves.
+shared-secret-title = Each machine decides about the secret
+shared-secret = A machine gives this server to its agents only when its own policy lets that secret go to shared servers (share.secrets) and it holds the secret. The secret is filled in on the machine when the server starts and never written to a file. A server at an address that needs a secret is not given yet.
 shared-publish = Sign and share
 shared-publish-change = Sign and share the change
 shared-cancel = Cancel

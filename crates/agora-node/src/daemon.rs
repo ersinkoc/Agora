@@ -1811,6 +1811,15 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                         p.problems.push(line.chars().take(80).collect());
                     }
                 }
+                // ADR-0122 Amendment A: the secrets a shared server may receive here (none unless listed).
+                "share.secrets" => {
+                    p.share.secrets = v
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
                 "share.mcp_commands" => {
                     p.share.mcp_commands = Some(
                         v.split(',')
@@ -2426,16 +2435,26 @@ impl Node {
         {
             // ADR-0122 step 3b: each launch gets the shared MCP servers in its scope, judged again and with this node's own secrets.
             let for_hook = Arc::clone(&shared);
+            // Weak: the supervisor keeps this hook, and a strong mesh here would keep the mesh (and every agent's socket) alive
+            // after the node is dropped.
+            let mesh_for_hook = Arc::downgrade(&mesh);
             supervisor
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 // Called under the supervisor's lock; it takes the approvals' trust lock under it (re-judging), and nothing in
                 // approvals ever calls back into the supervisor, so the order holds.
                 .set_shared_hook(Box::new(move |id, project, kind| {
-                    let servers = for_hook.servers_for(id.as_str(), project, kind);
+                    let socket = mesh_for_hook.upgrade()?.socket_path(id);
+                    let servers = for_hook.servers_for(id.as_str(), project, kind, &socket);
                     Some((for_hook.agent_file(id.as_str()), servers))
                 }));
             events.set_shared(Arc::clone(&shared));
+            // ADR-0122 Amendment A: a shared server that names a secret gets it from this node's store, through its launcher.
+            let store = crate::credentials::SecretStore::in_data(&cfg.data_dir);
+            shared.set_secrets(Box::new(move |name| {
+                store.get(name).map(|s| s.expose().to_string())
+            }));
+            mesh.set_shared_launch(Arc::clone(&shared) as Arc<dyn crate::mesh_server::SharedLaunch>);
         }
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,

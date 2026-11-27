@@ -123,6 +123,7 @@ cli-plugin-hashes-written = Dosyaların karmaları { $folder }/agora-plugin.json
 cli-plugin-packed = { $folder }, { $out } içine paketlendi ({ $bytes } bayt).
 cli-plugin-watching = { $folder } her değişiklikte yeniden paketleniyor. Durdurmak için Ctrl+C.
 cli-bad-arguments = Komut satırı argümanları anlaşılamadı.
+cli-mcp-launch-refused = Paylaşılan MCP sunucusu { $item } başlatılmadı: { $reason }.
 cli-manual-heading = Kılavuzun konuları bunlar. "agora manual KONU" birini yazdırır; "agora manual --json" konuları JSON olarak listeler.
 cli-manual-unknown = Kılavuzda "{ $topic }" adlı bir konu yok. Konuları: { $topics }.
 cli-manual-topic-scripting = Ajanları kabuktan başlat, istem gönder, bekle ve durdur; çıkış kodları ve olaylar.

@@ -176,6 +176,7 @@ mod hold;
 mod hubcli;
 mod joincmd;
 mod manualcmd;
+mod mcplaunch;
 mod meshbridge;
 mod orchestrate;
 mod paircmd;
@@ -670,6 +671,8 @@ pub(crate) fn route<'a>(words: &[&'a str], opts: &Opts) -> Option<Run<'a>> {
         ["workspaces"] => Box::new(workspacescmd::list),
         ["workspaces", "clean"] => Box::new(workspacescmd::clean),
         ["node", "stdio"] => Box::new(|say, o| bridge_stdio(say, &socket_path(o))),
+        // ADR-0122 Amendment A: the node's launcher for a shared MCP server that names a secret.
+        ["mcp-launch"] => Box::new(mcplaunch::mcp_launch),
         ["mesh", "stdio"] => Box::new(|say, o| match &o.socket {
             // An agent's MCP client starts this as its mesh server; the node told it which socket is its own.
             Some(path) => match meshbridge::mesh_stdio(path) {

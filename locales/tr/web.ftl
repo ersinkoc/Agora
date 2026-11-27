@@ -2072,7 +2072,8 @@ shared-refused-count = { $count ->
    *[other] { $count } makinede reddedildi
 }
 shared-refused-on = { $machine }: { $reason }
-shared-refused-secret-needs-launcher = bir gizli değer gerekiyor: ajanlara henüz verilmiyor
+shared-refused-secret-needs-launcher = gizli değer isteyen adresli bir sunucu ajanlara henüz verilmiyor
+shared-refused-secret-not-allowed = bu makine o gizli değerin paylaşılan sunuculara gitmesine izin vermiyor (politikadaki share.secrets)
 shared-refused-secret = { $secret } gizli değeri bu makinede yok
 shared-refused-policy-off = bu makine paylaşılan sunucuları almıyor
 shared-refused-command-not-allowed = bu makine o programa izin vermiyor
@@ -2101,8 +2102,8 @@ shared-headers = Başlıklar
 shared-scope = Kapsam
 shared-url-warning-title = Ajanlar kodunuzu oraya gönderebilir
 shared-url-warning = Bir ajan projelerinizde okuduklarını bu adrese gönderebilir. Yalnızca buna güvendiğiniz bir sunucuyu paylaşın.
-shared-secret-title = Ajanlara henüz verilmiyor
-shared-secret = Gizli değer adlandıran bir sunucu saklanır, ama makineler gizli değerleri kendileri dolduramadıkça onu ajanlara vermez.
+shared-secret-title = Gizli değere her makine kendisi karar verir
+shared-secret = Bir makine bu sunucuyu ajanlarına yalnızca kendi politikası o gizli değerin paylaşılan sunuculara gitmesine izin veriyorsa (share.secrets) ve gizli değer makinede varsa verir. Gizli değer, sunucu başlarken makinede doldurulur ve hiçbir dosyaya yazılmaz. Gizli değer isteyen adresli sunucular henüz verilmiyor.
 shared-publish = İmzala ve paylaş
 shared-publish-change = Değişikliği imzala ve paylaş
 shared-cancel = Vazgeç

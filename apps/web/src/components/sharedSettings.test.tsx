@@ -13,7 +13,7 @@ import { draftItem, SharedSettings } from './SharedSettings';
 const docs: SharedItem = {
   name: 'docs-search', kind: 'mcp_server', hash: 'a1', issuedMs: 1000, signer: 'web-1', scope: { projectId: '', kinds: [] },
   mcp: { command: 'npx', args: ['-y', 'docs-mcp'], env: [{ name: 'DOCS_TOKEN', value: '{secret:docs}' }], url: '', headers: [] },
-  refused: [{ node: 'n-blackview', code: 'share.refused', reason: 'secret_needs_launcher' }, { node: 'n-win', code: 'share.refused', reason: 'signature' }],
+  refused: [{ node: 'n-blackview', code: 'share.refused', reason: 'secret_not_allowed' }, { node: 'n-win', code: 'share.refused', reason: 'signature' }],
 };
 
 function fake(items: SharedItem[]) {
@@ -56,7 +56,7 @@ describe('Settings → Shared', () => {
     expect(text).toContain('npx -y docs-mcp');
     expect(text).toContain('Every project');
     expect(text).toContain('Refused on 2 machines');
-    expect(text).toContain('blackview: needs a secret: not given to agents yet');
+    expect(text).toContain("blackview: this machine does not let that secret go to shared servers (its policy's share.secrets)");
     expect(text).toContain('win: this machine does not trust the device that published it');
   });
 
@@ -88,9 +88,9 @@ describe('Settings → Shared', () => {
     await click(button('Add a server'));
     await click(button('An address'));
     expect(host.textContent).toContain('Agents may send your code there');
-    expect(host.textContent).not.toContain('Not given to agents yet');
+    expect(host.textContent).not.toContain('Each machine decides about the secret');
     await type('Headers', 'Authorization: Bearer {secret:issues}');
-    expect(host.textContent).toContain('Not given to agents yet');
+    expect(host.textContent).toContain('Each machine decides about the secret');
   });
 
   it('never sends a form the rules refuse, and says what to fix', async () => {

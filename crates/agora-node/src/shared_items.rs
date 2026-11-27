@@ -43,6 +43,9 @@ pub struct SharePolicy {
     /// Whether a shared MCP server at a URL may be given here (`share.mcp_urls = allow | forbid`, default allow). It runs nothing on
     /// this machine, but it is still a channel: an agent sends it repository content as tool arguments and reads its results.
     pub mcp_urls: bool,
+    /// ADR-0122 Amendment A: the secret names a shared MCP server may receive on this machine (`share.secrets`, default none). A
+    /// server that names any other is not given here, whatever the owner signed.
+    pub secrets: BTreeSet<String>,
 }
 
 impl Default for SharePolicy {
@@ -51,6 +54,7 @@ impl Default for SharePolicy {
             on: true,
             mcp_commands: None,
             mcp_urls: true,
+            secrets: BTreeSet::new(),
         }
     }
 }
@@ -181,6 +185,49 @@ pub struct SharedItems {
     out: Mutex<Vec<Body>>,
     /// ADR-0122 step 3b: what each running agent was given at its launch (`AgentStarted.shared_items`).
     given: Mutex<BTreeMap<String, Vec<v1::SharedItemRef>>>,
+    /// ADR-0122 Amendment A: the launches still to be asked for, by launch id: (agent, item). Each id is spent by its first ask.
+    launches: Mutex<BTreeMap<String, (String, String)>>,
+    /// Reads one of this node's secrets (ADR-0084's store); without it no server that names a secret is given.
+    secret: Mutex<Option<SecretReader>>,
+    /// The program the agent's tool starts for a server that names a secret: this node's own binary (`mcp-launch`).
+    launcher: PathBuf,
+}
+
+/// Reads a secret by name from the node's store.
+pub type SecretReader = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// The names of the secrets a value refers to (`{secret:NAME}`), in order, each once.
+pub fn secret_names(value: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = value;
+    while let Some(at) = rest.find("{secret:") {
+        let after = &rest[at + "{secret:".len()..];
+        let Some(end) = after.find('}') else { break };
+        let name = after[..end].to_string();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+impl crate::mesh_server::SharedLaunch for SharedItems {
+    fn launch(
+        &self,
+        agent: &agora_core::AgentId,
+        item: &str,
+        launch_id: &str,
+    ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
+        SharedItems::launch(self, agent.as_str(), item, launch_id)
+    }
+}
+
+/// A launch id: 32 random bytes as hex; `None` when the system gives no randomness (the server is then not given).
+fn launch_id() -> Option<String> {
+    let mut b = [0u8; 32];
+    getrandom::getrandom(&mut b).ok()?;
+    Some(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// `{secret:NAME}` in `value` filled from `secret`; the name of the first secret that is missing, as the error.
@@ -253,6 +300,9 @@ impl SharedItems {
             from_link: Arc::new(Mutex::new(Vec::new())),
             out: Mutex::new(Vec::new()),
             given: Mutex::new(BTreeMap::new()),
+            launches: Mutex::new(BTreeMap::new()),
+            secret: Mutex::new(None),
+            launcher: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agora")),
         };
         let kept: Vec<ShareItemSigned> = std::fs::read_dir(&me.dir)
             .into_iter()
@@ -319,6 +369,7 @@ impl SharedItems {
         agent: &str,
         project: &str,
         kind: &str,
+        socket: &Path,
     ) -> Vec<agora_adapters::inject::SharedServer> {
         self.rejudge();
         let mut servers = Vec::new();
@@ -327,27 +378,69 @@ impl SharedItems {
             let Some(m) = w.item.as_ref().and_then(|i| i.mcp.clone()) else {
                 continue;
             };
-            let names_a_secret = m
-                .env
-                .iter()
-                .chain(&m.headers)
-                .any(|v| v.value.contains("{secret:"));
-            if names_a_secret {
-                let mut st = self.st();
-                if st
-                    .refused
-                    .insert((w.name.clone(), format!("{}#secret", w.item_hash)))
-                {
-                    self.out.lock().unwrap_or_else(|e| e.into_inner()).push(
-                        Body::ShareItemRefused(v1::ShareItemRefused {
-                            node_id: self.node_id.clone(),
-                            name: w.name.clone(),
-                            item_hash: w.item_hash.clone(),
-                            code: "share.refused".to_string(),
-                            reason: "secret_needs_launcher".to_string(),
-                        }),
-                    );
+            // ADR-0122 Amendment A: a program whose environment names secrets is given through the node's launcher, only when
+            // this machine lets every one of them go to shared servers and holds it; a server at a URL whose headers name one
+            // waits for a later step. Each refusal is said once per version.
+            let header_secrets = m.headers.iter().any(|v| v.value.contains("{secret:"));
+            let names: Vec<String> = m.env.iter().flat_map(|v| secret_names(&v.value)).collect();
+            if header_secrets || !names.is_empty() {
+                let refusal = if header_secrets {
+                    Some(("share.refused", "secret_needs_launcher".to_string()))
+                } else {
+                    let st = self.st();
+                    let allowed = &st.policy.secrets;
+                    let reader = self.secret.lock().unwrap_or_else(|e| e.into_inner());
+                    names.iter().find_map(|n| {
+                        if !allowed.contains(n) {
+                            Some(("share.refused", "secret_not_allowed".to_string()))
+                        } else if reader.as_ref().and_then(|r| r(n)).is_none() {
+                            Some(("share.secret_missing", n.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some((code, reason)) = refusal {
+                    let mut st = self.st();
+                    if st
+                        .refused
+                        .insert((w.name.clone(), format!("{}#{reason}", w.item_hash)))
+                    {
+                        self.out.lock().unwrap_or_else(|e| e.into_inner()).push(
+                            Body::ShareItemRefused(v1::ShareItemRefused {
+                                node_id: self.node_id.clone(),
+                                name: w.name.clone(),
+                                item_hash: w.item_hash.clone(),
+                                code: code.to_string(),
+                                reason,
+                            }),
+                        );
+                    }
+                    continue;
                 }
+                let Some(id) = launch_id() else { continue };
+                self.launches
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(id.clone(), (agent.to_string(), w.name.clone()));
+                given.push(v1::SharedItemRef {
+                    name: w.name.clone(),
+                    item_hash: w.item_hash.clone(),
+                });
+                servers.push(agora_adapters::inject::SharedServer {
+                    name: w.name.clone(),
+                    command: self.launcher.to_string_lossy().into_owned(),
+                    args: vec![
+                        "mcp-launch".into(),
+                        "--socket".into(),
+                        socket.to_string_lossy().into_owned(),
+                        w.name.clone(),
+                        id,
+                    ],
+                    env: Vec::new(),
+                    url: String::new(),
+                    headers: Vec::new(),
+                });
                 continue;
             }
             let pairs = |v: &[v1::ShareValue]| {
@@ -390,8 +483,73 @@ impl SharedItems {
         self.dir.join("agents").join(format!("{agent}.json"))
     }
 
-    /// The agent ended: its file of shared servers (it may hold secrets) is removed, and what it was given forgotten.
+    /// ADR-0122 Amendment A: where this node's secrets are read from (its store, ADR-0084).
+    pub fn set_secrets(&self, reader: SecretReader) {
+        *self.secret.lock().unwrap_or_else(|e| e.into_inner()) = Some(reader);
+    }
+
+    /// ADR-0122 Amendment A: what the launcher of `item` for `agent` starts, for the launch id it was given at the agent's launch.
+    /// The id is spent by this ask, whatever the answer; the item is judged again with today's trust and policy, and its secrets
+    /// are read now (`unknown_launch`, `unknown_item`, `secret_not_allowed`, `secret_missing`).
+    pub fn launch(
+        &self,
+        agent: &str,
+        item: &str,
+        launch_id: &str,
+    ) -> Result<crate::mesh_server::LaunchPlan, &'static str> {
+        let Some((owner, named)) = self
+            .launches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(launch_id)
+        else {
+            return Err("unknown_launch");
+        };
+        if owner != agent || named != item {
+            return Err("unknown_launch");
+        }
+        self.rejudge();
+        let (m, allowed) = {
+            let st = self.st();
+            if !st.policy.on {
+                return Err("unknown_item");
+            }
+            let m = st
+                .used
+                .get(item)
+                .and_then(|w| w.item.as_ref())
+                .and_then(|i| i.mcp.clone())
+                .ok_or("unknown_item")?;
+            (m, st.policy.secrets.clone())
+        };
+        if m.command.is_empty() {
+            return Err("unknown_item");
+        }
+        let reader = self.secret.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(read) = reader.as_ref() else {
+            return Err("secret_missing");
+        };
+        let mut env = Vec::with_capacity(m.env.len());
+        for v in &m.env {
+            if secret_names(&v.value).iter().any(|n| !allowed.contains(n)) {
+                return Err("secret_not_allowed");
+            }
+            let filled = fill_secrets(&v.value, &|n| read(n)).map_err(|_| "secret_missing")?;
+            env.push((v.name.clone(), filled));
+        }
+        Ok(crate::mesh_server::LaunchPlan {
+            command: m.command,
+            args: m.args,
+            env,
+        })
+    }
+
+    /// The agent ended: its file of shared servers is removed, what it was given forgotten, and its launch ids spent.
     pub fn agent_ended(&self, agent: &str) {
+        self.launches
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (a, _)| a != agent);
         let _ = std::fs::remove_file(self.agent_file(agent));
         self.given
             .lock()
@@ -937,7 +1095,12 @@ mod tests {
         }];
         s.take(word("db", Some(db), 1, ShareScope::default()));
         s.take(word("docs", Some(docs), 1, ShareScope::default()));
-        let got = s.servers_for("agent-1", "p", "claude-code");
+        let got = s.servers_for(
+            "agent-1",
+            "p",
+            "claude-code",
+            Path::new("/run/m/agent-1.sock"),
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].env, [("MODE".to_string(), "readonly".to_string())]);
         assert_eq!(
@@ -947,7 +1110,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["db"]
         );
-        s.servers_for("agent-2", "p", "claude-code");
+        s.servers_for(
+            "agent-2",
+            "p",
+            "claude-code",
+            Path::new("/run/m/agent-2.sock"),
+        );
         let said = s.take_events();
         assert!(
             matches!(&said[..], [Body::ShareItemRefused(r)] if r.reason == "secret_needs_launcher" && r.name == "docs"),
@@ -955,6 +1123,93 @@ mod tests {
         );
         s.agent_ended("agent-1");
         assert!(s.given("agent-1").is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0122 Amendment A: a program that names a secret is given through the launcher only where this machine lets that secret
+    /// go and holds it; the agent's file names the launcher and a single-use id, never the secret; the launch fills it, once.
+    #[test]
+    fn a_server_naming_a_secret_goes_through_the_launcher_and_only_where_the_machine_allows_it() {
+        let d = temp("launcher");
+        let with_db = |allowed: &[&str]| {
+            let s = open(
+                &d,
+                SharePolicy {
+                    secrets: allowed.iter().map(|x| x.to_string()).collect(),
+                    ..SharePolicy::default()
+                },
+            );
+            let mut db = item("db", "npx", "");
+            db.mcp.as_mut().unwrap().args = vec!["-y".into(), "db-mcp".into()];
+            db.mcp.as_mut().unwrap().env = vec![v1::ShareValue {
+                name: "DB_URL".into(),
+                value: "{secret:DB}?ssl=1".into(),
+            }];
+            s.take(word("db", Some(db), 1, ShareScope::default()));
+            s
+        };
+        let sock = Path::new("/run/m/agent-1.sock");
+        // Not listed in `share.secrets`: refused, whatever the owner signed.
+        let s = with_db(&[]);
+        s.set_secrets(Box::new(|n| {
+            (n == "DB").then(|| "postgres://x".to_string())
+        }));
+        assert!(s.servers_for("agent-1", "p", "k", sock).is_empty());
+        assert!(
+            matches!(&s.take_events()[..], [Body::ShareItemRefused(r)] if r.reason == "secret_not_allowed")
+        );
+        // Listed but not held: refused, naming the secret.
+        let s = with_db(&["DB"]);
+        s.set_secrets(Box::new(|_| None));
+        assert!(s.servers_for("agent-1", "p", "k", sock).is_empty());
+        assert!(
+            matches!(&s.take_events()[..], [Body::ShareItemRefused(r)] if r.code == "share.secret_missing" && r.reason == "DB")
+        );
+        // Listed and held: the launcher, a single-use id, no environment in the file.
+        let s = with_db(&["DB"]);
+        s.set_secrets(Box::new(|n| {
+            (n == "DB").then(|| "postgres://x".to_string())
+        }));
+        let got = s.servers_for("agent-1", "p", "k", sock);
+        assert_eq!(got.len(), 1);
+        let server = &got[0];
+        assert!(server.env.is_empty() && server.url.is_empty());
+        assert_eq!(
+            &server.args[..4],
+            ["mcp-launch", "--socket", "/run/m/agent-1.sock", "db"]
+        );
+        let id = server.args[4].clone();
+        assert_eq!(id.len(), 64);
+        assert!(
+            !format!("{server:?}").contains("postgres"),
+            "the secret is in no part of the file"
+        );
+        assert_eq!(
+            s.launch("agent-2", "db", &id),
+            Err("unknown_launch"),
+            "another agent's ask spends nothing it may use"
+        );
+        let got = s.servers_for("agent-1", "p", "k", sock);
+        let id = got[0].args[4].clone();
+        let plan = s.launch("agent-1", "db", &id).unwrap();
+        assert_eq!(
+            (plan.command.as_str(), plan.args.as_slice()),
+            ("npx", &["-y".to_string(), "db-mcp".to_string()][..])
+        );
+        assert_eq!(
+            plan.env,
+            [("DB_URL".to_string(), "postgres://x?ssl=1".to_string())]
+        );
+        assert_eq!(
+            s.launch("agent-1", "db", &id),
+            Err("unknown_launch"),
+            "single use"
+        );
+        // An agent that ended has no launches left.
+        let got = s.servers_for("agent-1", "p", "k", sock);
+        let id = got[0].args[4].clone();
+        s.agent_ended("agent-1");
+        assert_eq!(s.launch("agent-1", "db", &id), Err("unknown_launch"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

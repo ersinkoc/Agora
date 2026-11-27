@@ -155,7 +155,7 @@ export function demoSharedSource(): import('./net/share').SharedSource {
   let items: import('./net/share').SharedItem[] = [
     { name: 'docs-search', kind: 'mcp_server', hash: 'a1', issuedMs: demoSettingsNow - 3_600_000, signer: 'web-10a3e055eea9e45f',
       scope: { projectId: '', kinds: [] }, mcp: { command: 'npx', args: ['-y', 'docs-mcp'], env: [{ name: 'DOCS_TOKEN', value: '{secret:docs}' }], url: '', headers: [] },
-      refused: [{ node: 'blackview', code: 'share.refused', reason: 'secret_needs_launcher' }, { node: 'mac', code: 'share.refused', reason: 'secret_needs_launcher' }] },
+      refused: [{ node: 'blackview', code: 'share.refused', reason: 'secret_not_allowed' }, { node: 'mac', code: 'share.secret_missing', reason: 'docs' }] },
     { name: 'issues', kind: 'mcp_server', hash: 'b2', issuedMs: demoSettingsNow - 86_400_000, signer: 'web-10a3e055eea9e45f',
       scope: { projectId: '', kinds: [] }, mcp: { command: '', args: [], env: [], url: 'https://mcp.example.com/issues', headers: [] }, refused: [] },
     { name: 'pg-schema', kind: 'mcp_server', hash: 'c3', issuedMs: demoSettingsNow - 7_200_000, signer: 'web-10a3e055eea9e45f',

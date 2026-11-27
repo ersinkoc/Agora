@@ -120,6 +120,13 @@ policy lets that secret go to shared servers.
 6. **Audit and words.** The node records `share.launch` (the item, the agent, the outcome; never the value). The window's Shared
    section says "needs the secret NAME on MACHINE" and "MACHINE does not let NAME go to shared servers" instead of "not given yet".
 
+Built (2026-11-27): `share.secrets` in node policy; `SharedItems::servers_for` gives such a program as `agora mcp-launch --socket <agent's
+mesh socket> <item> <launch id>` (32 random bytes, single use, spent when the agent ends) or refuses it (`secret_not_allowed`,
+`share.secret_missing`); the node answers `agora/shared_launch` on the agent's own socket before the broker (`mesh_server.rs`
+`launch_reply`, never a tool), filling the environment from its store at that moment; `crates/agora/src/mcplaunch.rs` runs the program
+with the agent tool's standard input and output. The window's Shared section says each refusal in words. Not built: the URL bridge,
+and a `share.launch` audit row (the node logs nothing of the value).
+
 Accepted with the proposed answers. Open questions (with proposed answers): (1) `share.secrets` empty by default, so every machine opts in by name: yes. (2) URL servers
 with secret headers in this step: no, a later step. (3) A new mesh request needs the schema's approval (`shared.launch` is a node-local
 mesh tool, not a hub message): proposed as a mesh tool name only, no schema change; confirm.
