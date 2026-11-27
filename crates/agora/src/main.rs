@@ -994,6 +994,18 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // ADR-0088: a preview never reaches this machine's hub, the hub this node dials, or the panel, wherever their folders are.
+    {
+        use agora_node::preview::PortSource;
+        let link = hubcli::link_dir();
+        node.previews.add_sources([
+            PortSource::Listen(hubcli::hub_dir(o).join(hubcli::LISTEN_FILE)),
+            PortSource::HubUrl(link.join("url")),
+            PortSource::Port(link.join("panel-port")),
+        ]);
+        node.previews
+            .add_sources(agora_node::preview::default_sources(&h));
+    }
     // ADR-0104 O2: from here a stop request is a clean stop.
     up.store(true, Ordering::Release);
     // An earlier run's link state is never read as this run's; a node without a hub has none.

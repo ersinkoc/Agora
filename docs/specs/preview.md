@@ -1,7 +1,10 @@
 # Preview: an agent's local web server in the window (ADR-0088)
 
-Status: schema only. The messages, codes, frame kinds and signing domain exist (`schema/agora/v1/preview.proto`, `docs/specs/protocol.md`
-"Preview"); no node, hub or window sends or handles them yet. Capability `preview.v1` is not offered yet; the node step (2) and the hub step (3) add it to their lists when they handle the messages.
+Status: the node keeps forwards. The messages, codes, frame kinds and signing domain exist (`schema/agora/v1/preview.proto`,
+`docs/specs/protocol.md` "Preview"). A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`, checks every rule below and records
+`PreviewChanged` (`crates/agora-node/src/preview.rs`); it does not relay a connection yet (`PreviewConnect` is still refused as
+unsupported), and no hub or window sends these messages. Capability `preview.v1` is not offered yet; the node offers it once it relays
+connections, and the hub step (3) adds it.
 
 ## What it is
 A **forward** is a named, owner-approved path from the window to one port on the **loopback** of one node (`127.0.0.1` or `::1`), for a limited time. The window
@@ -18,10 +21,25 @@ shows the page in an isolated frame. Nothing else on the node's loopback becomes
 | `PreviewChanged` | event 81 | a forward opened or ended (indicator, audit: port only) |
 
 ## Rules the node enforces (never widened by the hub)
+The node's own ports are read again at every open from where the binary writes them: the hub on this machine (`<home>/hub/listen`,
+also any `--hub-dir`), the hub the node dials when its address is this machine or the node cannot tell (`<home>/link/url`), and the
+panel (`<home>/link/panel-port`). The node itself listens on no TCP port (its control socket and the holder's are local sockets). A
+hub on this machine trusts a peer on its loopback more than a remote one (proxy headers, ADR-0067's local exemptions), so a forward to
+it would hand the window that trust; that is why those ports are refused even for the owner.
+
 - Port 1..65535 on the node's loopback only: `127.0.0.1` or `::1`, tried in the order `localhost` resolves on that machine (development servers such as Vite and Node on Windows often listen only on `[::1]`); below 1024 only when the owner's policy names it; never one of the node's own ports (control,
   hub link, holder, any port it knows it owns): `preview.port_refused` with `reason` `invalid`, `privileged`, `node_port` or `not_loopback` (the port answers on neither `127.0.0.1` nor `::1`).
 - At most 8 open forwards per node (`preview.limit`). Expiry default 28800 s, cap 86400 s. A forward ends at expiry, when closed, or
   when the node restarts; it is never restored (`preview.expired`, `preview.unknown`).
+- Through the hub, `PreviewClose` and `PreviewList` need no signature, whoever opened the forward: closing only removes access, and the
+  list shows what `PreviewChanged` already says.
+- The hub address in `link/url` is resolved at each open (only to tell whether it is this machine); a slow resolver delays the open,
+  never anything else.
+- The forward's `creator` is the device that signed the open, or `owner` for an open on the control socket.
+- A device the owner limited to some projects (`device.<id>.projects`, ADR-0049) opens no preview: a forward reaches the machine's
+  loopback, not a project (`auth.forbidden {action: preview}`).
+- A node that cannot check signatures (no grants) opens nothing for the hub (`node.policy_denied {rule: preview.authorization}`), and a
+  grant never stands in for the signature.
 - Through the hub, an open needs a device signature over `preview-action-v1` (protocol.md: length-prefixed fields, a single-use nonce kept until its expiry, at most 5 minutes ahead), verified by the node, never by the hub. A suggestion never opens anything.
 - `PreviewClose` with `all` and a `forward_id`, or with neither, is `protocol.invalid_message {field: forward_id}`.
 - Stream budgets: `max_chunk_bytes` 16384, `window_bytes` 262144 of credit per direction, optional rate and total ceilings; over any of

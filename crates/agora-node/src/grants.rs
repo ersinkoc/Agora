@@ -142,6 +142,10 @@ pub enum Place<'a> {
 /// the node does not know it as part of any project.
 pub type PlaceResolver = Box<dyn Fn(Place<'_>) -> Option<String> + Send + Sync>;
 
+/// A signed action's nonce could not be spent (used already, the store is full, or its file failed).
+#[derive(Debug)]
+struct NonceSpent;
+
 pub struct Grants {
     node_id: String,
     approvals: Arc<NodeApprovals>,
@@ -411,7 +415,65 @@ impl Grants {
         {
             return Err(Error::new(ErrorCode::AuthForbidden).with("action", "directory"));
         }
-        let key = format!("{}:{}", a.device_id, a.nonce);
+        self.spend_nonce(&a.device_id, &a.nonce, a.expires_at_ms, now)
+            .map_err(|NonceSpent| bad())
+    }
+
+    /// ADR-0088: checks a `PreviewOpen` the hub routed here: a device this node trusts signed exactly this open (this node, this port,
+    /// this lifetime) under `preview-action-v1`, the signature is unexpired and at most 5 minutes ahead, and its nonce is new (kept,
+    /// on disk, until the signature's expiry). The signing device's id, which the forward names as its creator. A device the owner
+    /// limited to some projects opens no preview (a forward reaches the whole machine's loopback, not a project). A grant never
+    /// stands in for the signature.
+    pub fn preview_action(
+        &self,
+        open: &agora_protocol::v1::PreviewOpen,
+        now: u64,
+    ) -> Result<String, Error> {
+        let bad = || Error::new(ErrorCode::ApprovalSignatureInvalid).with("approval_id", "preview");
+        let a = open.authorization.as_ref().ok_or_else(bad)?;
+        if a.device_id.is_empty()
+            || a.device_id.len() > 4096
+            || a.device_id.contains('\0')
+            || a.nonce.len() != 32
+            || !a.nonce.bytes().all(|b| b.is_ascii_hexdigit())
+            || a.expires_at_ms <= now
+            || a.expires_at_ms > now.saturating_add(5 * 60 * 1000)
+        {
+            return Err(bad());
+        }
+        let msg = crate::preview::signed_message(
+            &self.node_id,
+            open.port,
+            open.expires_seconds,
+            &a.nonce,
+            a.expires_at_ms,
+        );
+        if !self
+            .approvals
+            .verify_device(&a.device_id, &msg, &a.signature)
+        {
+            return Err(bad());
+        }
+        // After the signature, as for a directory action: only a trusted device learns that it is limited.
+        if self.limits.is_limited(&a.device_id) {
+            return Err(Error::new(ErrorCode::AuthForbidden).with("action", "preview"));
+        }
+        self.spend_nonce(&a.device_id, &a.nonce, a.expires_at_ms, now)
+            .map_err(|NonceSpent| bad())?;
+        Ok(a.device_id.clone())
+    }
+
+    /// Records a signed action's nonce as used until `expires_at_ms`, in memory and (when the node has one) in the nonce file, so a
+    /// restart does not forget it. `Err` when it was used already, the store is full, or the file cannot be read or written.
+    fn spend_nonce(
+        &self,
+        device: &str,
+        nonce: &str,
+        expires_at_ms: u64,
+        now: u64,
+    ) -> Result<(), NonceSpent> {
+        let bad = || NonceSpent;
+        let key = format!("{device}:{nonce}");
         let mut used = self
             .directory_nonces
             .lock()
@@ -434,7 +496,7 @@ impl Grants {
         if used.contains_key(&key) || used.len() >= 4096 {
             return Err(bad());
         }
-        used.insert(key, a.expires_at_ms);
+        used.insert(key, expires_at_ms);
         if let Some(path) = &self.directory_nonce_file {
             let bytes = serde_json::to_vec(&*used).map_err(|_| bad())?;
             agora_platform::write_private(path, &bytes).map_err(|_| bad())?;

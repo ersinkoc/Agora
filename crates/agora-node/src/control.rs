@@ -97,6 +97,8 @@ pub struct ControlContext {
     stopping: Option<Arc<AtomicBool>>,
     /// ADR-0104 O2: commands being run now, so a node that stops can let them record what they did first ([`Self::commands_running`]).
     running: AtomicU64,
+    /// ADR-0088: the preview forwards. Without [`Self::with_previews`] none of the node's own ports is known beyond the probe.
+    pub previews: Arc<crate::preview::Previews>,
 }
 
 /// Counts one command as running while it lives ([`ControlContext::admit`]).
@@ -164,6 +166,7 @@ impl ControlContext {
             control_token: None,
             stopping: None,
             running: AtomicU64::new(0),
+            previews: Arc::new(crate::preview::Previews::new(Vec::new())),
             seen: Mutex::new(IdempotencyCache::default()),
             settled: Condvar::new(),
         }
@@ -200,6 +203,13 @@ impl ControlContext {
     #[must_use]
     pub fn with_ledger(mut self, ledger: Arc<crate::ledger::Ledger>) -> Self {
         self.ledger = Some(ledger);
+        self
+    }
+
+    /// ADR-0088: the node's preview forwards (the daemon makes them with the places its own ports are written).
+    #[must_use]
+    pub fn with_previews(mut self, previews: Arc<crate::preview::Previews>) -> Self {
+        self.previews = previews;
         self
     }
 
@@ -616,6 +626,35 @@ fn decide_skip(
     }
     announce(approved, &r.signer_device_id);
     Ok(ok_empty())
+}
+
+/// ADR-0088: opens a forward. This socket is the owner's, so it needs no signature; an open the hub routed here was verified on the
+/// way in (`uplink_client::run_local_on`, `Grants::preview_action`), and the device that signed it is the forward's creator.
+fn preview_open(ctx: &ControlContext, o: &v1::PreviewOpen) -> Result<v1::CommandOk, Error> {
+    let creator = o
+        .authorization
+        .as_ref()
+        .map(|a| a.device_id.as_str())
+        .filter(|d| !d.is_empty())
+        .unwrap_or("owner");
+    let (forward, changed) =
+        ctx.previews
+            .open(o.port, o.expires_seconds, creator, crate::daemon::now_ms())?;
+    preview_changed(ctx, changed);
+    Ok(v1::CommandOk {
+        result: Some(v1::command_ok::Result::PreviewOpen(v1::PreviewOpenResult {
+            forward: Some(forward),
+        })),
+    })
+}
+
+/// Records `PreviewChanged` for every forward that opened or ended (the port, never the content).
+pub(crate) fn preview_changed(ctx: &ControlContext, changed: crate::preview::Changed) {
+    if let Some(events) = &ctx.events {
+        for f in changed {
+            events.preview_changed(f);
+        }
+    }
 }
 
 fn capability_missing(what: &str) -> Error {
@@ -1723,6 +1762,21 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             })
         }
         Cmd::AgentForget(f) => forget_agent(ctx, &f.agent_id),
+        Cmd::PreviewOpen(o) => preview_open(ctx, o),
+        Cmd::PreviewClose(c) => {
+            let changed = ctx
+                .previews
+                .close(&c.forward_id, c.all, crate::daemon::now_ms())?;
+            preview_changed(ctx, changed);
+            Ok(ok_empty())
+        }
+        Cmd::PreviewList(_) => {
+            let (forwards, changed) = ctx.previews.list(crate::daemon::now_ms());
+            preview_changed(ctx, changed);
+            Ok(v1::CommandOk {
+                result: Some(Ok_::PreviewList(v1::PreviewListResult { forwards })),
+            })
+        }
         other => Err(capability_missing(command_name(other))),
     }
 }
@@ -2176,7 +2230,8 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::PairDeny(_) => "pair.deny",
         Cmd::PairRequest(_) => "pair.request",
         Cmd::PairReveal(_) => "pair.reveal",
-        // ADR-0088: the preview messages exist in the schema; no node code handles them yet, so they are refused as unsupported.
+        // ADR-0088: open, close and list are answered (`execute`); a connection is not relayed yet (build step 2b), so
+        // `preview.connect` is refused as unsupported.
         Cmd::PreviewOpen(_) => "preview.open",
         Cmd::PreviewClose(_) => "preview.close",
         Cmd::PreviewList(_) => "preview.list",

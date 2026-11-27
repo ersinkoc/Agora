@@ -968,9 +968,10 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
 
 ### Preview (ADR-0088)
 
-Schema only so far (`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design); no node or hub sends or handles these messages yet.
-All additions; nothing published changed. Capability `preview.v1` is **not offered yet**: the node forwarder (build step 2) and the hub
-relay (step 3) add it to their capability lists when they handle the messages, and a hub never sends a preview command to a node that did
+`schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design. A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`
+and records `PreviewChanged` (build step 2, `crates/agora-node/src/preview.rs`); it does not relay a connection yet, and no hub relays one.
+All additions; nothing published changed. Capability `preview.v1` is **not offered yet**: the node offers it once it relays
+`PreviewConnect` (the rest of build step 2) and the hub relay (step 3) adds it, and a hub never sends a preview command to a node that did
 not offer it. **Older peers refuse, they do not drop:** until then every peer answers `protocol.capability_missing`. The hub answers
 `PreviewConnect` with `capability` = `preview.v1`; a node that does not handle a preview command answers, as for any command it does
 not know, with `capability` = the command's name (`preview.open`, `preview.close`, `preview.list`, `preview.connect`). A client treats

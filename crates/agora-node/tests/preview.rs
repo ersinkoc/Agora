@@ -1,0 +1,450 @@
+//! ADR-0088 build step 2: a node's preview forwards. The owner opens, lists and closes them on the control socket; through the hub an
+//! open needs a device's `preview-action-v1` signature for exactly that node, port and lifetime, once. The node's own ports and ports
+//! nothing listens on are refused, whoever asks. Driven against a real node, the hub played over plain WebSocket.
+#![cfg(unix)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use agora_node::control::Client;
+use agora_node::daemon::{Node, NodeConfig};
+use agora_node::uplink_client::{spawn, HubLink};
+use agora_protocol::frame::{kinds, STREAM_COMMANDS, STREAM_CONTROL};
+use agora_protocol::v1::{
+    self, command_ok::Result as Ok_, command_request::Command as Cmd, command_response,
+    CommandRequest, CommandResponse,
+};
+use agora_protocol::Frame;
+use prost::Message;
+use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+
+struct Env {
+    dir: PathBuf,
+    key: EcdsaKeyPair,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A node home with one trusted device, `phone`, and `policy` as the node's policy file.
+fn env(name: &str, policy: &str) -> Env {
+    let dir = std::env::temp_dir().join(format!("agora-preview-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    std::fs::write(data.join("policy"), policy).unwrap();
+    let rng = ring::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+    let key =
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+    let hex: String = key
+        .public_key()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    std::fs::write(
+        data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        format!("phone {hex}\n"),
+    )
+    .unwrap();
+    Env { dir, key }
+}
+
+fn node(e: &Env) -> Node {
+    Node::start(&NodeConfig {
+        resume_all: false,
+        node_id: "laptop".into(),
+        socket: e.dir.join("c.sock"),
+        data_dir: e.dir.join("data"),
+        worktree_root: e.dir.join("wt"),
+        manifests_dir: e.dir.join("manifests"),
+        projects: Vec::new(),
+        limits: Default::default(),
+    })
+    .expect("start node")
+}
+
+/// A port something listens on (the "dev server"), kept open while the listener lives.
+fn server() -> (TcpListener, u32) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let p = l.local_addr().unwrap().port();
+    (l, u32::from(p))
+}
+
+fn open(port: u32, seconds: u32) -> Cmd {
+    Cmd::PreviewOpen(v1::PreviewOpen {
+        port,
+        expires_seconds: seconds,
+        authorization: None,
+    })
+}
+
+/// The open signed by `phone` for `node`, `port` and `seconds`, with nonce number `n`, valid for a minute.
+fn signed(e: &Env, node: &str, port: u32, seconds: u32, n: u8) -> Cmd {
+    let nonce = format!("{n:032x}");
+    let expires = agora_node::grants::now_ms() + 60_000;
+    let msg = agora_node::preview::signed_message(node, port, seconds, &nonce, expires);
+    let signature = e
+        .key
+        .sign(&ring::rand::SystemRandom::new(), &msg)
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    Cmd::PreviewOpen(v1::PreviewOpen {
+        port,
+        expires_seconds: seconds,
+        authorization: Some(v1::PreviewAuthorization {
+            device_id: "phone".into(),
+            nonce,
+            expires_at_ms: expires,
+            signature,
+        }),
+    })
+}
+
+fn code(r: &CommandResponse) -> String {
+    match &r.result {
+        Some(command_response::Result::Ok(_)) => "ok".into(),
+        Some(command_response::Result::Err(e)) => e.code.clone(),
+        None => "none".into(),
+    }
+}
+
+fn reason(r: &CommandResponse) -> String {
+    match &r.result {
+        Some(command_response::Result::Err(e)) => {
+            match e.params.get("reason").and_then(|p| p.value.as_ref()) {
+                Some(v1::param_value::Value::Str(s)) => s.clone(),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn forward(r: &CommandResponse) -> v1::PreviewForward {
+    match &r.result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(Ok_::PreviewOpen(o)),
+        })) => o.forward.clone().unwrap(),
+        other => panic!("not an open: {other:?}"),
+    }
+}
+
+fn local(e: &Env, cmd: Cmd) -> CommandResponse {
+    let mut c = Client::connect(&e.dir.join("c.sock")).unwrap();
+    let req = CommandRequest {
+        request_id: "r".into(),
+        command: Some(cmd),
+        ..Default::default()
+    };
+    c.request_on(STREAM_COMMANDS, &req, Duration::from_secs(10))
+        .unwrap()
+}
+
+fn listed(e: &Env) -> Vec<v1::PreviewForward> {
+    match local(e, Cmd::PreviewList(v1::PreviewList {})).result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(Ok_::PreviewList(l)),
+        })) => l.forwards,
+        other => panic!("not a list: {other:?}"),
+    }
+}
+
+fn changed(n: &Node) -> Vec<v1::PreviewForward> {
+    n.events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::PreviewChanged(c)) => c.forward,
+            _ => None,
+        })
+        .collect()
+}
+
+fn frame(stream_id: u32, kind: u8, payload: Vec<u8>) -> Frame {
+    Frame {
+        stream_id,
+        kind,
+        seq: None,
+        payload,
+    }
+}
+
+/// Plays the hub: sends each command on stream 1 once the previous one was answered, and returns the answers in order.
+fn through_hub(n: &Node, e: &Env, cmds: Vec<Cmd>) -> Vec<CommandResponse> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let l = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let port = l.local_addr().unwrap().port();
+    let uplink = spawn(
+        Arc::clone(&n.events),
+        HubLink {
+            url: format!("ws://127.0.0.1:{port}"),
+            ca_pem: String::new(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            commands: Some(e.dir.join("c.sock")),
+            mesh_out: None,
+            grants: Some(Arc::clone(&n.grants)),
+            mesh: None,
+            devices: None,
+            state_dir: None,
+            certs: None,
+        },
+    )
+    .unwrap();
+    let answers = rt.block_on(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut c = agora_protocol::ws::accept(s).await.unwrap();
+        assert_eq!(c.recv().await.unwrap().unwrap().kind, kinds::HELLO);
+        let welcome = v1::Welcome {
+            chosen_generation: 1,
+            ..Default::default()
+        };
+        c.send(&frame(
+            STREAM_CONTROL,
+            kinds::WELCOME,
+            welcome.encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+        while c.recv().await.unwrap().unwrap().kind != kinds::RESUME {}
+        let ok = v1::ResumeOk { from_seq: 1 };
+        c.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
+            .await
+            .unwrap();
+        let mut answers = Vec::new();
+        for (i, cmd) in cmds.into_iter().enumerate() {
+            let req = CommandRequest {
+                request_id: format!("h{i}"),
+                command: Some(cmd),
+                ..Default::default()
+            };
+            c.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec()))
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let f = tokio::time::timeout_at(deadline, c.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) {
+                    let _ = c.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload)).await;
+                } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+                    answers.push(CommandResponse::decode(f.payload.as_slice()).unwrap());
+                    break;
+                }
+            }
+        }
+        answers
+    });
+    drop(uplink);
+    answers
+}
+
+#[test]
+fn the_owner_opens_lists_and_closes_a_forward_and_each_change_is_recorded() {
+    let e = env("owner", "");
+    let n = node(&e);
+    let (_app, port) = server();
+    let r = local(&e, open(port, 0));
+    assert_eq!(code(&r), "ok");
+    let f = forward(&r);
+    assert_eq!(
+        (f.port, f.creator.as_str(), f.forward_id.as_str()),
+        (port, "owner", "fwd-1")
+    );
+    assert_eq!(f.expires_at_ms - f.opened_at_ms, 8 * 3600 * 1000);
+    assert_eq!(listed(&e), vec![f.clone()]);
+    let closed = local(
+        &e,
+        Cmd::PreviewClose(v1::PreviewClose {
+            forward_id: f.forward_id.clone(),
+            all: false,
+        }),
+    );
+    assert_eq!(code(&closed), "ok");
+    assert!(listed(&e).is_empty());
+    let seen = changed(&n);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].state, v1::PreviewState::Open as i32);
+    assert_eq!(seen[1].close_reason, v1::PreviewCloseReason::Closed as i32);
+    // An id that is no longer open, and a close that names both or neither.
+    let again = local(
+        &e,
+        Cmd::PreviewClose(v1::PreviewClose {
+            forward_id: f.forward_id,
+            all: false,
+        }),
+    );
+    assert_eq!(code(&again), "preview.unknown");
+    let both = local(
+        &e,
+        Cmd::PreviewClose(v1::PreviewClose {
+            forward_id: "fwd-1".into(),
+            all: true,
+        }),
+    );
+    assert_eq!(code(&both), "protocol.invalid_message");
+}
+
+#[test]
+fn the_nodes_own_ports_privileged_and_silent_ports_are_refused_for_the_owner_too() {
+    let e = env("ports", "");
+    // A hub on this machine (its `listen` file next to the data folder) and the panel the window uses.
+    let (_hub, hub) = server();
+    let (_panel, panel) = server();
+    std::fs::create_dir_all(e.dir.join("hub")).unwrap();
+    std::fs::create_dir_all(e.dir.join("link")).unwrap();
+    std::fs::write(e.dir.join("hub/listen"), format!("0.0.0.0:{hub}")).unwrap();
+    std::fs::write(e.dir.join("link/panel-port"), panel.to_string()).unwrap();
+    let _n = node(&e);
+    for port in [hub, panel] {
+        let r = local(&e, open(port, 0));
+        assert_eq!(
+            (code(&r).as_str(), reason(&r).as_str()),
+            ("preview.port_refused", "node_port"),
+            "{port}"
+        );
+    }
+    let r = local(&e, open(80, 0));
+    assert_eq!(reason(&r), "privileged");
+    let (gone, silent) = server();
+    drop(gone);
+    assert_eq!(reason(&local(&e, open(silent, 0))), "not_loopback");
+    assert!(listed(&e).is_empty());
+}
+
+#[test]
+fn through_the_hub_an_open_needs_the_devices_signature_for_exactly_that_open_once() {
+    let e = env("hub", "");
+    let n = node(&e);
+    let (_app, port) = server();
+    let (_other, other_port) = server();
+    let replay = signed(&e, "laptop", port, 0, 9);
+    let Cmd::PreviewOpen(mut moved) = signed(&e, "laptop", port, 0, 3) else {
+        unreachable!()
+    };
+    moved.port = other_port;
+    let Cmd::PreviewOpen(mut longer) = signed(&e, "laptop", port, 600, 4) else {
+        unreachable!()
+    };
+    longer.expires_seconds = 86_400;
+    let answers = through_hub(
+        &n,
+        &e,
+        vec![
+            open(port, 0),
+            signed(&e, "desktop", port, 0, 2),
+            Cmd::PreviewOpen(moved),
+            Cmd::PreviewOpen(longer),
+            replay.clone(),
+            replay,
+            Cmd::PreviewList(v1::PreviewList {}),
+        ],
+    );
+    let codes: Vec<String> = answers.iter().map(code).collect();
+    assert_eq!(
+        codes,
+        [
+            "approval.signature_invalid", // unsigned
+            "approval.signature_invalid", // signed for another node
+            "approval.signature_invalid", // the hub changed the port
+            "approval.signature_invalid", // the hub changed the lifetime
+            "ok",
+            "approval.signature_invalid", // the same nonce again
+            "ok",
+        ]
+    );
+    let f = forward(&answers[4]);
+    assert_eq!((f.port, f.creator.as_str()), (port, "phone"));
+    match &answers[6].result {
+        Some(command_response::Result::Ok(v1::CommandOk {
+            result: Some(Ok_::PreviewList(l)),
+        })) => assert_eq!(l.forwards, vec![f]),
+        other => panic!("not a list: {other:?}"),
+    }
+}
+
+#[test]
+fn a_signed_open_still_meets_every_port_rule() {
+    let e = env("hub-ports", "");
+    let (_hub, hub) = server();
+    std::fs::create_dir_all(e.dir.join("hub")).unwrap();
+    std::fs::write(e.dir.join("hub/listen"), format!("127.0.0.1:{hub}")).unwrap();
+    let n = node(&e);
+    let answers = through_hub(
+        &n,
+        &e,
+        vec![
+            signed(&e, "laptop", hub, 0, 1),
+            signed(&e, "laptop", 22, 0, 2),
+        ],
+    );
+    assert_eq!(reason(&answers[0]), "node_port");
+    assert_eq!(reason(&answers[1]), "privileged");
+}
+
+#[test]
+fn a_device_limited_to_some_projects_opens_no_preview() {
+    let e = env("limited", "device.phone.projects = id:somewhere\n");
+    let n = node(&e);
+    let (_app, port) = server();
+    let answers = through_hub(&n, &e, vec![signed(&e, "laptop", port, 0, 1)]);
+    assert_eq!(code(&answers[0]), "auth.forbidden");
+    assert!(listed(&e).is_empty());
+}
+
+#[test]
+fn a_stopping_node_ends_its_forwards() {
+    let e = env("stop", "");
+    let n = node(&e);
+    let (_app, port) = server();
+    assert_eq!(code(&local(&e, open(port, 0))), "ok");
+    let events = Arc::clone(&n.events);
+    drop(n);
+    let last = events
+        .events_after(0)
+        .into_iter()
+        .filter_map(|e| match e.body {
+            Some(v1::event::Body::PreviewChanged(c)) => c.forward,
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert_eq!(
+        last.close_reason,
+        v1::PreviewCloseReason::NodeStopped as i32
+    );
+}
+
+#[test]
+fn a_used_signature_stays_used_after_the_node_restarts() {
+    let e = env("restart", "");
+    let (_app, port) = server();
+    let once = signed(&e, "laptop", port, 0, 7);
+    let n = node(&e);
+    assert_eq!(code(&through_hub(&n, &e, vec![once.clone()])[0]), "ok");
+    drop(n);
+    let n = node(&e);
+    assert!(listed(&e).is_empty(), "forwards are never restored");
+    assert_eq!(
+        code(&through_hub(&n, &e, vec![once])[0]),
+        "approval.signature_invalid"
+    );
+}

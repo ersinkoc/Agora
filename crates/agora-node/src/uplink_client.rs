@@ -1295,6 +1295,14 @@ fn run_local_on(
                 .with("node_id", ""),
         );
     }
+    // ADR-0088: a node that cannot check a device's signature opens no preview for the hub.
+    if grants.is_none() && matches!(req.command, Some(command_request::Command::PreviewOpen(_))) {
+        return fail(
+            Error::new(ErrorCode::NodePolicyDenied)
+                .with("rule", "preview.authorization")
+                .with("node_id", ""),
+        );
+    }
     if let Some(g) = grants {
         let now = crate::grants::now_ms();
         let done = |r: Result<agora_protocol::v1::command_ok::Result, Error>| CommandResponse {
@@ -1315,6 +1323,13 @@ fn run_local_on(
                 | command_request::Command::AgentResume(_)),
             ) => {
                 if let Err(e) = g.directory_action(c, now) {
+                    return fail(e);
+                }
+            }
+            // ADR-0088: only a person's signature opens a forward, never a grant (the hub acting for a while). The control socket
+            // takes the verified device as the forward's creator.
+            Some(command_request::Command::PreviewOpen(o)) => {
+                if let Err(e) = g.preview_action(o, now) {
                     return fail(e);
                 }
             }

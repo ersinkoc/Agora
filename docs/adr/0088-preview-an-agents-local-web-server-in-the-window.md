@@ -67,6 +67,10 @@ port and to open the node's control port: all must fail).
    `preview.v1`, error codes `preview.port_refused`, `preview.limit`, `preview.expired`, `preview.unknown`, `preview.unavailable`, golden
    fixtures, the signing domain `preview-action-v1` with vectors, and `docs/specs/preview.md`. The capability is not advertised yet (steps
    2 and 3 add it); node and hub refuse the commands with `protocol.capability_missing`.
-2. Node forwarder and policy checks: not started.
+2. Node forwarder and policy checks: the forward table is done (`crates/agora-node/src/preview.rs`, tests in
+   `crates/agora-node/tests/preview.rs`): open, close and list on the control socket and, signed under `preview-action-v1`, through the
+   hub; the port rules (1024 and up, never the node's own ports, the port must answer on `127.0.0.1` or `::1`), at most 8, expiry
+   (default 8 hours, at most 24), `PreviewChanged` on every open and end, every forward ended when the node stops. Left: relaying a
+   connection (`PreviewConnect`, frames 20..22, credit and budgets, lowest priority on the hub link), then the capability.
 3. Hub relay, origin per forward, audit: not started.
 4. Web Browser pane: not started.

@@ -66,6 +66,18 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   200 ms (mostly serial `git.exe` spawns; the side-by-side identity queries are merged, not measured on Windows yet); keystroke → echo p95
   18.21 / 17.45 ms against 16 ms (likely the ~15.6 ms timer tick in ConPTY, not measured alone).
 
+## Previews (ADR-0088)
+
+- **Before step 2b relays a byte** (review of 96786517): the own-port list does not cover every loopback path to a hub (the desktop
+  app's tunnel port, a hub under another home, a hub whose best-effort `listen` write failed), and a hub signs in loopback peers
+  without a code (T22). Refuse a port that answers as an Agora hub (a TLS probe: the certificate chains to the link's hub CA or this
+  home's hub), or record the tunnel port as a source; and never rewrite `Host`/`Origin` to a loopback value. Say it in T71.
+
+- The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
+  them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
+- A bound on concurrent connections per forward for the relay step (a browser opens several); the spec names none, so a refusal code
+  for it would be a schema change.
+
 ## OS shutdown notices (**decision**)
 
 - A logind delay lock on Linux (`Inhibit("shutdown:sleep", …, "delay")` with `PrepareForShutdown`) and a macOS power-off notice, so the

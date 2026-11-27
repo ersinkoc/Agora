@@ -1139,6 +1139,13 @@ impl EventSink {
         self.record(Body::NodeTrustedDevices(said));
     }
 
+    /// ADR-0088: a preview forward opened or ended (the port and who opened it, never what went through it).
+    pub fn preview_changed(&self, forward: v1::PreviewForward) {
+        self.record(Body::PreviewChanged(v1::PreviewChanged {
+            forward: Some(forward),
+        }));
+    }
+
     /// Recorded on a clean shutdown. A crash records nothing; the hub notices the dropped connection instead.
     pub fn node_offline(&self, node: &str) {
         self.record(Body::NodeOffline(v1::NodeOffline {
@@ -1839,6 +1846,10 @@ pub struct Node {
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
     pub devices: Arc<crate::device_trust::DeviceTrust>,
     devices_watch: Option<JoinHandle<()>>,
+    /// ADR-0088: the preview forwards (the binary adds the places its own ports are written, [`crate::preview::Previews::add_sources`]).
+    pub previews: Arc<crate::preview::Previews>,
+    /// ADR-0088: ends each forward at its expiry and says so.
+    preview_watch: Option<JoinHandle<()>>,
     /// ADR-0089: writes the chat history of structured agents (`crate::transcript`).
     transcript_writer: Option<JoinHandle<()>>,
     node_id: String,
@@ -2217,6 +2228,14 @@ impl Node {
             .with_stopping(Arc::clone(&stop)),
         );
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
+        // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,
+        // `<home>/link/panel-port`, home being the data folder's parent).
+        let previews = Arc::new(crate::preview::Previews::new(
+            cfg.data_dir
+                .parent()
+                .map(crate::preview::default_sources)
+                .unwrap_or_default(),
+        ));
         let mut ctx = ControlContext::new(
             Arc::clone(&supervisor),
             projects,
@@ -2232,6 +2251,7 @@ impl Node {
         .with_spawner(Arc::clone(&spawner))
         .with_ledger(Arc::clone(&ledger))
         .with_show_secret(read_policy(&cfg.data_dir.join(POLICY_FILE)).show_secret)
+        .with_previews(Arc::clone(&previews))
         .with_stopping(Arc::clone(&stop));
         if let Some((token, file)) = control_token {
             ctx = ctx.with_control_token(token, file);
@@ -2760,6 +2780,29 @@ impl Node {
                     }
                 })?
         };
+        // ADR-0088: a forward ends at its expiry even when nobody asks about it; the window's indicator learns it from the event.
+        let preview_watch = {
+            let (ev, stop, previews) = (
+                Arc::clone(&events),
+                Arc::clone(&stop),
+                Arc::clone(&previews),
+            );
+            std::thread::Builder::new()
+                .name("agora-preview".into())
+                .spawn(move || {
+                    while !stop.load(Ordering::Acquire) {
+                        for f in previews.sweep(now_ms()) {
+                            ev.preview_changed(f);
+                        }
+                        for _ in 0..10 {
+                            if stop.load(Ordering::Acquire) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    }
+                })?
+        };
         // ADR-0089: the transcript writer. A node that cannot start it runs its agents all the same; their history is then not saved.
         let transcript_writer = {
             let (sup, ledger, stopping) = (
@@ -2848,6 +2891,8 @@ impl Node {
             chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),
+            previews,
+            preview_watch: Some(preview_watch),
             transcript_writer,
             node_id: cfg.node_id.clone(),
             manifest_problems,
@@ -3047,6 +3092,10 @@ impl Drop for Node {
             std::mem::forget(Arc::clone(&self.supervisor));
             return;
         }
+        // ADR-0088: forwards never outlive the node; said before the event log is written below.
+        for f in self.previews.stop_all() {
+            self.events.preview_changed(f);
+        }
         // ADR-0039: the lease renewals as they are now, before agents leave the mesh below (the holder keeps them running).
         self.mesh.freeze_lease_renewals();
         let began = Instant::now();
@@ -3155,6 +3204,7 @@ impl Node {
             self.resume_wait.take(),
             self.git_watch.take(),
             self.devices_watch.take(),
+            self.preview_watch.take(),
         ]
         .into_iter()
         .flatten()
