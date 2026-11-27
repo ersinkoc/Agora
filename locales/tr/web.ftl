@@ -1638,6 +1638,33 @@ machines-stat-needs = { $count ->
 machines-stat-memory = Agora'nın kullandığı bellek
 machine-memory = Bu makinede Agora
 machine-memory-share = Agora'nın tüm makinelerinizde kullandığı belleğin %{ $percent } kadarı
+# ADR-0136: a machine's CPU, memory and disks on its card.
+machine-figures-none = Bu makine henüz CPU, bellek ve disklerini bildirmiyor.
+machine-cpu = CPU
+machine-cpu-value = %{ $percent } · { $count ->
+    [one] 1 çekirdek
+   *[other] { $count } çekirdek
+}
+machine-cpu-label = CPU %{ $percent } meşgul
+machine-ram = Bellek
+machine-of = { $used } / { $total }
+machine-ram-label = Bellek %{ $percent } kullanımda
+machine-disk-workspaces = çalışma alanları { $size }
+machine-disk-free = { $total } içinde { $free } boş
+machine-disk-low = Az kaldı: { $total } içinde { $free } boş
+machine-disk-critical = Neredeyse dolu: { $total } içinde { $free } boş
+machine-disk-label = Disk { $mount } %{ $percent } dolu
+machine-figures-when = Ölçüldü: { $when }
+disk-alerts-title = { $count ->
+    [one] Bir disk dolmak üzere
+   *[other] { $count } disk dolmak üzere
+}
+disk-alerts-free = { $total } içinde { $free } boş
+disk-alerts-hint = Agora, hiçbir şey kaybolmayacaksa kendi oluşturduğu çalışma alanlarını siler ve disk neredeyse doluyken yenisini oluşturmaz. Gerisini siz boşaltın: eski derleme çıktıları, önbellekler, artık gerekmeyen dosyalar.
+machines-stat-disks = { $count ->
+    [one] dolmak üzere disk
+   *[other] dolmak üzere disk
+}
 machine-start-here = Burada bir ajan başlat
 machine-new-terminal = Yeni terminal
 machine-more = { $name } için diğer işlemler

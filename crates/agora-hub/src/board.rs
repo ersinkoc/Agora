@@ -2044,6 +2044,7 @@ mod tests {
                     last_event_ms: 0,
                     link_generation: 0,
                     forgotten: false,
+                    machine: Default::default(),
                 },
             );
             v.checkouts

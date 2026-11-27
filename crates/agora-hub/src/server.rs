@@ -812,6 +812,13 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 } else {
                     crate::scope::short_binary(&n.binary)
                 },
+                cpu_count: n.machine.cpu_count,
+                cpu_busy_permille: n.machine.cpu_busy_permille,
+                memory_total_bytes: n.machine.memory_total_bytes,
+                memory_available_bytes: n.machine.memory_available_bytes,
+                disks: n.machine.disks.clone(),
+                workspaces_bytes: n.machine.workspaces_bytes,
+                resources_at_ms: n.machine.at_ms,
             })
             .collect(),
         checkouts: view

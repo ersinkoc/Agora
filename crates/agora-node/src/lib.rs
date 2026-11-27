@@ -38,6 +38,7 @@ pub mod ledger;
 pub mod limits;
 pub mod link_renewal;
 pub mod link_state;
+pub mod machine;
 pub mod manifests;
 pub mod mesh_server;
 pub mod pairing_client;

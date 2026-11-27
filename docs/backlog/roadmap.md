@@ -195,7 +195,8 @@ checkpoint and retention decision.
 - [ ] **M3.7 Workspace clean-up and disk limits** (ADR-0064): the node cleans what it created, "Clean up workspaces", build output apart, disk watch, the cap
   - [x] the node records its worktrees and removes them after the grace period when nothing would be lost; `agora workspaces [clean]`;
     build output of left-behind worktrees; the cap and the free-disk minimum refuse a new worktree (ADR-0064 "Build status")
-  - [ ] free space and sizes in the node report, "Needs you" when low, the clean-up buttons in the windows (**schema**);
+  - [x] free space and sizes in the node report, "Needs you" when low (ADR-0136, with CPU and memory; Linux reader first)
+  - [ ] the clean-up buttons in the windows (**schema**);
     `[workspace] clean` in manifests
 - [ ] **M3.8 Direct client ↔ node terminal path** (ADR-0023): measured against the relay first; built only if the budget needs it
 - [ ] **M3.9 Any machine can be the hub** (ADR-0086, staged)

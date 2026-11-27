@@ -1219,6 +1219,219 @@ pub(crate) fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) ->
     }
 }
 
+/// See [`crate::machine_stats`]: `/proc/stat`'s first line and its `cpuN` lines, `/proc/meminfo`'s `MemTotal` and `MemAvailable`.
+pub(crate) fn machine_stats() -> io::Result<crate::MachineStats> {
+    let stat = std::fs::read_to_string("/proc/stat")?;
+    let mem = std::fs::read_to_string("/proc/meminfo")?;
+    let bad = || io::Error::from(io::ErrorKind::InvalidData);
+    let (cpu_count, cpu_busy_ticks, cpu_total_ticks) = parse_cpu(&stat).ok_or_else(bad)?;
+    let (memory_total_bytes, memory_available_bytes) = parse_meminfo(&mem).ok_or_else(bad)?;
+    Ok(crate::MachineStats {
+        cpu_count,
+        cpu_busy_ticks,
+        cpu_total_ticks,
+        memory_total_bytes,
+        memory_available_bytes,
+    })
+}
+
+/// `(logical CPUs, busy ticks, all ticks)` from `/proc/stat`: the `cpu` line's first eight counters (user nice system idle iowait irq
+/// softirq steal; guest time is already in user), idle and iowait being the idle part.
+fn parse_cpu(text: &str) -> Option<(u32, u64, u64)> {
+    let mut lines = text.lines();
+    let first = lines.next()?;
+    let mut f = first.split_whitespace();
+    if f.next()? != "cpu" {
+        return None;
+    }
+    let v: Vec<u64> = f.take(8).map(|x| x.parse().unwrap_or(0)).collect();
+    if v.len() < 5 {
+        return None;
+    }
+    let total: u64 = v.iter().sum();
+    let idle = v[3].saturating_add(v[4]);
+    let count = text
+        .lines()
+        .filter(|l| {
+            l.strip_prefix("cpu")
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .count();
+    Some((
+        u32::try_from(count).unwrap_or(u32::MAX).max(1),
+        total.saturating_sub(idle),
+        total,
+    ))
+}
+
+/// `(total, available)` bytes from `/proc/meminfo` (its figures are in kB).
+fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
+    let field = |name: &str| {
+        text.lines().find_map(|l| {
+            let rest = l.strip_prefix(name)?.strip_prefix(':')?;
+            rest.split_whitespace().next()?.parse::<u64>().ok()
+        })
+    };
+    let total = field("MemTotal")?;
+    let available = field("MemAvailable").unwrap_or(0);
+    Some((total.saturating_mul(1024), available.saturating_mul(1024)))
+}
+
+/// File system types that hold data on a local device.
+const DATA_FILE_SYSTEMS: &[&str] = &[
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "jfs", "reiserfs", "bcachefs", "nilfs2",
+    "ntfs", "ntfs3", "fuseblk", "vfat", "exfat", "hfsplus",
+];
+
+/// The mounts of `/proc/self/mountinfo` that hold data, as `(mount point, source)`, octal escapes (`\040` for a space) decoded.
+fn parse_mountinfo(text: &str) -> Vec<(String, String)> {
+    let unescape = |s: &str| {
+        let b = s.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\'
+                && i + 3 < b.len()
+                && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+            {
+                out.push((b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0'));
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    text.lines()
+        .filter_map(|l| {
+            let (left, right) = l.split_once(" - ")?;
+            let mount = left.split_whitespace().nth(4)?;
+            let mut r = right.split_whitespace();
+            let fstype = r.next()?;
+            let source = r.next().unwrap_or("");
+            DATA_FILE_SYSTEMS
+                .contains(&fstype)
+                .then(|| (unescape(mount), unescape(source)))
+        })
+        .collect()
+}
+
+/// The data mounts, one per source device (the shortest mount point stands for it), each with the `marks` that lie under one of
+/// that device's mount points (the longest matching mount point decides), ordered as [`crate::disks`] says.
+fn group_mounts(
+    mounts: &[(String, String)],
+    marks: &[std::path::PathBuf],
+) -> Vec<(String, Vec<usize>)> {
+    use std::path::Path;
+    let mut groups: Vec<(String, String, Vec<usize>)> = Vec::new(); // (source, shortest mount, marks)
+    for (mount, source) in mounts {
+        match groups.iter_mut().find(|g| &g.0 == source) {
+            Some(g) if mount.len() < g.1.len() => g.1 = mount.clone(),
+            Some(_) => {}
+            None => groups.push((source.clone(), mount.clone(), Vec::new())),
+        }
+    }
+    for (k, mark) in marks.iter().enumerate() {
+        let best = mounts
+            .iter()
+            .filter(|(m, _)| mark.starts_with(Path::new(m)))
+            .max_by_key(|(m, _)| Path::new(m).components().count());
+        if let Some((_, source)) = best {
+            if let Some(g) = groups.iter_mut().find(|g| &g.0 == source) {
+                g.2.push(k);
+            }
+        }
+    }
+    groups.sort_by(|a, b| {
+        let rank = |g: &(String, String, Vec<usize>)| (g.1 != "/", g.2.is_empty());
+        rank(a).cmp(&rank(b)).then_with(|| a.1.cmp(&b.1))
+    });
+    groups.into_iter().take(8).map(|(_, m, h)| (m, h)).collect()
+}
+
+/// See [`crate::disks`].
+pub(crate) fn disks(marks: &[&std::path::Path]) -> io::Result<Vec<crate::DiskSpace>> {
+    let text = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let marks: Vec<std::path::PathBuf> = marks
+        .iter()
+        .map(|m| std::fs::canonicalize(m).unwrap_or_else(|_| m.to_path_buf()))
+        .collect();
+    Ok(group_mounts(&parse_mountinfo(&text), &marks)
+        .into_iter()
+        .filter_map(|(mount, holds)| {
+            let (total_bytes, free_bytes) =
+                crate::unix::disk_space(std::path::Path::new(&mount)).ok()?;
+            (total_bytes > 0).then_some(crate::DiskSpace {
+                mount,
+                total_bytes,
+                free_bytes,
+                holds,
+            })
+        })
+        .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod machine_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_and_memory_are_read_from_proc() {
+        let stat = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25 0 0 0 0 0\ncpu1 50 0 25 400 25 0 0 0 0 0\nintr 1 2\n";
+        assert_eq!(parse_cpu(stat), Some((2, 150, 1000)));
+        assert_eq!(parse_cpu("intr 1\n"), None);
+        let mem = "MemTotal:       32000000 kB\nMemFree:  100 kB\nMemAvailable:   20000000 kB\n";
+        assert_eq!(
+            parse_meminfo(mem),
+            Some((32_000_000 * 1024, 20_000_000 * 1024))
+        );
+        assert_eq!(parse_meminfo("MemFree: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn only_data_file_systems_count_once_per_device_with_their_marks() {
+        let info = "\
+29 1 259:6 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p6 rw
+30 29 0:5 / /proc rw - proc proc rw
+31 29 259:1 / /boot/efi rw - vfat /dev/nvme0n1p1 rw
+32 29 0:30 / /run rw - tmpfs tmpfs rw
+33 29 259:7 /@home /home rw - btrfs /dev/sdb1 rw
+34 29 259:7 /@data /mnt/my\\040disk rw - btrfs /dev/sdb1 rw
+35 29 0:40 / /snap/x ro - squashfs /dev/loop0 ro
+";
+        let mounts = parse_mountinfo(info);
+        assert_eq!(
+            mounts.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+            ["/", "/boot/efi", "/home", "/mnt/my disk"]
+        );
+        let marks = [
+            std::path::PathBuf::from("/home/me/.agora"),
+            std::path::PathBuf::from("/srv/work"),
+        ];
+        assert_eq!(
+            group_mounts(&mounts, &marks),
+            [
+                ("/".to_string(), vec![1]),
+                ("/home".to_string(), vec![0]),
+                ("/boot/efi".to_string(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn this_machine_reports_its_figures() {
+        let m = machine_stats().unwrap();
+        assert!(
+            m.cpu_count >= 1 && m.cpu_total_ticks >= m.cpu_busy_ticks && m.memory_total_bytes > 0
+        );
+        let here = std::env::temp_dir();
+        let d = disks(&[here.as_path()]).unwrap();
+        assert!(!d.is_empty() && d.iter().all(|x| x.total_bytes >= x.free_bytes));
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod service_tests {

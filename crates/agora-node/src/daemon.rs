@@ -1258,11 +1258,35 @@ impl EventSink {
         terminals_open: u32,
         memory_used_bytes: u64,
     ) {
+        self.node_resources_with(
+            node,
+            agents_running,
+            terminals_open,
+            memory_used_bytes,
+            &crate::machine::Figures::default(),
+        );
+    }
+
+    /// ADR-0136: the report with the machine's figures (zero where not read).
+    pub fn node_resources_with(
+        &self,
+        node: &str,
+        agents_running: u32,
+        terminals_open: u32,
+        memory_used_bytes: u64,
+        machine: &crate::machine::Figures,
+    ) {
         self.record(Body::NodeResources(v1::NodeResources {
             node_id: node.to_string(),
             agents_running,
             terminals_open,
             memory_used_bytes,
+            cpu_count: machine.cpu_count,
+            cpu_busy_permille: machine.cpu_busy_permille,
+            memory_total_bytes: machine.memory_total_bytes,
+            memory_available_bytes: machine.memory_available_bytes,
+            disks: machine.disks.clone(),
+            workspaces_bytes: machine.workspaces_bytes,
         }));
     }
 
@@ -2578,12 +2602,17 @@ impl Node {
             );
             let shared_tick = Arc::clone(&shared);
             let ledger_tick = Arc::clone(&ledger);
+            // ADR-0136: what the machine's figures need: the node's data folder and worktree folder (to mark their disks), and the
+            // workspaces' size.
+            let workspaces_tick = Arc::clone(&workspaces);
+            let data_dir_tick = cfg.data_dir.clone();
             std::thread::Builder::new()
                 .name("agora-supervise".into())
                 .spawn(move || {
                     let mut reported = (u32::MAX, u32::MAX);
                     let mut reported_memory = 0u64;
                     let mut memory_checked = Instant::now();
+                    let mut machine = crate::machine::MachineGate::default();
                     let mut usage = crate::usage_files::UsageWatcher::default();
                     // ADR-0091: the plan windows a tool reports in the same files, sent when they change.
                     let mut quota = crate::usage_quota::QuotaGate::new(node_id.as_str());
@@ -3012,9 +3041,28 @@ impl Node {
                         // Resources are reported when they change, not on a timer, so an idle node is silent: when the number of
                         // running agents changes, and when their memory moved a lot since the last report (checked every
                         // `MEMORY_CHECK`, only while agents run).
+                        // ADR-0136: the machine's CPU, memory and disks, read every 30 s; said when they moved past a step (at most once
+                        // a minute), and with every other report.
+                        let now_i = Instant::now();
+                        let mut machine_due = false;
+                        if machine.due(now_i) {
+                            let root = workspaces_tick.worktree_root();
+                            let marks: [&Path; 2] = [data_dir_tick.as_path(), root];
+                            let disks = agora_platform::disks(&marks).unwrap_or_default();
+                            machine.read(
+                                now_i,
+                                agora_platform::machine_stats().ok(),
+                                &disks,
+                                0,
+                                1,
+                                workspaces_tick.used_bytes(),
+                            );
+                            machine_due = machine.should_say(now_i);
+                        }
                         let running = u32::try_from(views.iter().filter(|v| v.running).count())
                             .unwrap_or(u32::MAX);
                         let count_changed = (running, running) != reported;
+                        let mut say = machine_due;
                         if count_changed
                             || (running > 0 && memory_checked.elapsed() >= MEMORY_CHECK)
                         {
@@ -3024,8 +3072,20 @@ impl Node {
                             if count_changed || memory_moved(reported_memory, memory) {
                                 reported = (running, running);
                                 reported_memory = memory;
-                                ev.node_resources(&node_id, running, running, memory);
+                                say = true;
                             }
+                        }
+                        if say {
+                            if !machine_due {
+                                machine.said_with_other(now_i);
+                            }
+                            ev.node_resources_with(
+                                &node_id,
+                                running,
+                                running,
+                                reported_memory,
+                                &machine.latest,
+                            );
                         }
                         ev.flush_usage();
                         std::thread::sleep(TICK);

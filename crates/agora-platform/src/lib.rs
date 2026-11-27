@@ -316,6 +316,58 @@ pub fn rename_no_replace(from: &std::path::Path, to: &std::path::Path) -> io::Re
     }
 }
 
+/// ADR-0136: the whole machine's CPU time counters (since boot; two readings give the busy share between them) and memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MachineStats {
+    /// Logical CPUs.
+    pub cpu_count: u32,
+    /// CPU time spent busy and in all, in the system's ticks, summed over every CPU.
+    pub cpu_busy_ticks: u64,
+    pub cpu_total_ticks: u64,
+    pub memory_total_bytes: u64,
+    /// What the system can give without swapping.
+    pub memory_available_bytes: u64,
+}
+
+/// ADR-0136: the machine's CPU counters and memory. `Unsupported` where this platform has no reader yet (macOS and Windows for now).
+pub fn machine_stats() -> io::Result<MachineStats> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::machine_stats()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(unsupported())
+    }
+}
+
+/// ADR-0136: one local file system that holds data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskSpace {
+    /// Where it is mounted (or the drive), as the system names it.
+    pub mount: String,
+    pub total_bytes: u64,
+    /// What this user may still use.
+    pub free_bytes: u64,
+    /// The indexes of the `marks` given to [`disks`] that lie on it.
+    pub holds: Vec<usize>,
+}
+
+/// ADR-0136: the machine's local file systems that hold data (no pseudo, memory or network file systems), one per device, at most 8:
+/// the root first, then those holding one of `marks`, then the rest by mount point. Each says which `marks` lie on it.
+/// `Unsupported` where this platform has no reader yet.
+pub fn disks(marks: &[&std::path::Path]) -> io::Result<Vec<DiskSpace>> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::disks(marks)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = marks;
+        Err(unsupported())
+    }
+}
+
 /// The bytes free for this user on the file system that holds `path` (ADR-0064: the node refuses to make a worktree when too little is
 /// left). Unix `statvfs` (`f_bavail`, the blocks an unprivileged user may still use, times `f_frsize`), Windows `GetDiskFreeSpaceExW`
 /// (the caller's quota included). `path` must exist.

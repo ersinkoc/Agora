@@ -1690,6 +1690,33 @@ machines-stat-needs = { $count ->
 machines-stat-memory = memory used by Agora
 machine-memory = Agora on this machine
 machine-memory-share = { $percent } % of the memory Agora uses on all your machines
+# ADR-0136: a machine's CPU, memory and disks on its card.
+machine-figures-none = This machine does not report its CPU, memory and disks yet.
+machine-cpu = CPU
+machine-cpu-value = { $percent } % · { $count ->
+    [one] 1 core
+   *[other] { $count } cores
+}
+machine-cpu-label = CPU { $percent } % busy
+machine-ram = Memory
+machine-of = { $used } of { $total }
+machine-ram-label = Memory { $percent } % used
+machine-disk-workspaces = workspaces { $size }
+machine-disk-free = { $free } free of { $total }
+machine-disk-low = Low: { $free } free of { $total }
+machine-disk-critical = Almost full: { $free } free of { $total }
+machine-disk-label = Disk { $mount } { $percent } % full
+machine-figures-when = Measured { $when }
+disk-alerts-title = { $count ->
+    [one] A disk is running low
+   *[other] { $count } disks are running low
+}
+disk-alerts-free = { $free } free of { $total }
+disk-alerts-hint = Agora removes the workspaces it made once nothing would be lost, and makes no new ones when a disk is almost full. Free the rest yourself: old build output, caches, files you no longer need.
+machines-stat-disks = { $count ->
+    [one] disk running low
+   *[other] disks running low
+}
 machine-start-here = Start an agent here
 machine-new-terminal = New terminal
 machine-more = More for { $name }

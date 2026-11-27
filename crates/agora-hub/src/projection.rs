@@ -41,7 +41,24 @@ pub struct NodeView {
     /// ADR-0073: the owner had the hub forget this machine while it was offline. Clients are not shown it, or anything it ran, until
     /// it connects again. Its records are kept (a machine that comes back has its folders again; usage still counts).
     pub forgotten: bool,
+    /// ADR-0136: the machine's latest CPU, memory and disks, and when they were recorded; kept until a report carries new ones.
+    pub machine: MachineView,
 }
+
+/// ADR-0136: a machine's figures as its latest `NodeResources` that carried them said (zero: not reported).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineView {
+    pub cpu_count: u32,
+    pub cpu_busy_permille: u32,
+    pub memory_total_bytes: u64,
+    pub memory_available_bytes: u64,
+    pub disks: Vec<agora_protocol::v1::DiskUsage>,
+    pub workspaces_bytes: u64,
+    pub at_ms: u64,
+}
+
+/// The most disks kept per machine (the node sends at most 8).
+const MAX_DISKS: usize = 8;
 
 impl NodeView {
     fn unknown(online: bool) -> Self {
@@ -57,6 +74,7 @@ impl NodeView {
             last_event_ms: 0,
             link_generation: 0,
             forgotten: false,
+            machine: MachineView::default(),
         }
     }
 }
@@ -977,6 +995,18 @@ impl View {
                     n.agents_running = e.agents_running;
                     n.terminals_open = e.terminals_open;
                     n.memory_used_bytes = e.memory_used_bytes;
+                    // ADR-0136: an older node (or a report without them) leaves the machine's last figures as they were.
+                    if e.cpu_count > 0 || e.memory_total_bytes > 0 || !e.disks.is_empty() {
+                        n.machine = MachineView {
+                            cpu_count: e.cpu_count,
+                            cpu_busy_permille: e.cpu_busy_permille.min(1000),
+                            memory_total_bytes: e.memory_total_bytes,
+                            memory_available_bytes: e.memory_available_bytes.min(e.memory_total_bytes),
+                            disks: e.disks.iter().take(MAX_DISKS).cloned().collect(),
+                            workspaces_bytes: e.workspaces_bytes,
+                            at_ms: ev.at_ms,
+                        };
+                    }
                 }
             }
             Body::CheckoutDiscovered(e) => {
@@ -1574,6 +1604,7 @@ mod tests {
             "n2".into(),
             NodeView {
                 forgotten: true,
+                machine: Default::default(),
                 ..NodeView::unknown(false)
             },
         );
@@ -1647,6 +1678,70 @@ mod tests {
         assert!(!v
             .quota
             .contains_key(&("n3".into(), "codex".into(), "seven_day".into())));
+    }
+
+    /// ADR-0136: a machine's CPU, memory and disks are kept from its latest report that carried them, with when; a report without them
+    /// (an older node, or one made only because the running agents changed) leaves them as they were.
+    #[test]
+    fn a_machines_figures_are_kept_until_a_report_carries_new_ones() {
+        use agora_protocol::v1;
+        let mut v = View::default();
+        v.apply(&ev(
+            "n1",
+            1,
+            Body::NodeOnline(v1::NodeOnline {
+                node_id: "n1".into(),
+                ..Default::default()
+            }),
+        ));
+        let disk = v1::DiskUsage {
+            mount: "/".into(),
+            total_bytes: 100,
+            free_bytes: 7,
+            holds_data: true,
+            holds_workspaces: true,
+        };
+        v.apply(&ev(
+            "n1",
+            2,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                cpu_count: 8,
+                cpu_busy_permille: 5000,
+                memory_total_bytes: 10,
+                memory_available_bytes: 99,
+                disks: vec![disk.clone(); 12],
+                ..Default::default()
+            }),
+        ));
+        let m = v.nodes["n1"].machine.clone();
+        assert_eq!(
+            (
+                m.cpu_count,
+                m.cpu_busy_permille,
+                m.memory_available_bytes,
+                m.disks.len()
+            ),
+            (8, 1000, 10, 8)
+        );
+        assert!(m.at_ms > 0);
+        v.apply(&ev(
+            "n1",
+            3,
+            Body::NodeResources(NodeResources {
+                node_id: "n1".into(),
+                agents_running: 2,
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(v.nodes["n1"].machine, m, "kept");
+        assert_eq!(v.nodes["n1"].agents_running, 2);
+        let snap = crate::server::snapshot_of(&v, 0);
+        let n = snap.nodes.iter().find(|n| n.node_id == "n1").unwrap();
+        assert_eq!(
+            (n.cpu_count, n.disks.len(), n.resources_at_ms),
+            (8, 8, m.at_ms)
+        );
     }
 
     /// ADR-0122 decision 7: the snapshot says which shared items each agent was started with (at most [`MAX_SHARED_ITEMS`]); its next
@@ -1816,6 +1911,7 @@ mod tests {
                 agents_running: 9,
                 terminals_open: 9,
                 memory_used_bytes: 9,
+                ..Default::default()
             }),
         ));
         assert_eq!(v.nodes["n1"].agents_running, 0, "n1's numbers are n1's own");
@@ -2225,6 +2321,7 @@ mod tests {
                 agents_running: 2,
                 terminals_open: 3,
                 memory_used_bytes: 9,
+                ..Default::default()
             }),
         ));
         assert!(v.nodes["n1"].online);

@@ -145,7 +145,33 @@ message NodeResources {
   string node_id = 1;
   uint32 agents_running = 2;
   uint32 terminals_open = 3;
+  // The node process's own memory.
   uint64 memory_used_bytes = 4;
+  // ADR-0136: the machine's own figures. Zero (or no disks) means "not reported", never "zero".
+  // Logical CPUs.
+  uint32 cpu_count = 5;
+  // The share of all CPUs' time the machine was busy since the previous reading, 0..1000.
+  uint32 cpu_busy_permille = 6;
+  uint64 memory_total_bytes = 7;
+  // What the OS can give without swapping.
+  uint64 memory_available_bytes = 8;
+  // Local file systems that hold data (no pseudo file systems), at most 8.
+  repeated DiskUsage disks = 9;
+  // The size of the workspaces the node made (ADR-0064).
+  uint64 workspaces_bytes = 10;
+}
+
+// ADR-0136: one file system of a machine.
+message DiskUsage {
+  // Where it is mounted, or the drive, as the OS names it.
+  string mount = 1;
+  uint64 total_bytes = 2;
+  // What this user may still use.
+  uint64 free_bytes = 3;
+  // It holds the node's own data folder.
+  bool holds_data = 4;
+  // It holds the node's workspaces.
+  bool holds_workspaces = 5;
 }
 
 // ADR-0061. Said when the node starts and whenever the set changes (the owner trusted or removed a device on the machine, an endorsement

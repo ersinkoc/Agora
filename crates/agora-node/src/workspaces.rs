@@ -604,6 +604,19 @@ impl Workspaces {
         v
     }
 
+    /// ADR-0136: what the node's worktrees hold together, as last measured.
+    pub fn used_bytes(&self) -> u64 {
+        self.records()
+            .iter()
+            .map(|r| r.size_bytes)
+            .fold(0, u64::saturating_add)
+    }
+
+    /// The folder new worktrees are made under, as configured.
+    pub fn worktree_root(&self) -> &Path {
+        &self.root
+    }
+
     /// Every workspace recorded (and not claimed by a clean-up right now).
     pub fn records(&self) -> Vec<Record> {
         self.files(RECORD_EXT)

@@ -3,7 +3,7 @@ import { t } from '../i18n';
 import { Menu } from '../layout/Menu';
 import { endedWithError, machineKey, type AgentTileModel } from '../model';
 import { visible } from '../net/hidden';
-import { bytesLabel, isOld, type MachineModel } from '../net/view';
+import { bytesLabel, diskAlerts, isOld, type MachineModel } from '../net/view';
 import { ForgetMachines } from './ForgetMachines';
 import { HelperGrants, type HelperGrant } from './HelperGrants';
 import { Icon } from './Icon';
@@ -12,6 +12,7 @@ import { NoAskBadge } from './NoAskBadge';
 import { PairWindowControl, type PairingUi } from './Pairing';
 import { PairRequest } from './PairRequest';
 import { MachineFacts, MachineName, OsTile } from './machineFacts';
+import { MachineGauges } from './MachineGauges';
 import { isolated } from './pairChoice';
 
 // My machines (redesign PR 9): every machine your Agora knows, as a card. What is connected now, what runs there, when it was last
@@ -50,6 +51,7 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
   const running = live.filter((a) => online.has(machineKey(a))).length;
   const totalMem = machines.reduce((n, m) => n + (m.memoryBytes ?? 0), 0);
   const needs = live.filter((a) => a.state === 'needs-you').length;
+  const lowDisks = diskAlerts(machines).length;
   // Showing the steps never opens the switch for new machines: only its own button does (main-window.md).
   const add = () => { setAdding(true); requestAnimationFrame(() => { addPanel.current?.scrollIntoView?.({ block: 'nearest' }); addPanel.current?.focus({ preventScroll: true }); }); };
 
@@ -79,6 +81,7 @@ export function NetworkView({ machines: all, agents, hubName, onForget, focus, n
         <Stat value={running} label={t('machines-stat-agents', { count: running })} />
         <Stat value={needs} label={t('machines-stat-needs', { count: needs })} needs={needs > 0} />
         {totalMem > 0 && <Stat value={bytesLabel(totalMem)} label={t('machines-stat-memory')} />}
+        {lowDisks > 0 && <Stat value={lowDisks} label={t('machines-stat-disks', { count: lowDisks })} needs />}
       </dl>
     </section>
 
@@ -145,6 +148,7 @@ function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewT
       </ul>}
       {/* ADR-0119: what other machines' agents may start here without asking, where that authority lives, with Revoke. */}
       {held && <div data-held-grants><HelperGrants view={m.id} list={held.list} revoke={held.revoke} refresh={m.agentsRunning} /></div>}
+      <MachineGauges figures={m.machine} online now={now} />
       {!!m.memoryBytes && <div className="machine-meter">
         <div className="machine-meter__row"><span>{t('machine-memory')}</span><span>{bytesLabel(m.memoryBytes)}{m.terminalsOpen ? ` · ${t('network-terminals', { count: m.terminalsOpen })}` : ''}</span></div>
         <div className="machine-meter__bar" role="img" aria-label={t('machine-memory-share', { percent })}><span style={{ '--share': `${percent}%` } as CSSProperties} /></div>
@@ -161,6 +165,7 @@ function MachineCard({ m, now, focused, agents, share, onForget, onStart, onNewT
         ]}><Icon name="more" /></Menu>
       </div>
     </> : <>
+      {m.machine && <MachineGauges figures={m.machine} online={false} now={now} />}
       {/* Offline is not finished: what ran there keeps running (nodes are autonomous) and reports back when the machine connects. */}
       {m.agentsRunning > 0 && <Callout tone="info" icon="clock" title={t('machine-away-agents', { count: m.agentsRunning })}>
         <span className="text-xs">{t('machine-away-explain', { name: isolated(m.name) })}</span>

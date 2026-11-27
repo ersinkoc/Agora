@@ -15,7 +15,7 @@ const AMBER =
 
 const ALLOWED: Record<string, { uses: number; why: string }> = {
   'design/tokens.css': { uses: 3, why: 'the token itself, Dark and Light' },
-  'design/app.css': { uses: 31, why: 'the utility and its Tailwind colour, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the map\'s ring of an agent that needs you (ADR-0129), the terminal bell, the muted syntax colours mixed from the theme (content, like the diff), and the theme floor that keeps "needs you" out of a theme\'s state display, regions and fonts (ADR-0113)' },
+  'design/app.css': { uses: 32, why: 'the utility and its Tailwind colour, its tint and hairline, the kit tone, the state mark, the needs-you tile, the rail alert badge, the avatar dot, the map\'s ring of an agent that needs you (ADR-0129), a disk running low (ADR-0136), the terminal bell, the muted syntax colours mixed from the theme (content, like the diff), and the theme floor that keeps "needs you" out of a theme\'s state display, regions and fonts (ADR-0113)' },
   'components/kit/KitGallery.tsx': { uses: 4, why: 'the gallery shows the Needs you stat tile and request callout' },
   'components/FleetConsole.tsx': { uses: 2, why: 'the Needs you stat tile and the Needs you count (its request cards are ApprovalRequest)' },
   'components/AttentionLayer.tsx': { uses: 1, why: 'the attention toast (the dialog is ApprovalRequest)' },
@@ -33,6 +33,7 @@ const ALLOWED: Record<string, { uses: number; why: string }> = {
   'phone/phone.css': { uses: 6, why: 'the needs tint and hairline of an agent that waits, the hairline of the start and switch frames, and a request folded to one line on an agent (its tint, hairline and icon)' },
   'screens.tsx': { uses: 1, why: 'Settings: another device of yours waiting for your approval (redesign PR 8)' },
   'components/NetworkView.tsx': { uses: 1, why: 'My machines: the Needs you count in the hub strip, when an agent waits (redesign PR 9)' },
+  'components/MachineGauges.tsx': { uses: 3, why: 'a disk running low needs you (ADR-0136): its words on the machine card, its line and the callout tone in Home\'s Needs you' },
   'components/PairRequest.tsx': { uses: 1, why: 'a request to join that waits on the owner: the needs tone of its card (redesign PR 9)' },
   'components/Quota.tsx': { uses: 11, why: 'the quota warning sign (triangle and percentage)' },
   'components/UsagePanel.tsx': { uses: 1, why: 'a usage meter at 80 % or more: the quota warning sign family (the audit lists it under quota)' },

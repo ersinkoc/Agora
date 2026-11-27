@@ -818,6 +818,11 @@
   .machine-meter__row > span:last-child { @apply whitespace-nowrap; }
   .machine-meter__bar { @apply h-1.5 overflow-hidden rounded-full bg-surface-2; }
   .machine-meter__bar > span { @apply block h-full rounded-full bg-accent; width: var(--share); }
+  /* ADR-0136: a machine's CPU, memory and disks; a low disk in the needs-you colour, a critical one in the danger colour. */
+  .machine-gauges { @apply grid grid-cols-1 gap-2.5; }
+  .machine-gauges__none, .machine-gauges__when { @apply m-0 text-muted; font-size: var(--text-caption); }
+  .machine-meter__bar--low > span { @apply bg-needs-you; }
+  .machine-meter__bar--critical > span { background: var(--danger); }
   .machines-old { @apply gap-3; }
   /* The forget dialog: the machine as a bordered row, and the choice to refuse it as a bordered row with a box. */
   .forget-row { @apply flex min-w-0 items-center gap-3 rounded-s border border-line px-3 py-2.5; }

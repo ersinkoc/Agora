@@ -24,7 +24,28 @@ export function num(x: Num): number {
 // `linkGen`: the generation of the latest `NodeLink { up }` this window saw (ADR-0070); unknown (0) for a node it only knows from the
 // snapshot.
 // `forgotten`: the owner had the hub forget it (ADR-0073); it and what it runs are not shown until it connects again.
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean; binary?: string }
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean; binary?: string; machine?: MachineFigures }
+// ADR-0136: a machine's CPU, memory and disks as its node last reported them, and when. `cpuBusy` is 0..1000 of all CPUs.
+export interface DiskFigures { mount: string; total: number; free: number; data: boolean; workspaces: boolean }
+export interface MachineFigures { cpuCount: number; cpuBusy: number; memTotal: number; memAvailable: number; disks: DiskFigures[]; workspaces: number; atMs: number }
+type FiguresWire = { cpuCount?: number | null; cpuBusyPermille?: number | null; memoryTotalBytes?: unknown; memoryAvailableBytes?: unknown; workspacesBytes?: unknown;
+  disks?: { mount?: string | null; totalBytes?: unknown; freeBytes?: unknown; holdsData?: boolean | null; holdsWorkspaces?: boolean | null }[] | null };
+/** The machine figures a `NodeResources` or `NodeSnapshot` carries, or `undefined` when it carries none (an older node). */
+export function machineFiguresOf(w: FiguresWire, atMs: number): MachineFigures | undefined {
+  const n = (x: unknown) => Math.max(0, Number(x ?? 0) || 0);
+  const memTotal = n(w.memoryTotalBytes);
+  const disks = (w.disks ?? []).slice(0, 8).map((d) => ({ mount: d.mount ?? '', total: n(d.totalBytes), free: Math.min(n(d.freeBytes), n(d.totalBytes)), data: !!d.holdsData, workspaces: !!d.holdsWorkspaces }))
+    .filter((d) => d.total > 0);
+  if (!n(w.cpuCount) && !memTotal && disks.length === 0) return undefined;
+  return { cpuCount: n(w.cpuCount), cpuBusy: Math.min(1000, n(w.cpuBusyPermille)), memTotal, memAvailable: Math.min(n(w.memoryAvailableBytes), memTotal), disks, workspaces: n(w.workspacesBytes), atMs };
+}
+const GB = 1024 ** 3;
+/** ADR-0136: a disk is low under 10 % of its size or 5 GB free, critical under 3 GB. */
+export function diskLevel(d: Pick<DiskFigures, 'total' | 'free'>): 'ok' | 'low' | 'critical' {
+  if (d.free < 3 * GB) return 'critical';
+  if (d.free < 5 * GB || d.free < d.total * 0.1) return 'low';
+  return 'ok';
+}
 export interface WorkspaceV { nodeId: string; projectId: string; path: string; gitRoot: string; branch: string; managed: boolean; filesChanged: number }
 export interface WorktreeV { checkoutId: string; path: string; branch: string; filesChanged: number }
 export interface AgentV {
@@ -225,6 +246,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       memoryBytes: Number(n.memoryUsedBytes ?? 0), build: n.build ?? '', terminalsOpen: n.terminalsOpen ?? 0,
       // ADR-0069: the node's program, only when its folder is not on that machine's PATH.
       binary: n.binary ?? '',
+      machine: machineFiguresOf(n, num(n.resourcesAtMs)),
     });
   }
   for (const n of s.nodes ?? []) if (n.trustedDeviceIds?.length) (v.trusted ??= new Map()).set(n.nodeId ?? '', [...n.trustedDeviceIds]);
@@ -359,7 +381,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       const was = v.nodes.get(b.nodeId);
       // The start says which program it is (`build`) and, ADR-0069, where it runs from when that folder is not on the PATH. The last
       // resources it reported stay until it reports new ones, as on the hub.
-      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, memoryBytes: was?.memoryBytes ?? 0, terminalsOpen: was?.terminalsOpen ?? 0, linkGen: was?.linkGen, build: b.build ?? '', binary: b.binary ?? '' });
+      v.nodes.set(b.nodeId, { hostname: b.hostname ?? '', os: b.os ?? '', online: true, lastEventMs: Math.max(at, was?.lastEventMs ?? 0), agentsRunning: was?.agentsRunning ?? 0, memoryBytes: was?.memoryBytes ?? 0, terminalsOpen: was?.terminalsOpen ?? 0, linkGen: was?.linkGen, build: b.build ?? '', binary: b.binary ?? '', machine: was?.machine });
       break;
     }
     // ADR-0070: the hub's record of a node's connection decides whether the machine is online; it never touches what the machine runs
@@ -422,7 +444,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     }
     case 'nodeResources': {
       const n = v.nodes.get(e.nodeResources.nodeId);
-      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); n.terminalsOpen = e.nodeResources.terminalsOpen ?? n.terminalsOpen; }
+      if (n) { n.agentsRunning = e.nodeResources.agentsRunning ?? 0; n.memoryBytes = Number(e.nodeResources.memoryUsedBytes ?? 0); n.terminalsOpen = e.nodeResources.terminalsOpen ?? n.terminalsOpen; n.machine = machineFiguresOf(e.nodeResources, at) ?? n.machine; }
       break;
     }
     case 'worktreeCreated': {
@@ -901,16 +923,30 @@ export function quotaObs(v: View): QuotaObs[] {
   return [...(v.quota?.values() ?? [])].flatMap((m) => [...m.values()]).map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
 }
 
-export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string }
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string; machine?: MachineFigures }
 
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary) }))
+    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary), ...(n.machine ? { machine: { ...n.machine, disks: n.machine.disks.map((d) => ({ ...d, mount: visible(d.mount) })) } } : {}) }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 
 export interface ProjectChoice { node: string; projectId: string; label: string; path?: string }
+
+/** ADR-0136: a disk of an online machine that runs low, most urgent first (critical, then the least free). */
+export interface DiskAlert { machine: string; machineName: string; mount: string; free: number; total: number; level: 'low' | 'critical' }
+export function diskAlerts(list: readonly MachineModel[]): DiskAlert[] {
+  const out: DiskAlert[] = [];
+  for (const m of list) {
+    if (!m.online || !m.machine) continue;
+    for (const d of m.machine.disks) {
+      const level = diskLevel(d);
+      if (level !== 'ok') out.push({ machine: m.id, machineName: m.name, mount: d.mount, free: d.free, total: d.total, level });
+    }
+  }
+  return out.sort((a, b) => Number(b.level === 'critical') - Number(a.level === 'critical') || a.free - b.free);
+}
 
 // Where an agent can be started: every project checked out on a machine that is online.
 export function projectChoices(v: View): ProjectChoice[] {

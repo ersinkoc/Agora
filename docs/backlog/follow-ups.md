@@ -8,6 +8,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **Machine figures, the rest** (ADR-0136): the macOS reader (`macos.rs`: `host_statistics64`, `hw.memsize`, `getmntinfo`; the mac
+  session), the phone's view of a machine's figures and of disks running low, and ADR-0064's clean-up buttons in the window.
 - **Shared MCP servers at a URL whose headers need a secret** (ADR-0122 Amendment A point 4): still refused (`secret_needs_launcher`);
   the launcher could become a small stdio-to-HTTP bridge that adds the headers. Also a `share.launch` audit row on the node.
 - **Shared items after a crash restart** (review of 553cd461): the restart reuses the first launch's arguments, so a shared server that
@@ -40,10 +42,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   flows); a hanging holder can stall a busy held terminal for up to 10 s. Learn of a held program's end off that thread.
 - **Pairing client** (not proven): a dial timeout while a name lookup runs on the blocking pool can make `agora join` outlast its wait by
   the resolver's timeout; shut the runtime down without waiting.
-- **Fleet answer** (F182x, suspected): an offline machine keeps its last `agents_running` while none of its agents are listed; a `project`
-  id cut at 160 bytes makes `agents_list {scope:"hub", project}` miss other machines' agents; the hub answers `fleet_status` without
-  checking that the asking node's link agreed `mesh.fleet_status.v1`; two clones differing only in case on one older node get commands in
-  the latest clone's spelling; a `Repo.GIT` remote does not fold (`.git` stripped case-sensitively).
+- **Fleet answer** (F182x, suspected): an offline machine keeps its last `agents_running` while none of its agents are listed; the hub
+  answers `fleet_status` without checking that the asking node's link agreed `mesh.fleet_status.v1`; two clones differing only in case on
+  one older node get commands in the latest clone's spelling; a `Repo.GIT` remote does not fold (`.git` stripped case-sensitively).
 - **Web and terminal client** (suspected, #1232): on Windows AltGr arrives as Ctrl+Alt, so a Ctrl+Alt+Q binding takes AltGr+Q from
   text fields; a chord started outside a terminal completes before the terminal-keeps-its-keys rule; `agora … 2>&1 | head -1` can panic
   writing to a closed stderr; the terminal client's `load_file` checks a theme's size, then reads the whole file.
@@ -63,6 +64,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Windows (**win**)
 
+- **Machine figures on Windows** (ADR-0136): `agora_platform::machine_stats` and `disks` in `windows.rs` (`GetSystemTimes`,
+  `GlobalMemoryStatusEx`, the fixed drives with `GetDiskFreeSpaceExW`); until then a Windows machine shows "does not report".
 - **Shared skill file names Windows reserves** (ADR-0122 step 5): `valid_skill_path` allows a part like `nul` or `con.md`; on a Windows
   node writing it fails, so that machine's agents start without the scope's skills (said once as `skill_not_written`). Decide whether
   the shared rules refuse such parts (hub, node and window together) so the owner hears it at publish time.

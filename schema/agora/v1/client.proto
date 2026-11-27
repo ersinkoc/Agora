@@ -29,6 +29,14 @@ message NodeSnapshot {
   repeated string trusted_device_ids = 10;
   // ADR-0069: `NodeOnline.binary` of this node's latest start.
   string binary = 11;
+  // ADR-0136: the latest `NodeResources` machine figures of this node (zero: not reported), and when they were recorded.
+  uint32 cpu_count = 12;
+  uint32 cpu_busy_permille = 13;
+  uint64 memory_total_bytes = 14;
+  uint64 memory_available_bytes = 15;
+  repeated DiskUsage disks = 16;
+  uint64 workspaces_bytes = 17;
+  uint64 resources_at_ms = 18;
 }
 
 message CheckoutSnapshot {

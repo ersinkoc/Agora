@@ -10,7 +10,8 @@ import { ago } from '../net/time';
 import type { UsageSummary } from '../net/usage';
 import { approvalName } from '../net/approvalText';
 import { detailText } from '../net/tool';
-import { type ApprovalModel, type MachineModel, visible } from '../net/view';
+import { diskAlerts, type ApprovalModel, type MachineModel, visible } from '../net/view';
+import { DiskAlertsBlock } from './MachineGauges';
 import { AgentTile, kindOf } from './AgentTile';
 import { ModelPick } from './ModelPick';
 import { Skeleton } from './EmptyState';
@@ -363,6 +364,8 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
   const picked = useMemo(() => (pick ? view.sorted.filter((a) => matchesModelPick(a, pick)) : view.sorted), [view.sorted, pick]);
   const groups = useMemo(() => groupFleet(picked, machines, by, filter), [picked, machines, by, filter]);
   const empty = emptyKind(link, fleet.length + approvals.length, machines.length);
+  // ADR-0136: disks running low on online machines lead the "Needs you" area.
+  const disks = useMemo(() => diskAlerts(machines), [machines]);
   const asks = useMemo(() => {
     const m = new Map<string, string>();
     for (const x of approvals) if (!m.has(x.agentId)) m.set(x.agentId, askText(x));
@@ -371,12 +374,14 @@ export function FleetConsole({ fleet, machines, approvals, usage, link, now, onO
 
   const body = empty ? (
     <>
+      <DiskAlertsBlock alerts={disks} />
       {view.attention.length > 0 && <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />}
       {pairing && <PairRecentList recent={pairing.recent} />}
       <FleetEmpty kind={empty} machines={machines} onStart={onStart} onRetry={onRetry} pairing={pairing && (empty === 'empty' || empty === 'first-run') && link === 'live' ? pairing : undefined} guest={guest} watching={watching} />
     </>
   ) : (
     <>
+      <DiskAlertsBlock alerts={disks} />
       <AttentionQueue items={view.attention} machines={machines} now={now} onOpen={onOpen} onResolve={onResolve} onReview={onReview} stale={link !== 'live'} pairing={pairing} />
       {pairing && <PairRecentList recent={pairing.recent} />}
       {pairing?.window?.open && <PairWindowControl ui={pairing} />}

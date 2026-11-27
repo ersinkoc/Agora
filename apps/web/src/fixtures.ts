@@ -23,8 +23,12 @@ export const demoAgents: AgentTileModel[] = [
 
 // Development only (demo window without a hub): enough machines and folders to try the "Start an agent" window.
 export const demoMachines = [
-  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: Date.now() - 4000 },
-  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: Date.now() - 4000 },
+  { id: 'laptop', name: 'Laptop', os: 'linux', online: true, agentsRunning: 3, lastSeenMs: Date.now() - 4000,
+    machine: { cpuCount: 16, cpuBusy: 372, memTotal: 32 * 1024 ** 3, memAvailable: 19 * 1024 ** 3, workspaces: 12 * 1024 ** 3, atMs: Date.now() - 20_000,
+      disks: [{ mount: '/', total: 512 * 1024 ** 3, free: 140 * 1024 ** 3, data: true, workspaces: true }, { mount: '/boot/efi', total: 1024 ** 3, free: 0.9 * 1024 ** 3, data: false, workspaces: false }] } },
+  { id: 'build', name: 'Build server', os: 'linux', online: true, agentsRunning: 1, lastSeenMs: Date.now() - 4000,
+    machine: { cpuCount: 4, cpuBusy: 910, memTotal: 8 * 1024 ** 3, memAvailable: 1.2 * 1024 ** 3, workspaces: 31 * 1024 ** 3, atMs: Date.now() - 20_000,
+      disks: [{ mount: '/', total: 80 * 1024 ** 3, free: 2.4 * 1024 ** 3, data: true, workspaces: true }] } },
   { id: 'winpc', name: 'Windows PC', os: 'windows', online: false, agentsRunning: 0, lastSeenMs: 0 },
 ];
 export const demoProjects = [
@@ -93,9 +97,13 @@ export const demoQuota: QuotaObs[] = [
 export const GALLERY_NOW = 1_700_000_000_000;
 const MB = 1024 * 1024;
 export const galleryMachines: MachineModel[] = [
-  { id: 'blackview', name: 'blackview', os: 'linux', online: true, agentsRunning: 4, lastSeenMs: GALLERY_NOW - 4_000, memoryBytes: 17 * MB, build: '0.3.35', terminalsOpen: 6 },
+  { id: 'blackview', name: 'blackview', os: 'linux', online: true, agentsRunning: 4, lastSeenMs: GALLERY_NOW - 4_000, memoryBytes: 17 * MB, build: '0.3.35', terminalsOpen: 6,
+    machine: { cpuCount: 16, cpuBusy: 372, memTotal: 32 * 1024 ** 3, memAvailable: 19 * 1024 ** 3, workspaces: 12 * 1024 ** 3, atMs: GALLERY_NOW - 20_000,
+      disks: [{ mount: '/', total: 512 * 1024 ** 3, free: 31 * 1024 ** 3, data: true, workspaces: true }, { mount: '/boot/efi', total: 1024 ** 3, free: 0.9 * 1024 ** 3, data: false, workspaces: false }] } },
   { id: 'mac', name: 'mac', os: 'macos', online: true, agentsRunning: 2, lastSeenMs: GALLERY_NOW - 9_000, memoryBytes: 5.6 * MB, build: '0.3.35', terminalsOpen: 2 },
-  { id: 'win', name: 'win', os: 'windows', online: false, agentsRunning: 2, lastSeenMs: GALLERY_NOW - 2 * 3_600_000, build: '0.3.34' },
+  { id: 'win', name: 'win', os: 'windows', online: false, agentsRunning: 2, lastSeenMs: GALLERY_NOW - 2 * 3_600_000, build: '0.3.34',
+    machine: { cpuCount: 8, cpuBusy: 120, memTotal: 16 * 1024 ** 3, memAvailable: 9 * 1024 ** 3, workspaces: 0, atMs: GALLERY_NOW - 2 * 3_600_000,
+      disks: [{ mount: 'C:\\', total: 256 * 1024 ** 3, free: 2.1 * 1024 ** 3, data: true, workspaces: true }] } },
   { id: 'linux-test', name: 'linux', os: 'linux', online: false, agentsRunning: 0, lastSeenMs: GALLERY_NOW - 9 * 86_400_000, build: '0.3.2' },
 ];
 const onMachine = (id: string, machineId: string, name: string, kind: string, accent: string, rest: Partial<AgentTileModel>): AgentTileModel =>

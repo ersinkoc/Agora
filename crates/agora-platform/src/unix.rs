@@ -439,6 +439,20 @@ pub(crate) fn free_space(path: &std::path::Path) -> io::Result<u64> {
     Ok(avail.saturating_mul(size))
 }
 
+/// See [`crate::disks`]: the size of the file system that holds `path` and what this user may still use there.
+pub(crate) fn disk_space(path: &std::path::Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: an all-zero `statvfs` is a valid value of the plain C struct the call fills.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a struct that outlive the call.
+    cvt(unsafe { libc::statvfs(c.as_ptr(), &mut st) })?;
+    #[allow(clippy::unnecessary_cast)]
+    let (blocks, avail, size) = (st.f_blocks as u64, st.f_bavail as u64, st.f_frsize as u64);
+    Ok((blocks.saturating_mul(size), avail.saturating_mul(size)))
+}
+
 #[cfg(test)]
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
     spawn_in(config, None)
