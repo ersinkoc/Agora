@@ -731,8 +731,9 @@ fn decode_tool(v: &serde_json::Value) -> (serde_json::Value, bool) {
     )
 }
 
-/// The maintainer's decision (2026-11-27): a person typing into an agent's terminal ends the `inbox_wait` that agent has open, at
-/// once, so its turn ends and it reads what was typed.
+/// The maintainer's decision (2026-11-27): a person sending a line into an agent's terminal ends the `inbox_wait` that agent has
+/// open, at once, saying the person wrote, so its turn ends and it reads what was typed. Keys before Enter do not (each would make a
+/// model turn while the person types: agora-ac's review of 36ecfd2e).
 #[test]
 fn a_person_typing_into_an_agent_ends_its_inbox_wait() {
     if !sh_on_path() {
@@ -754,10 +755,19 @@ fn a_person_typing_into_an_agent_ends_its_inbox_wait() {
     );
     // The wait is open (the call reached the endpoint before the input: a ping on the same connection is answered after it).
     assert!(m.rpc("ping", json!({}))["result"].is_object());
+    for key in [&b"e"[..], b"cho", b" hi"] {
+        ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
+            terminal_id: s.terminal_id.clone(),
+            data: key.to_vec(),
+        })));
+    }
+    // Still waiting after the keys: the ping is answered, not the wait.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(m.rpc("ping", json!({}))["result"].is_object());
     let typed = std::time::Instant::now();
     ok(c.call(Cmd::TerminalInput(v1::TerminalInput {
         terminal_id: s.terminal_id.clone(),
-        data: b"echo hi\n".to_vec(),
+        data: b"\r".to_vec(),
     })));
     let answer = m.read();
     assert_eq!(answer["id"], wait);
@@ -769,6 +779,10 @@ fn a_person_typing_into_an_agent_ends_its_inbox_wait() {
     let (items, err) = decode_tool(&answer);
     assert!(!err, "{items}");
     assert_eq!(items, json!([]));
+    assert_eq!(
+        answer["result"]["content"][1]["text"],
+        r#"{"reason":"person"}"#
+    );
 }
 
 #[test]

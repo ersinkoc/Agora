@@ -1533,8 +1533,12 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
             control.write_input(&t.data).map_err(|_| {
                 Error::new(ErrorCode::AgentNotFound).with("agent_id", t.terminal_id.as_str())
             })?;
-            if let Some(id) = agent_of_terminal(&t.terminal_id) {
-                person_input(ctx, &id);
+            // Only input the agent takes as a whole (it holds a line until Enter): every key ending the wait would make a model turn
+            // of each key while the person types (agora-ac's review of 36ecfd2e).
+            if t.data.iter().any(|b| matches!(b, b'\r' | b'\n')) {
+                if let Some(id) = agent_of_terminal(&t.terminal_id) {
+                    person_input(ctx, &id);
+                }
             }
             Ok(ok_empty())
         }

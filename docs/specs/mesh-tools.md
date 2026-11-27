@@ -39,9 +39,12 @@ ends, is dropped and nothing is kept for it.
 wait on it only when the person or the agent's task asked it to stay reachable for other agents, between tasks, and that a person's
 prompt always comes first. Waiting has two costs: each `[]` at the timeout is one more model turn; and while the call is open the agent's screen shows a running
 tool, so it reads as working, never idle or finished (the Finished mark and idle-based waits do not fire). **A person's input ends
-it:** when a window or the terminal client types into the agent's terminal (`TerminalInput`) or prompts it (`AgentPrompt`), every
-`inbox_wait` the agent has open is answered at once with what its inbox holds (`[]` when nothing), so its turn ends and it reads what
-the person wrote. A prompt another agent gives it (a dispatched task) does not end it; a wait begun after the input waits as before.
+it:** when a window or the terminal client sends a line into the agent's terminal (a `TerminalInput` holding Enter, `\r` or `\n`) or
+prompts it (`AgentPrompt`), every `inbox_wait` the agent has open is answered at once with what its inbox holds (`[]` when nothing)
+and a second content block `{"reason":"person"}`; the tool's description tells the agent to end its turn then and answer the person,
+and not to wait again until they are done. Keys before Enter do not end it: the agent holds them in its input box, and each would
+otherwise make a model turn while the person types. A prompt another agent gives it (a dispatched task) does not end it; a wait begun
+after the input waits as before.
 It reads exactly what `inbox` reads and the content is the same untrusted data.
 
 ## Safety rules

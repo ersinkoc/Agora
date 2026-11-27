@@ -2127,7 +2127,13 @@ fn poll_inbox(
                 &w.request_id,
                 w.since.as_deref(),
                 w.limit,
-                now >= w.deadline_ms || typed != w.typed,
+                if typed != w.typed {
+                    agora_mesh::mcp::WaitEnd::PersonWrote
+                } else if now >= w.deadline_ms {
+                    agora_mesh::mcp::WaitEnd::TimedOut
+                } else {
+                    agora_mesh::mcp::WaitEnd::Open
+                },
             ) {
                 Some(msg) => {
                     answers.push(msg);
@@ -4871,6 +4877,10 @@ mod tests {
         assert_eq!(
             agora_mesh::mcp::tool_result_value(&got["result"]).unwrap(),
             json!([])
+        );
+        assert_eq!(
+            got["result"]["content"][1]["text"],
+            r#"{"reason":"person"}"#
         );
         // The next wait starts after the input: it waits again.
         ca.send(&json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"inbox_wait","arguments":{"timeout_s": 60}}}).to_string());
