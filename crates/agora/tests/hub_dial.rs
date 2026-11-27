@@ -5089,7 +5089,9 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
                 description: "how we review".into(),
                 files: vec![v1::SkillFile {
                     path: "SKILL.md".into(),
-                    content: b"cite the file".to_vec(),
+                    content:
+                        b"---\nname: review-rules\ndescription: how we review\n---\n\ncite the file"
+                            .to_vec(),
                 }],
             }),
         },
@@ -5262,7 +5264,7 @@ fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
     assert_eq!(args[at + 1], skills_dir.to_string_lossy());
     assert_eq!(
         std::fs::read_to_string(skills_dir.join("skills/review-rules/SKILL.md")).unwrap(),
-        "cite the file"
+        "---\nname: review-rules\ndescription: how we review\n---\n\ncite the file"
     );
     assert!(skills_dir.join(".claude-plugin/plugin.json").is_file());
     assert!(

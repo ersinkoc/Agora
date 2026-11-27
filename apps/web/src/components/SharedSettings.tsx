@@ -27,8 +27,9 @@ export function skillFile(name: string, description: string, instructions: strin
 
 /** The instructions of a SKILL.md, without the header [skillFile] writes (any other text is kept whole). */
 export function skillInstructions(file: string): string {
-  const m = /^---\n(?:[^\n]*\n)*?---\n\n?/.exec(file);
-  return m ? file.slice(m[0].length) : file;
+  const text = file.replace(/\r\n?/g, '\n');
+  const m = /^---\n(?:[^\n]*\n)*?---\n\n?/.exec(text);
+  return m ? text.slice(m[0].length) : text;
 }
 
 /** The item a draft describes, or the locale key of what is wrong with it. */
@@ -42,6 +43,7 @@ export function draftItem(d: Draft): ShareItemDef | string {
     // A file's text may hold line breaks and tabs, nothing else that does not show (the hub and every machine refuse it too).
     if (hasHidden(description) || hasHidden(instructions) || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(instructions)) return 'shared-check-hidden';
     const files = [{ path: 'SKILL.md', content: skillFile(d.name, description, instructions) }, ...d.otherFiles.filter((f) => f.path.toLowerCase() !== 'skill.md')];
+    if (files.length > 64) return 'shared-check-files';
     if (files.reduce((n, f) => n + bytes(f.content), 0) > MAX_SKILL_BYTES) return 'shared-check-size';
     return { name: d.name, kind: 'skill', skill: { description, files } };
   }

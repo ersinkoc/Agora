@@ -152,6 +152,8 @@ describe('draftItem', () => {
     expect(skillFile('review', 'a "b": c', 'do')).toBe('---\nname: review\ndescription: "a \\"b\\": c"\n---\n\ndo');
     expect(skillInstructions(skillFile('review', 'x', 'line one\n---\nline two'))).toBe('line one\n---\nline two');
     expect(skillInstructions('no header')).toBe('no header');
+    expect(skillInstructions('---\r\nname: r\r\n---\r\n\r\ndo')).toBe('do');
+    expect(draftItem({ ...skill, otherFiles: Array.from({ length: 64 }, (_, i) => ({ path: `f${i}.md`, content: 'x' })) })).toBe('shared-check-files');
     const kept = draftItem({ ...skill, otherFiles: [{ path: 'refs/a.md', content: 'a' }, { path: 'skill.md', content: 'old' }] });
     expect(typeof kept !== 'string' && kept.skill?.files.map((f) => f.path)).toEqual(['SKILL.md', 'refs/a.md']);
     expect(draftItem({ ...skill, description: ' ' })).toBe('shared-check-description');

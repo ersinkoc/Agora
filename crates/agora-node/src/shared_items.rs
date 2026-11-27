@@ -215,6 +215,39 @@ struct Launch {
 /// Reads a secret by name from the node's store.
 pub type SecretReader = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// ADR-0122 step 5: whether a skill asks for nothing but to be read. Its `SKILL.md` must start with a header (`---` lines) whose keys
+/// are only `name` and `description` (comments, blank lines and indented continuation lines aside): a tool may read more keys from
+/// it (the tools allowed without asking, commands to run), which would let a signed skill go past this machine's own policy.
+pub fn skill_header_ok(skill: &v1::SkillDef) -> bool {
+    let Some(file) = skill.files.iter().find(|f| f.path == "SKILL.md") else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&file.content) else {
+        return false;
+    };
+    let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
+    if lines.next() != Some("---") {
+        return false;
+    }
+    for line in lines {
+        if line == "---" {
+            return true;
+        }
+        if line.trim().is_empty()
+            || line.starts_with('#')
+            || line.starts_with(' ')
+            || line.starts_with('\t')
+        {
+            continue;
+        }
+        match line.split_once(':') {
+            Some((key, _)) if key == "name" || key == "description" => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// ADR-0122 step 5: writes `skills` into `dir` laid out as `layout` says, replacing what was there. The names and paths were checked
 /// with the item (`agora_protocol::share`) and are checked again here, so nothing lands outside `dir`.
 pub fn write_skills(
@@ -587,34 +620,75 @@ impl SharedItems {
         servers
     }
 
-    /// ADR-0122 step 5: the shared skills an agent of `kind` in `project` gets at its launch, judged again first, by name. Added to
-    /// what it was given (call after [`Self::servers_for`], or after [`Self::forget_given`] for a kind that takes no server).
+    /// ADR-0122 step 5: the shared skills an agent of `kind` in `project` gets at its launch, judged again first, written into
+    /// [`Self::skills_dir`] laid out as `layout` says. A skill whose `SKILL.md` header asks for more than its name and description
+    /// ([`skill_header_ok`]) is left out, and a folder that cannot be written gives no skill: the agent starts without them, and
+    /// each is said once per version. What was written is added to what the agent was given (call after [`Self::servers_for`], or
+    /// after [`Self::forget_given`]).
     pub fn skills_for(
         &self,
         agent: &str,
         project: &str,
         kind: &str,
+        layout: agora_adapters::manifest::SkillsLayout,
     ) -> Vec<(String, v1::SkillDef)> {
         self.rejudge();
+        let dir = self.skills_dir(agent);
         let mut skills = Vec::new();
-        let mut given = Vec::new();
+        let mut words = Vec::new();
         for w in self.for_launch(project, kind) {
             let Some(sk) = w.item.as_ref().and_then(|i| i.skill.clone()) else {
                 continue;
             };
-            given.push(v1::SharedItemRef {
-                name: w.name.clone(),
-                item_hash: w.item_hash.clone(),
-            });
+            if !skill_header_ok(&sk) {
+                self.say_refused(&w, "share.refused", "skill_header");
+                continue;
+            }
             skills.push((w.name.clone(), sk));
+            words.push(w);
+        }
+        if skills.is_empty() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return skills;
+        }
+        if let Err(e) = write_skills(&dir, layout, &skills) {
+            crate::log_line!("shared skills: not written for {agent}: {}", e.kind());
+            let _ = std::fs::remove_dir_all(&dir);
+            for w in &words {
+                self.say_refused(w, "share.refused", "skill_not_written");
+            }
+            return Vec::new();
         }
         self.given
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .entry(agent.to_string())
             .or_default()
-            .extend(given);
+            .extend(words.iter().map(|w| v1::SharedItemRef {
+                name: w.name.clone(),
+                item_hash: w.item_hash.clone(),
+            }));
         skills
+    }
+
+    /// Says once per version and reason that this node does not give `w` to its agents.
+    fn say_refused(&self, w: &ShareItemSigned, code: &str, reason: &str) {
+        let mut st = self.st();
+        if st
+            .refused
+            .insert((w.name.clone(), format!("{}#{reason}", w.item_hash)))
+        {
+            self.out
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Body::ShareItemRefused(v1::ShareItemRefused {
+                    node_id: self.node_id.clone(),
+                    name: w.name.clone(),
+                    item_hash: w.item_hash.clone(),
+                    code: code.to_string(),
+                    reason: reason.to_string(),
+                }));
+        }
     }
 
     /// What `agent` was given is forgotten, before a launch that gives it no server.
@@ -1305,8 +1379,9 @@ mod tests {
     fn a_launch_gets_its_skills_written_as_the_kind_loads_them() {
         let d = temp("skills");
         let s = open(&d, SharePolicy::default());
-        let skill = |files: &[(&str, &str)]| ShareItem {
-            name: "review".into(),
+        let layout = agora_adapters::manifest::SkillsLayout::ClaudePlugin;
+        let skill = |name: &str, files: &[(&str, &str)]| ShareItem {
+            name: name.into(),
             kind: ShareItemKind::Skill as i32,
             mcp: None,
             skill: Some(v1::SkillDef {
@@ -1320,12 +1395,29 @@ mod tests {
                     .collect(),
             }),
         };
+        let md = "---\nname: review\ndescription: \"when reviewing\"\n---\n\ncite the file";
         s.take(word(
             "review",
-            Some(skill(&[
-                ("SKILL.md", "cite the file"),
-                ("refs/style.md", "short"),
-            ])),
+            Some(skill(
+                "review",
+                &[("SKILL.md", md), ("refs/style.md", "short")],
+            )),
+            1,
+            ShareScope::default(),
+        ));
+        // A header that asks for tools or commands, or no SKILL.md, is never given; each is said once.
+        s.take(word(
+            "tools",
+            Some(skill(
+                "tools",
+                &[("SKILL.md", "---\nname: tools\nallowed-tools: Bash\n---\n")],
+            )),
+            1,
+            ShareScope::default(),
+        ));
+        s.take(word(
+            "bare",
+            Some(skill("bare", &[("notes.md", "x")])),
             1,
             ShareScope::default(),
         ));
@@ -1336,24 +1428,33 @@ mod tests {
             ShareScope::default(),
         ));
         let servers = s.servers_for("agent-1", "p", "claude-code", Path::new("/run/m/a.sock"));
-        let skills = s.skills_for("agent-1", "p", "claude-code");
+        let dir = s.skills_dir("agent-1");
+        std::fs::create_dir_all(dir.join("stale")).unwrap();
+        let skills = s.skills_for("agent-1", "p", "claude-code", layout);
         assert_eq!(servers.len(), 1);
-        assert_eq!(skills.len(), 1);
+        assert_eq!(
+            skills.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["review"]
+        );
         let names = |agent: &str| {
             let mut n: Vec<String> = s.given(agent).into_iter().map(|r| r.name).collect();
             n.sort();
             n
         };
         assert_eq!(names("agent-1"), ["db", "review"]);
-        // A kind that takes no server still says the skills it got, and nothing of an earlier launch.
-        s.forget_given("agent-1");
-        s.skills_for("agent-1", "p", "claude-code");
-        assert_eq!(names("agent-1"), ["review"]);
+        let mut said: Vec<String> = s
+            .take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                Body::ShareItemRefused(r) => Some(format!("{}:{}", r.name, r.reason)),
+                _ => None,
+            })
+            .collect();
+        said.sort();
+        assert_eq!(said, ["bare:skill_header", "tools:skill_header"]);
+        s.skills_for("agent-1", "p", "claude-code", layout);
+        assert!(s.take_events().is_empty(), "said once");
 
-        let dir = s.skills_dir("agent-1");
-        let layout = agora_adapters::manifest::SkillsLayout::ClaudePlugin;
-        std::fs::create_dir_all(dir.join("stale")).unwrap();
-        write_skills(&dir, layout, &skills).unwrap();
         assert!(!dir.join("stale").exists(), "what was there is replaced");
         assert_eq!(
             std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap(),
@@ -1361,7 +1462,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("skills/review/SKILL.md")).unwrap(),
-            "cite the file"
+            md
         );
         assert!(dir.join("skills/review/refs/style.md").is_file());
         for (name, path) in [
@@ -1377,7 +1478,82 @@ mod tests {
         assert!(!d.join("out.md").exists());
         s.agent_ended("agent-1");
         assert!(!dir.exists());
+        assert!(s.given("agent-1").is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0122 step 5: a skills folder that cannot be written gives no skill (the agent starts without them) and says so once.
+    #[test]
+    fn a_skills_folder_that_cannot_be_written_gives_none_and_says_so() {
+        let d = temp("skills-fail");
+        let s = open(&d, SharePolicy::default());
+        let item = ShareItem {
+            name: "review".into(),
+            kind: ShareItemKind::Skill as i32,
+            mcp: None,
+            skill: Some(v1::SkillDef {
+                description: "x".into(),
+                files: vec![v1::SkillFile {
+                    path: "SKILL.md".into(),
+                    content: b"---\nname: review\n---\n".to_vec(),
+                }],
+            }),
+        };
+        s.take(word("review", Some(item), 1, ShareScope::default()));
+        let blocker = s.skills_dir("agent-1");
+        std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        // A file where the agent's folder's parent must be a folder.
+        let parent = blocker.parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&parent).unwrap();
+        std::fs::write(&parent, b"in the way").unwrap();
+        let got = s.skills_for(
+            "agent-1",
+            "p",
+            "claude-code",
+            agora_adapters::manifest::SkillsLayout::ClaudePlugin,
+        );
+        assert!(got.is_empty());
+        assert!(s.given("agent-1").is_empty());
+        let said = s.take_events();
+        assert!(
+            matches!(&said[..], [Body::ShareItemRefused(r)] if r.reason == "skill_not_written"),
+            "{said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// ADR-0122 step 5: only a `SKILL.md` whose header holds its name and description (comments, blank and continuation lines aside)
+    /// is read as asking for nothing more.
+    #[test]
+    fn a_skill_header_names_only_the_skill_and_when_to_use_it() {
+        let skill = |text: &str| v1::SkillDef {
+            description: String::new(),
+            files: vec![v1::SkillFile {
+                path: "SKILL.md".into(),
+                content: text.as_bytes().to_vec(),
+            }],
+        };
+        for ok in [
+            "---\nname: r\ndescription: x\n---\nbody",
+            "---\r\nname: r\r\ndescription: >\r\n  folded\r\n# note\r\n\r\n---\r\n",
+        ] {
+            assert!(skill_header_ok(&skill(ok)), "{ok:?}");
+        }
+        for bad in [
+            "no header",
+            "\n---\nname: r\n---\n",
+            "---\nname: r\nallowed-tools: Bash\n---\n",
+            "---\nname: r\nhooks:\n  x: y\n---\n",
+            "---\n{allowed-tools: Bash}\n---\n",
+            "---\n? allowed-tools\n---\n",
+            "---\nname: r\n",
+            "---\nnamex: r\n---\n",
+        ] {
+            assert!(!skill_header_ok(&skill(bad)), "{bad:?}");
+        }
+        let mut lower = skill("---\nname: r\n---\n");
+        lower.files[0].path = "skill.md".into();
+        assert!(!skill_header_ok(&lower), "the file is SKILL.md exactly");
     }
 
     /// ADR-0122 Amendment A: a program that names a secret is given through the launcher only where this machine lets that secret

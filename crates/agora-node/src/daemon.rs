@@ -935,12 +935,17 @@ impl EventSink {
     pub fn supervisor_events(&self, events: &[SupervisorEvent], views: &[AgentView]) {
         for e in events {
             // ADR-0122: an agent that ended, gave up or was stopped (by any path: the tick, a stop command) loses its file of shared
-            // servers, which may hold secrets.
+            // servers, which may hold secrets, and its skills. One that exits to be restarted keeps them: the restart is launched with
+            // the same arguments, which name them.
             if let SupervisorEvent::Exited { agent, .. }
             | SupervisorEvent::GaveUp { agent, .. }
             | SupervisorEvent::Stopped { agent } = e
             {
-                if let Some(shared) = self.shared.get() {
+                let restarts = matches!(e, SupervisorEvent::Exited { .. })
+                    && events.iter().any(
+                        |x| matches!(x, SupervisorEvent::Restarting { agent: a, .. } if a == agent),
+                    );
+                if let (Some(shared), false) = (self.shared.get(), restarts) {
                     shared.agent_ended(agent.as_str());
                 }
             }
@@ -2453,18 +2458,18 @@ impl Node {
                 // Called under the supervisor's lock; it takes the approvals' trust lock under it (re-judging), and nothing in
                 // approvals ever calls back into the supervisor, so the order holds.
                 .set_shared_hook(Box::new(move |id, project, kind, servers, skills| {
-                    let socket = mesh_for_hook.upgrade()?.socket_path(id);
                     let agent = id.as_str();
+                    // What an earlier launch was given never stays: this launch says its own.
+                    for_hook.forget_given(agent);
                     let servers = if servers {
+                        let socket = mesh_for_hook.upgrade()?.socket_path(id);
                         for_hook.servers_for(agent, project, kind, &socket)
                     } else {
-                        for_hook.forget_given(agent);
                         Vec::new()
                     };
-                    let skills = if skills {
-                        for_hook.skills_for(agent, project, kind)
-                    } else {
-                        Vec::new()
+                    let skills = match skills {
+                        Some(layout) => for_hook.skills_for(agent, project, kind, layout),
+                        None => Vec::new(),
                     };
                     Some(crate::supervisor::SharedGiven {
                         servers_file: for_hook.agent_file(agent),
@@ -2474,6 +2479,16 @@ impl Node {
                     })
                 }));
             events.set_shared(Arc::clone(&shared));
+            // A start that fails after the launch hook ran also drops what it was given: its servers' file, its skills, its launch ids.
+            let for_abort = Arc::clone(&mesh);
+            let shared_abort = Arc::clone(&shared);
+            supervisor
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_abort_hook(Box::new(move |id| {
+                    for_abort.unregister(id);
+                    shared_abort.agent_ended(id.as_str());
+                }));
             // ADR-0088: an agent's `preview_suggest` becomes `PreviewSuggested`, bounded per agent.
             let say = Arc::clone(&events);
             mesh.set_preview_suggest(Arc::new(crate::preview::Suggestions::new(Box::new(
@@ -4155,6 +4170,41 @@ mod announce_tests {
             std::env::temp_dir().join(format!("agora-announce-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         EventSink::open(&dir, "n1").unwrap()
+    }
+
+    /// ADR-0122: an agent that exits to be restarted keeps its shared servers' file and skills (the restart's arguments name them);
+    /// one that ends, gives up or is stopped loses them.
+    #[test]
+    fn an_agent_restarted_after_a_crash_keeps_what_it_was_given() {
+        let s = sink("shared-restart");
+        let dir = std::env::temp_dir().join(format!("agora-shared-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shared = Arc::new(crate::shared_items::SharedItems::open_with(
+            &dir,
+            "n1",
+            Box::new(|_, _, _, _| false),
+            crate::shared_items::SharePolicy::default(),
+        ));
+        s.set_shared(Arc::clone(&shared));
+        let skills = shared.skills_dir("a");
+        std::fs::create_dir_all(&skills).unwrap();
+        let exited = SupervisorEvent::Exited {
+            agent: AgentId::new("a"),
+            status: agora_platform::ExitStatus {
+                code: Some(1),
+                signal: None,
+            },
+        };
+        let restarting = SupervisorEvent::Restarting {
+            agent: AgentId::new("a"),
+            attempt: 1,
+            after: std::time::Duration::from_secs(1),
+        };
+        s.supervisor_events(&[exited.clone(), restarting], &[]);
+        assert!(skills.exists(), "kept for the restart");
+        s.supervisor_events(&[exited], &[]);
+        assert!(!skills.exists(), "gone when it ends");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn view(id: &str, running: bool, terminal: bool) -> AgentView {

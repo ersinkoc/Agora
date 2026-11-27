@@ -10,6 +10,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 - **Shared MCP servers at a URL whose headers need a secret** (ADR-0122 Amendment A point 4): still refused (`secret_needs_launcher`);
   the launcher could become a small stdio-to-HTTP bridge that adds the headers. Also a `share.launch` audit row on the node.
+- **Shared skills, smaller gaps** (review of 5c7c1410): a kind with `[skills]` but no `[mcp]` (or no mesh endpoint) gets no skill,
+  since the shared items are handed out with the mesh server; every agent's plugin folder is named `shared`, which would clash with a
+  person's own plugin of that name in Claude Code.
 - **Shared MCP servers for Codex and WrongStack** (ADR-0122 step 3b): Codex takes MCP servers only as `-c mcp_servers.NAME...` overrides,
   which would put a filled secret on its command line (readable by other processes of the machine); find a way that keeps secrets off
   the command line (its config file under a node-owned `CODEX_HOME` overlay, or an env var it reads) and check it on a real version
@@ -58,8 +61,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 ## Windows (**win**)
 
 - **Shared skill file names Windows reserves** (ADR-0122 step 5): `valid_skill_path` allows a part like `nul` or `con.md`; on a Windows
-  node writing it fails and the agent's start fails with it. Decide whether the shared rules refuse such parts (hub, node and window
-  together) or the node leaves the skill out and says so.
+  node writing it fails, so that machine's agents start without the scope's skills (said once as `skill_not_written`). Decide whether
+  the shared rules refuse such parts (hub, node and window together) so the owner hears it at publish time.
 - **Node.js agents cannot spawn when confined** (was #895; ADR-0105). Cause in libuv's `src/win/pipe.c` (the server end of the stdio pipe
   is created with NULL security attributes). Filed upstream as libuv/libuv#5464 with a fix proposed in libuv/libuv#5467. Done when a
   Node.js release carrying the fix is verified confined on Windows (ADR-0105 decision 4); until then the docs say Node-based agents do not

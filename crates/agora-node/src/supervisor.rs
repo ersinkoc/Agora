@@ -99,13 +99,22 @@ pub struct SharedGiven {
     /// Step 3b: the MCP servers, and their file (readable by this user only).
     pub servers_file: PathBuf,
     pub servers: Vec<agora_adapters::inject::SharedServer>,
-    /// Step 5: the skills, and their folder.
+    /// Step 5: the skills already written to their folder (empty when none was).
     pub skills_dir: PathBuf,
     pub skills: Vec<(String, agora_protocol::v1::SkillDef)>,
 }
 
-/// ADR-0122: the shared items an agent gets at its launch `(agent, project, kind, takes servers, takes skills)`.
-pub type SharedHook = Box<dyn Fn(&AgentId, &str, &str, bool, bool) -> Option<SharedGiven> + Send>;
+/// ADR-0122: the shared items an agent gets at its launch `(agent, project, kind, takes servers, how it takes skills)`.
+pub type SharedHook = Box<
+    dyn Fn(
+            &AgentId,
+            &str,
+            &str,
+            bool,
+            Option<agora_adapters::manifest::SkillsLayout>,
+        ) -> Option<SharedGiven>
+        + Send,
+>;
 
 /// Undoes the launch hook for an agent whose start then failed (its mesh endpoint would otherwise stay registered).
 pub type AbortHook = Box<dyn Fn(&AgentId) + Send>;
@@ -2871,11 +2880,15 @@ impl Supervisor {
         let skills_spec = self.kinds.get(kind).and_then(|k| k.manifest.skills.clone());
         let takes_servers = !spec.shared_flag.is_empty();
         if takes_servers || skills_spec.is_some() {
-            if let Some(given) = self
-                .shared_hook
-                .as_ref()
-                .and_then(|h| h(id, project, kind, takes_servers, skills_spec.is_some()))
-            {
+            if let Some(given) = self.shared_hook.as_ref().and_then(|h| {
+                h(
+                    id,
+                    project,
+                    kind,
+                    takes_servers,
+                    skills_spec.as_ref().map(|sk| sk.layout),
+                )
+            }) {
                 if !given.servers.is_empty() {
                     let file = given.servers_file;
                     if let Some(dir) = file.parent() {
@@ -2893,9 +2906,8 @@ impl Supervisor {
                     );
                     read.push(file);
                 }
+                // Written by the hook already; one it could not write gives no skill, and the agent starts without them.
                 if let (Some(sk), false) = (&skills_spec, given.skills.is_empty()) {
-                    crate::shared_items::write_skills(&given.skills_dir, sk.layout, &given.skills)
-                        .map_err(|e| SupervisorError::Spawn(e.to_string()))?;
                     argv.extend(
                         agora_adapters::inject::skills_args(sk, &given.skills_dir)
                             .map_err(|e| SupervisorError::Spawn(format!("skills: {e}")))?,

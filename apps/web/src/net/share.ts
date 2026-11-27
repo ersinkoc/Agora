@@ -157,7 +157,7 @@ export function sharedSourceFor(ask: Ask, device: Device, now: () => number = Da
 export function refusalWords(r: SharedRefusal): { key: string; args?: Record<string, string> } {
   // The secret's name is the machine's word: shown with anything hidden in it made visible, and cut short.
   if (r.code === 'share.secret_missing') return { key: 'shared-refused-secret', args: { secret: visible(r.reason).slice(0, 64) } };
-  const known = ['secret_needs_launcher', 'secret_not_allowed', 'env_not_allowed', 'policy_off', 'command_not_allowed', 'url_not_allowed', 'signer_untrusted', 'signature', 'older', 'invalid'];
+  const known = ['secret_needs_launcher', 'secret_not_allowed', 'env_not_allowed', 'policy_off', 'command_not_allowed', 'url_not_allowed', 'signer_untrusted', 'signature', 'older', 'invalid', 'skill_header', 'skill_not_written'];
   const reason = r.reason === 'signature' ? 'signer_untrusted' : r.reason;
   return { key: known.includes(reason) ? `shared-refused-${reason.replace(/_/g, '-')}` : 'shared-refused-other' };
 }
