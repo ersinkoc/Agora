@@ -151,3 +151,4 @@ Date: YYYY-MM-DD
 | 0133 | Shared MCP servers can restart within an agent run | Accepted |
 | 0134 | Agent accounts are configured on the node | Accepted |
 | 0135 | Bound hub replay with projection checkpoints | Accepted |
+| 0136 | Machines report their CPU, memory and disks | Accepted |
