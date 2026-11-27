@@ -163,7 +163,7 @@ fixes it.
   - [ ] board chores in the client (sort, group, filter); presets from settings
 - [ ] **M3.2 The board's Review column and subtasks** (ADR-0095 steps 4–5, **schema**)
   - [x] shared-board Review with a person accepting a report into Done or returning the task to Backlog (ADR-0125)
-  - [ ] shared-board subtasks and parent progress ([ADR-0126 proposed](../adr/0126-subtasks-on-the-shared-board.md), **schema**)
+  - [ ] shared-board subtasks and parent progress ([ADR-0126](../adr/0126-subtasks-on-the-shared-board.md), **schema**)
   - [ ] node-local Review and subtasks, and links to conversation, workspace and branch
 - [ ] **M3.3 Chat history survives the node** (ADR-0089, **schema**): node writer and paging, resume and purge, pages in the window
 - [x] **M3.4 A plain terminal shows its agent** (ADR-0094, **schema** for step 2, G3)

@@ -141,4 +141,4 @@ Date: YYYY-MM-DD
 | 0123 | Every agent shows its provider, model and effort | Accepted |
 | 0124 | Preserve a task claim when its receiver reattaches | Accepted |
 | 0125 | Review a task before accepting it | Accepted |
-| 0126 | Subtasks on the shared board | Proposed |
+| 0126 | Subtasks on the shared board | Accepted |
