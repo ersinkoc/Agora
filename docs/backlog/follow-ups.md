@@ -115,6 +115,11 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Flaky tests (fix with a proof)
 
+- `preview::a_connection_carries_bytes_both_ways_unchanged_and_reaches_only_its_port` (tests/preview.rs:570, `accepted == probed + 1`):
+  failed once in CI on ubuntu-latest at a7cb134f (reported by the Windows session, 2026-11-27); later runs on main passed. The count of
+  connections the echo server accepted likely races the node's port probe (a probe that lands after `probed` was read). The same run's
+  `web` job failed at "Install Chromium" (infrastructure).
+
 - `preview::one_connection_over_the_cap_is_answered_then_ended_with_budget` (tests/preview.rs:684): the program observed 33
   connections against a cap of 32 once on Linux on 2026-11-27. The isolated retry and a second node integration run passed.
 

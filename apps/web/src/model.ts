@@ -56,6 +56,8 @@ export interface AgentTileModel {
   session?: SessionModel; // ADR-0058, for agents whose adapter reported it
   parentId?: string; // ADR-0057: the agent that started this one (hub-wide key)
   skipsPermissions?: boolean; // ADR-0059: started with an option that lets it act without asking (the "does not ask" badge)
+  model?: string; // ADR-0123: the model it runs on (`modelAndEffort`), empty when not known; the agent's own words
+  effort?: string; // ADR-0123: its reasoning effort, empty when not known
   alwaysAllowed?: string[]; // ADR-0101: the actions of the "always" answers it holds (the "Asks less" chip), newest last
   runsInside?: { kind: string; name: string }; // ADR-0094: the agent a person runs by hand in this Shell (its kind and display name), while it runs
   // ADR-0094: the agent's own kind (`shell`) while another agent runs inside it; `kind` and `name` then show that agent, so the Shell is

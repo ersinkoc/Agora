@@ -869,6 +869,9 @@ agent-does-not-ask-session-neutral-explain = Size önce sormadan çalışır; so
 agent-does-not-ask-session-explain = Onayınızla, sona erene veya siz geri alana kadar size önce sormadan çalışacak şekilde geçirildi
 agent-always-allowed-short = Daha az sorar
 # ADR-0094: a person runs an agent by hand in this Shell (found from the program in front of its terminal, never its screen).
+agent-model-title = Model: { $value }
+agent-effort-title = Akıl yürütme düzeyi: { $value }
+agent-effort-chip = düzey { $value }
 agent-runs-inside = Shell içinde { $name }
 agent-runs-inside-explain = Makinesi bu programı terminalin önünde buldu, terminalde görünenden değil. npm betiği olarak kurulan bir ajan Node olarak çalışır ve tanınmaz; Windows'ta arka planda başlatılan bir ajan, istem öndeyken de işaretli kalır.
 agent-always-allowed-explain = Bu oturum için { $count } isteğine izin verdin. Sona erene kadar bunlar için bir daha sormaz.

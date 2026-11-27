@@ -8,6 +8,7 @@ import { asksUnderHeader } from '../net/chatView';
 import { AgentAddress } from '../components/AgentAddress';
 import { AsksLessChip } from '../components/AllowAlways';
 import { RunsInsideChip } from '../components/RunsInside';
+import { ModelChip } from '../components/ModelChip';
 import { ApprovalBanners } from '../components/ApprovalBanner';
 import { CloseAgentContext, CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { ChatActionsContext } from '../components/chatActions';
@@ -81,6 +82,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
           {a.branch && <span className="flex min-w-0 items-center gap-1.5" data-crumb="branch"><Icon name="branch" className="ms-1 size-3.5 flex-none" /><span className="truncate font-mono">{visible(a.branch)}</span></span>}
           {a.shared && <span className="ide-chip ms-1 flex-none" title={t('workspace-shared')}>{t('ide-shared')}</span>}
           <RunsInsideChip agent={a} />
+          <ModelChip agent={a} />
           <NoAskBadge agent={a} />
           <AsksLessChip agent={a} />
         </div>

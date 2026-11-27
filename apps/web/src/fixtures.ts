@@ -5,8 +5,8 @@ import type { QuotaObs } from './net/quota';
 
 // Demo data for the gallery and the first Home screen until the hub connection feeds the store.
 export const demoAgents: AgentTileModel[] = [
-  { id: 'a1', workspaceRef: { node: 'laptop', id: 'login-fix' }, name: 'claude · amber', accent: 'var(--agent-amber)', machine: 'Laptop', workspace: 'login-fix', state: 'needs-you', since: Date.now() - 8 * 60_000, reportedBy: 'agent', project: 'login-fix', projectId: 'demo-login', filesChanged: 4, preview: '> Allow editing src/auth.rs?\n  1. Yes   2. No' },
-  { id: 'a2', workspaceRef: { node: 'build', id: 'api-tests' }, name: 'codex · teal', accent: 'var(--agent-teal)', machine: 'Build server', workspace: 'api-tests', project: 'api-tests', state: 'working', preview: 'Running 128 tests…', skipsPermissions: true },
+  { id: 'a1', workspaceRef: { node: 'laptop', id: 'login-fix' }, name: 'claude · amber', model: 'opus', effort: 'high', accent: 'var(--agent-amber)', machine: 'Laptop', workspace: 'login-fix', state: 'needs-you', since: Date.now() - 8 * 60_000, reportedBy: 'agent', project: 'login-fix', projectId: 'demo-login', filesChanged: 4, preview: '> Allow editing src/auth.rs?\n  1. Yes   2. No' },
+  { id: 'a2', workspaceRef: { node: 'build', id: 'api-tests' }, name: 'codex · teal', model: 'gpt-6', effort: 'medium', accent: 'var(--agent-teal)', machine: 'Build server', workspace: 'api-tests', project: 'api-tests', state: 'working', preview: 'Running 128 tests…', skipsPermissions: true },
   { id: 'a3', name: 'claude · violet', accent: 'var(--agent-violet)', machine: 'Laptop', machineId: 'laptop', workspace: 'docs', project: 'docs', state: 'finished', preview: 'Done. 3 files changed.' },
   { id: 'a4', name: 'wrongstack · rose', accent: 'var(--agent-rose)', machine: 'Windows PC', machineId: 'winpc', workspace: 'ui-polish', project: 'ui-polish', state: 'idle', preview: '$' },
   // ADR-0094: a Shell where the person started Claude Code by hand; the machine found it from the program in front of the terminal.

@@ -897,6 +897,9 @@ agent-does-not-ask-session-neutral-explain = Acts without asking you first, unti
 agent-does-not-ask-session-explain = Switched, with your approval, so that it acts without asking you first, until it ends or you switch it back
 agent-always-allowed-short = Asks less
 # ADR-0094: a person runs an agent by hand in this Shell (found from the program in front of its terminal, never its screen).
+agent-model-title = Model: { $value }
+agent-effort-title = Reasoning effort: { $value }
+agent-effort-chip = effort { $value }
 agent-runs-inside = { $name } in Shell
 agent-runs-inside-explain = Its machine found this program in front of the terminal, never from what the terminal shows. An agent installed as an npm script runs as Node and is not recognised; on Windows, an agent started in the background stays marked while the prompt is in front.
 agent-always-allowed-explain = You allowed { $count } of its requests for this session. It does not ask again for those until it ends.
