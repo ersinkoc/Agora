@@ -1855,6 +1855,39 @@ fn post_for_node(
         ) => {
             return helper_for_node(hub, node_id, req, open, answers);
         }
+        // ADR-0122: a node asks for the list (names, versions and scopes, never content) to see what changed, once both agreed on it.
+        Some(command_request::Command::ShareItemList(_)) => {
+            use agora_protocol::handshake::SHARE_ITEMS;
+            if !hub
+                .router()
+                .nodes_with(SHARE_ITEMS)
+                .iter()
+                .any(|n| n == node_id)
+            {
+                return refuse(
+                    Error::new(ErrorCode::ProtocolCapabilityMissing)
+                        .with("capability", SHARE_ITEMS),
+                );
+            }
+            let _ = answers.send(match crate::shares::Shares::new(hub.store()).list(false) {
+                Ok(mut items) => {
+                    // What other machines refused is the owner's to see, not another machine's.
+                    for i in &mut items {
+                        i.refused.clear();
+                    }
+                    v1::CommandResponse {
+                        request_id: rid.clone(),
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::ShareItemList(
+                                v1::ShareItemListResult { items },
+                            )),
+                        })),
+                    }
+                }
+                Err(e) => error_response(&rid, &e),
+            });
+            return;
+        }
         // ADR-0122: a node fetches a shared item's newest signed word (it checks the signature itself), once both agreed on it.
         Some(command_request::Command::ShareItemGet(g)) => {
             use agora_protocol::handshake::SHARE_ITEMS;

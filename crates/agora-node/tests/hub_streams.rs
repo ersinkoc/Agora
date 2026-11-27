@@ -173,6 +173,7 @@ fn hub_test(
     let uplink: UplinkHandle = spawn(
         Arc::clone(&n.events),
         HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("ws://127.0.0.1:{port}"),
             ca_pem: String::new(),

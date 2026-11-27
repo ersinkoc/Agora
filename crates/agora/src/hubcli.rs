@@ -3161,6 +3161,7 @@ fn link_files(
     Ok(Some((
         id.trim().to_string(),
         HubLink {
+            shared: None,
             url: url.trim().to_string(),
             ca_pem,
             cert_pem,

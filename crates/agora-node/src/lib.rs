@@ -46,6 +46,7 @@ pub mod preview_relay;
 pub mod runner_folders;
 pub mod sandbox;
 pub mod session_files;
+pub mod shared_items;
 pub mod spawn;
 pub mod supervisor;
 pub mod task_dispatch;

@@ -404,6 +404,7 @@ fn the_hub_offers_devices_the_owner_decides_and_endorsements_and_revocations_are
     std::fs::write(data.join("policy"), "signed_commands = agent.prompt\n").unwrap();
     let node = agora_node::daemon::Node::start(&cfg).unwrap();
     let mut link = HubLink {
+        shared: None,
         url: url.clone(),
         ca_pem: ca_pem.clone(),
         cert_pem: issued.cert_pem.clone(),

@@ -181,6 +181,8 @@ pub struct HubLink {
     /// ADR-0119: the node's spawner, which answers the hub's `HelperStart`, `HelperFollow` and `HelperRelease` (only ever on this link,
     /// never from a local client). `None`: they are refused as a missing capability.
     pub spawner: Option<Arc<crate::spawn::Spawner>>,
+    /// ADR-0122: the shared items this node verifies; `share.items` is offered while its policy gives them.
+    pub shared: Option<Arc<crate::shared_items::SharedItems>>,
 }
 
 /// What the hub answered (its `CommandOk`, if any), or the error code.
@@ -572,6 +574,7 @@ async fn run_once_noting(
                 link.grants.clone(),
                 link.mesh.clone(),
                 link.spawner.clone(),
+                link.shared.clone(),
                 Liveness::DEFAULT,
                 link.devices.clone(),
                 accepted,
@@ -668,6 +671,7 @@ async fn converse<S>(
     grants: Option<Arc<crate::grants::Grants>>,
     mesh: Option<Arc<crate::mesh_server::MeshServer>>,
     spawner: Option<Arc<crate::spawn::Spawner>>,
+    shared: Option<Arc<crate::shared_items::SharedItems>>,
     live: Liveness,
     devices: Option<Arc<crate::device_trust::DeviceTrust>>,
     accepted: &AtomicBool,
@@ -725,6 +729,10 @@ where
     // which is also what lets its own agents ask other machines.
     if spawner.as_ref().is_some_and(|s| s.remote_helpers_on()) {
         capabilities.push(agora_protocol::handshake::MESH_SPAWN_REMOTE);
+    }
+    // ADR-0122: offered only while this node's policy gives shared items (`share.items`), so the hub answers its list and fetches.
+    if shared.as_ref().is_some_and(|s| s.on()) {
+        capabilities.push(agora_protocol::handshake::SHARE_ITEMS);
     }
     let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
@@ -2419,6 +2427,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 live,
                 None,
                 &AtomicBool::new(false),
@@ -2861,7 +2870,7 @@ mod tests {
             let stop = AtomicBool::new(false);
             let none = AtomicBool::new(false);
             let talk = converse(
-                conn, &sink, &stop, None, None, None, None, None, live, None, &none, None,
+                conn, &sink, &stop, None, None, None, None, None, None, live, None, &none, None,
             );
             let r = tokio::time::timeout(live.deadline * 10, talk).await;
             hub.abort();
@@ -3028,7 +3037,8 @@ mod tests {
             let stop = AtomicBool::new(false);
             let none = AtomicBool::new(false);
             let talk = converse(
-                conn, &sink, &stop, None, None, None, None, None, SLOW_LIVE, None, &none, None,
+                conn, &sink, &stop, None, None, None, None, None, None, SLOW_LIVE, None, &none,
+                None,
             );
             let stopper = async {
                 if seen_rx.await.is_ok() {

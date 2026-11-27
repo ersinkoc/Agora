@@ -74,6 +74,8 @@ fn hubside(node_id: &str) -> Hubside {
                 // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
                 agora_protocol::handshake::FLEET_STATUS_V1.into(),
                 agora_protocol::handshake::MESH_SPAWN_REMOTE.into(),
+                // ADR-0122: the hub keeps shared items; a node whose policy gives them offers it too.
+                agora_protocol::handshake::SHARE_ITEMS.into(),
             ],
             required: vec![],
         },
@@ -122,6 +124,7 @@ impl Hubside {
 
     fn link(&self, addr: SocketAddr) -> HubLink {
         HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("wss://localhost:{}", addr.port()),
             ca_pem: self.ca_pem.clone(),
@@ -4819,4 +4822,123 @@ fn an_agent_starts_a_helper_on_another_machine_with_the_persons_decision_there()
         .unwrap_or_default()
         .to_string();
     assert!(!text.contains("agent.not_found"), "{waited}");
+}
+
+/// ADR-0122 step 3 through a real hub: the owner published two shared MCP servers, one signed by a device this machine trusts and one
+/// by a device the hub knows but this machine does not. The machine asks the hub for the list once its link is up, fetches both,
+/// verifies each with its own trust, gives its agents only the first, and says why it refused the second (the hub keeps that against
+/// the item, for the owner).
+#[test]
+fn a_machine_uses_only_the_shared_items_a_device_it_trusts_signed() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+        return;
+    }
+    use agora_node::uplink_client::MeshOut;
+    use agora_protocol::share::{signed_message, Action};
+    use agora_protocol::v1;
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let (trusted, _) = agora_tui::device::Device::generate().unwrap();
+    let (stranger, _) = agora_tui::device::Device::generate().unwrap();
+    let devices = agora_hub::devices::Devices::new(hub.state.hub.store());
+    for d in [&trusted, &stranger] {
+        let at = server::now_ms();
+        let name = "Browser".to_string();
+        let message = agora_hub::devices::register_message(&d.id, &name, &d.public_key(), at);
+        devices
+            .register(
+                "owner",
+                &v1::DeviceRegister {
+                    device_id: d.id.clone(),
+                    name,
+                    public_key: d.public_key(),
+                    signed_at_ms: at,
+                    signature: d.sign(&message).unwrap(),
+                },
+                at,
+            )
+            .unwrap();
+    }
+    let publish = |d: &agora_tui::device::Device, name: &str| -> String {
+        let item = v1::ShareItem {
+            name: name.into(),
+            kind: v1::ShareItemKind::McpServer as i32,
+            mcp: Some(v1::McpServerDef {
+                command: "npx".into(),
+                ..Default::default()
+            }),
+            skill: None,
+        };
+        let hash = agora_hub::shares::item_hash(&item);
+        let scope = v1::ShareScope::default();
+        let at = server::now_ms();
+        let w = v1::ShareItemSigned {
+            item: Some(item),
+            scope: Some(scope.clone()),
+            issued_ms: at,
+            item_hash: hash.clone(),
+            signer_device_id: d.id.clone(),
+            signature: d
+                .sign(&signed_message(Action::Publish, name, &hash, &scope, at))
+                .unwrap(),
+            name: name.into(),
+        };
+        agora_hub::shares::Shares::new(hub.state.hub.store())
+            .apply("owner", &w, at)
+            .unwrap();
+        hash
+    };
+    publish(&trusted, "db-tools");
+    let refused_hash = publish(&stranger, "other-tools");
+
+    let dir = tmp("shared-items");
+    let data = dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(dir.join("manifests")).unwrap();
+    agora_node::approvals::trust_device(
+        &data.join(agora_node::approvals::TRUSTED_DEVICES_FILE),
+        &trusted.id,
+        &trusted.public_key_hex(),
+    )
+    .unwrap();
+    let cfg = agora_node::daemon::NodeConfig {
+        resume_all: false,
+        node_id: "alpha".into(),
+        socket: dir.join("c.sock"),
+        data_dir: data,
+        worktree_root: dir.join("wt"),
+        manifests_dir: dir.join("manifests"),
+        projects: vec![],
+        limits: Default::default(),
+    };
+    let node = agora_node::daemon::Node::start(&cfg).unwrap();
+    let out = MeshOut::new();
+    node.shared.set_link(out.clone());
+    let mut link = hub.link(addr);
+    link.mesh_out = Some(out);
+    link.shared = Some(Arc::clone(&node.shared));
+    let _up = spawn(Arc::clone(&node.events), link).unwrap();
+    wait(
+        "the machine to use the item a trusted device signed",
+        || !node.shared.for_launch("p", "claude-code").is_empty(),
+    );
+    let used: Vec<String> = node
+        .shared
+        .for_launch("p", "claude-code")
+        .into_iter()
+        .map(|w| w.name)
+        .collect();
+    assert_eq!(used, ["db-tools"]);
+    wait("the hub to hear why the other was refused", || {
+        agora_hub::shares::Shares::new(hub.state.hub.store())
+            .list(false)
+            .unwrap()
+            .iter()
+            .any(|i| {
+                i.name == "other-tools"
+                    && i.refused.iter().any(|r| {
+                        r.code == "approval.signature_invalid" && r.item_hash == refused_hash
+                    })
+            })
+    });
 }

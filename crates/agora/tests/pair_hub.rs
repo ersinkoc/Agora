@@ -526,6 +526,7 @@ async fn a_machine_is_paired_end_to_end_and_can_then_connect_with_its_certificat
     let _link = agora_node::uplink_client::spawn(
         Arc::clone(&sink),
         agora_node::uplink_client::HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("wss://localhost:{}", rig.addr.port()),
             ca_pem: result.ca_pem.clone(),

@@ -192,6 +192,7 @@ fn through_hub(n: &Node, e: &Env, cmds: Vec<Cmd>) -> Vec<CommandResponse> {
     let uplink = spawn(
         Arc::clone(&n.events),
         HubLink {
+            shared: None,
             url: format!("ws://127.0.0.1:{port}"),
             ca_pem: String::new(),
             cert_pem: String::new(),
@@ -831,6 +832,7 @@ fn hub_link(
     let uplink = spawn(
         Arc::clone(&n.events),
         HubLink {
+            shared: None,
             url: format!("ws://127.0.0.1:{port}"),
             ca_pem: String::new(),
             cert_pem: String::new(),

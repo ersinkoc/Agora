@@ -1662,7 +1662,9 @@ four requests below with `protocol.capability_missing` (`capability = mesh.spawn
 
 ## Shared skills and MCP servers (ADR-0122)
 
-The hub keeps the items and offers `share.items` (ADR-0122 step 2); no node offers it yet, and a node refuses the commands.
+The hub keeps the items and offers `share.items` (ADR-0122 step 2); a node offers it while its policy gives shared items (`share.items`,
+default on) and asks, on its own connection, `ShareItemList` (names, versions and scopes, never content, and never what other machines
+refused) and `ShareItemGet`; a node refuses the commands from a client.
 Publish, remove and list are the owner's alone; the hub checks each word as a node will (the owner's unrevoked device, the content
 hash, the rules in `agora_protocol::share`, a newer `issued_ms` than the word it replaces and at most 5 minutes ahead, at most 64 live
 items) and keeps the newest word per name (a removal too); `ShareItemGet` answers a node with that word.

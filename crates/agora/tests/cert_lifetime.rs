@@ -178,6 +178,7 @@ impl Rig {
         addr: SocketAddr,
     ) -> (Arc<EventSink>, agora_node::uplink_client::UplinkHandle) {
         let link = HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("wss://localhost:{}", addr.port()),
             ca_pem: self.ca_pem.clone(),
@@ -651,6 +652,7 @@ fn a_node_renews_its_own_short_certificate_and_stays_connected_past_the_original
     let r = renewer(&dir, real_ask(), 0);
     r.set_hub_offers(false);
     let link = |cert: &str, key: &str| HubLink {
+        shared: None,
         mesh_out: None,
         url: format!("wss://localhost:{}", addr.port()),
         ca_pem: rig.ca_pem.clone(),

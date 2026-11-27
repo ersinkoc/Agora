@@ -104,7 +104,17 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    captured older publish of it never comes back), the newest 256 removals at most. Tests: `shares.rs` units (the solo owner `owner`
    and a team owner's own id each publish only with their own devices), `dispatch.rs`, store migration, `tests/devices.rs` over a
    real socket.
-3. The node: not started. **The node is the authority, the hub only the first gate**: before it uses any item (a shared MCP server
+3. The node: in part (2026-11-27), step 3a done: `crates/agora-node/src/shared_items.rs`. The node asks its hub for the list (names,
+   versions and scopes, no content; `ShareItemList` on its own connection) when the link is set, every 60 s, and 5 s after an unanswered
+   ask; fetches a changed version with `ShareItemGet`; judges each word with its own trust (`NodeApprovals::remote_grant_term`: a
+   device this node trusts, in its term, not limited to projects), the content hash, the rules, the newest `issued_ms` it ever saw for
+   the name (kept in `<data>/shared-items/newest`, so a replay is refused after a restart too) and its policy (`share.items = on|off`,
+   default on, anything else off and a line not understood; `share.mcp_commands = a, b`, the only programs a shared MCP server may run
+   here). A word it cannot trust changes nothing it uses; only the owner's newer, trusted word its policy will not run ends the version
+   in use. A name the hub stops listing is dropped (the hub can only narrow). Each refusal is said once per version
+   (`ShareItemRefused`), and the node offers `share.items` while its policy gives items. End to end: `crates/agora/tests/hub_dial.rs`
+   `a_machine_uses_only_the_shared_items_a_device_it_trusts_signed`. Step 3b (giving the items to agents at launch, filling secrets,
+   `AgentStarted.shared_items`) is next. **The node is the authority, the hub only the first gate**: before it uses any item (a shared MCP server
    is a program it would start in agents), the node verifies the signed word itself against its own trusted devices (ADR-0061, not
    the hub's list), the content hash and the rules in `agora_protocol::share`, keeps the newest `issued_ms` per name itself, and
    applies `share.items` and `share.mcp_commands` (the hub cannot widen node policy).

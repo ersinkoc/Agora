@@ -335,6 +335,7 @@ async fn a_machine_pairs_with_the_number_the_owner_sees_and_then_connects_with_w
     let _link = agora_node::uplink_client::spawn(
         Arc::clone(&sink),
         agora_node::uplink_client::HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("wss://localhost:{}", rig.addr.port()),
             ca_pem: v.ca_pem.clone(),
@@ -940,6 +941,7 @@ async fn a_default_hub_is_paired_by_its_real_lan_address_and_the_node_then_conne
     let _link = agora_node::uplink_client::spawn(
         Arc::clone(&sink),
         agora_node::uplink_client::HubLink {
+            shared: None,
             mesh_out: None,
             url: format!("wss://{lan}:{port}"),
             ca_pem: v.ca_pem.clone(),

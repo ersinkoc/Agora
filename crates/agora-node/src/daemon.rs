@@ -1576,6 +1576,9 @@ pub struct Policy {
     pub mesh_fleet: bool,
     /// Routed commands that need a user-signed grant (`signed_commands = a, b*`; ADR-0041). Empty: none do.
     pub signed_commands: crate::grants::SignedCommands,
+    /// ADR-0122: whether this node gives its agents the owner's shared skills and MCP servers (`share.items = off` gives none), and
+    /// the only programs a shared MCP server may run here (`share.mcp_commands = npx, uvx`; unset: any).
+    pub share: crate::shared_items::SharePolicy,
     /// How agents are confined (`sandbox`, `sandbox.read`, `sandbox.write`; ADR-0047). Default: not at all.
     pub sandbox: crate::sandbox::SandboxPolicy,
     /// What each trusted device may sign (`device.<id>.projects = a, b`; ADR-0049). A device not named is not limited.
@@ -1659,6 +1662,7 @@ impl Default for Policy {
             remote_helpers: true,
             mesh_fleet: true,
             signed_commands: crate::grants::SignedCommands::default(),
+            share: crate::shared_items::SharePolicy::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
             device_projects: std::collections::BTreeMap::new(),
             resume: ResumePolicy::default(),
@@ -1764,6 +1768,24 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "mesh.remote_helpers" => p.remote_helpers = v.trim() == "true",
                 "mesh.fleet" => p.mesh_fleet = v.trim() == "true",
+                // ADR-0122: anything but `on` or `off` keeps it off (a typo never widens) and is a line not understood.
+                "share.items" => match v.trim() {
+                    "on" | "true" => p.share.on = true,
+                    "off" | "false" => p.share.on = false,
+                    _ => {
+                        p.share.on = false;
+                        p.problems.push(line.chars().take(80).collect());
+                    }
+                },
+                "share.mcp_commands" => {
+                    p.share.mcp_commands = Some(
+                        v.split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                    );
+                }
                 "files.show_secret" => p.show_secret = v.trim() == "true",
                 // ADR-0064: a value it does not understand keeps the default (and `workspaces.clean` off) and is a line not understood.
                 key if key.starts_with("workspaces.") => {
@@ -1955,6 +1977,8 @@ pub struct Node {
     pub grants: Arc<crate::grants::Grants>,
     /// Agents that start agents (ADR-0057).
     pub spawner: Arc<crate::spawn::Spawner>,
+    /// ADR-0122: the owner's shared skills and MCP servers this node verified and gives its agents.
+    pub shared: Arc<crate::shared_items::SharedItems>,
     /// The conversations of the agents without a terminal (ADR-0038, ADR-0090).
     pub chat: Arc<crate::chat::ChatBoard>,
     /// The devices this machine trusts and the endorsements and revocations the hub carries (ADR-0061).
@@ -2355,6 +2379,13 @@ impl Node {
         );
         // ADR-0119: starts other machines ask for, as the owner's policy allows.
         spawner.set_remote_helpers(policy.remote_helpers && policy.mesh_remote);
+        // ADR-0122: shared items, verified here with this node's own trust before any is used.
+        let shared = Arc::new(crate::shared_items::SharedItems::open(
+            &cfg.data_dir,
+            &cfg.node_id,
+            Arc::clone(&approvals),
+            policy.share.clone(),
+        ));
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
         // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,
         // `<home>/link/panel-port`, home being the data folder's parent).
@@ -2428,6 +2459,7 @@ impl Node {
                 Arc::clone(&chat),
                 Arc::clone(&spawner),
             );
+            let shared_tick = Arc::clone(&shared);
             let ledger_tick = Arc::clone(&ledger);
             std::thread::Builder::new()
                 .name("agora-supervise".into())
@@ -2636,6 +2668,9 @@ impl Node {
                             }
                         }
                         spawner.tick();
+                        // ADR-0122: the hub's shared items, asked for and verified; what this node refused is said.
+                        shared_tick.tick(Instant::now());
+                        ev.record_bodies(shared_tick.take_events());
                         // ADR-0090: versions of chat entries held back to keep to one per 150 ms go out once they are due.
                         chat.flush_due(now_ms());
                         for v in views.iter().filter(|v| v.running) {
@@ -3037,6 +3072,7 @@ impl Node {
             approvals,
             grants,
             spawner,
+            shared,
             chat: Arc::clone(&chat),
             devices,
             devices_watch: Some(devices_watch),

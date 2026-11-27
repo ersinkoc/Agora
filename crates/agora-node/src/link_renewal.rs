@@ -508,6 +508,7 @@ impl Renewer {
         let node_id = read(&self.dir, "node-id")?.trim().to_string();
         let (cert_pem, key_pem) = usable(&self.dir)?;
         let link = HubLink {
+            shared: None,
             url: read(&self.dir, "url")?.trim().to_string(),
             ca_pem: read(&self.dir, "ca.pem")?,
             cert_pem,
