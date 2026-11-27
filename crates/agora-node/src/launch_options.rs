@@ -54,6 +54,8 @@ pub struct LaunchChoice {
     pub args: Vec<String>,
     /// One of them makes the agent act without asking.
     pub skips_permissions: bool,
+    /// ADR-0066/ADR-0123: the settings applied, `(id, value)` in the manifest's order (their arguments are in `args`).
+    pub settings: Vec<(String, String)>,
 }
 
 /// What a start asked for: the chosen ids, and the ids whose "act without asking" confirmation the window showed and the user
@@ -161,6 +163,7 @@ pub fn choose(
                 setting: st.id.clone(),
             })?;
             choice.args.extend(args);
+            choice.settings.push((st.id.clone(), value.clone()));
         }
     }
     Ok(choice)
@@ -231,6 +234,14 @@ mod tests {
         assert_eq!(
             c.args,
             ["--continue", "--model", "gpt-6.1-sol", "--effort", "high"]
+        );
+        // ADR-0123: and are kept as chosen, in the same order, for `AgentStarted.launch_settings`.
+        assert_eq!(
+            c.settings,
+            [
+                ("model".to_string(), "gpt-6.1-sol".to_string()),
+                ("effort".to_string(), "high".to_string())
+            ]
         );
     }
 

@@ -1,5 +1,7 @@
 kind = "codex"
 display_name = "Codex"
+# ADR-0123: who serves its models.
+provider = "openai"
 version = "2026.11.20.1"
 min_engine = 5
 # ADR-0057: before Enter, the last `› ` row (the input box) must hold the typed prompt (and only it), above the shortcuts footer and

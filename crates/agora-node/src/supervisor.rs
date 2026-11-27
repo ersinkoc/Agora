@@ -751,6 +751,8 @@ pub struct AgentView {
     /// ADR-0059: the launch options it was started with, and whether one of them skips permissions.
     pub launch_options: Vec<String>,
     pub skips_permissions: bool,
+    /// ADR-0123: the launch settings it was started with, `(id, value)` (kept for its whole life, as the options are).
+    pub launch_settings: Vec<(String, String)>,
     /// ADR-0094: the kind of the program a person runs by hand in this plain terminal, found by its foreground program.
     pub runs_inside: Option<String>,
 }
@@ -954,6 +956,8 @@ pub struct KindInfo {
     pub launch_options: Vec<agora_adapters::manifest::LaunchOption>,
     /// ADR-0066: the kind's `[[launch.setting]]`s, in the manifest's order.
     pub settings: Vec<agora_adapters::manifest::LaunchSetting>,
+    /// ADR-0123: who serves the kind's models (the manifest's `provider`); empty when it does not say.
+    pub provider: String,
 }
 
 struct KindEntry {
@@ -1696,7 +1700,13 @@ impl Supervisor {
     /// the launch said so (`recorded_skips`), when this node's manifest says one of the options does, and when an option is no longer
     /// in the manifest (it cannot be told, so it is shown as skipping). Their arguments are not known again: a restart after a crash
     /// runs without them, as a resume does, and then the agent is shown without them (see `restart`).
-    pub fn set_kept_launch(&mut self, id: &AgentId, ids: &[String], recorded_skips: bool) {
+    pub fn set_kept_launch(
+        &mut self,
+        id: &AgentId,
+        ids: &[String],
+        recorded_skips: bool,
+        settings: &[(String, String)],
+    ) {
         let kind = self
             .agents
             .get(id)
@@ -1716,6 +1726,7 @@ impl Supervisor {
             ids: ids.to_vec(),
             args: Vec::new(),
             skips_permissions: skips,
+            settings: settings.to_vec(),
         };
         if let Some(e) = self.agents.get_mut(id) {
             e.launch = launch;
@@ -5188,6 +5199,7 @@ impl Supervisor {
                 parent: self.parents.get(id).cloned(),
                 launch_options: e.launch.ids.clone(),
                 skips_permissions: e.launch.skips_permissions,
+                launch_settings: e.launch.settings.clone(),
                 runs_inside: e.inside.clone(),
             })
             .collect();
@@ -5208,6 +5220,7 @@ impl Supervisor {
             parent: self.parents.get(id).cloned(),
             launch_options: e.launch.ids.clone(),
             skips_permissions: e.launch.skips_permissions,
+            launch_settings: e.launch.settings.clone(),
             runs_inside: None,
         }));
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -5276,6 +5289,7 @@ impl Supervisor {
                     program: program.unwrap_or_default().to_string(),
                     launch_options: m.launch.option.clone(),
                     settings: m.launch.setting.clone(),
+                    provider: m.provider.clone(),
                 }
             })
             .collect()

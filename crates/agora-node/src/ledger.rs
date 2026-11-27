@@ -76,6 +76,8 @@ pub struct Entry {
     /// ADR-0059: one of `launch_options` made the agent act without asking (the node's word at the launch, from `AgentStarted`). An
     /// agent the holder kept is still that process, so the next node shows it the same way (#907).
     pub skips_permissions: bool,
+    /// ADR-0123: the launch settings it was started with, `(id, value)`, from `AgentStarted` (re-stated after a take-up).
+    pub launch_settings: Vec<(String, String)>,
     pub started_at_ms: u64,
     pub updated_at_ms: u64,
     /// `working`, `blocked`, `idle`, `done` or `unknown`.
@@ -462,6 +464,7 @@ impl Entry {
             "session_id": self.session_id,
             "launch_options": self.launch_options,
             "skips_permissions": self.skips_permissions,
+            "launch_settings": self.launch_settings,
             "started_at_ms": self.started_at_ms,
             "updated_at_ms": self.updated_at_ms,
             "last_state": self.last_state,
@@ -513,6 +516,23 @@ impl Entry {
                 })
                 .unwrap_or_default(),
             skips_permissions: flag(v, "skips_permissions"),
+            launch_settings: v
+                .get("launch_settings")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| match p.as_array().map(Vec::as_slice) {
+                            Some([Value::String(id), Value::String(value)])
+                                if id.len() <= 32 && value.len() <= 64 =>
+                            {
+                                Some((id.clone(), value.clone()))
+                            }
+                            _ => None,
+                        })
+                        .take(8)
+                        .collect()
+                })
+                .unwrap_or_default(),
             started_at_ms: number(v, "started_at_ms"),
             updated_at_ms: number(v, "updated_at_ms"),
             last_state: field(v, "last_state"),
@@ -1244,6 +1264,14 @@ fn apply(st: &mut State, body: &Body, now: u64) -> bool {
                 .cloned()
                 .collect();
             e.skips_permissions = a.skips_permissions;
+            // ADR-0123: as the node applied them (bounded as the protocol says).
+            e.launch_settings = a
+                .launch_settings
+                .iter()
+                .filter(|s| s.id.len() <= 32 && s.value.len() <= 64)
+                .take(8)
+                .map(|s| (s.id.clone(), s.value.clone()))
+                .collect();
             match workspace {
                 Some(w) => {
                     e.directory = true;
@@ -1643,6 +1671,44 @@ mod tests {
         assert_eq!(e.launch_options, vec!["skip".to_string()]);
         again.observe(&started("agent-1", "/wt/a", ""), 4);
         assert!(!again.get("agent-1").unwrap().skips_permissions);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ADR-0123: the launch settings an agent was started with are kept through a reopen (a take-up re-states them), bounded as the
+    /// protocol says, and the next start of the agent says its own.
+    #[test]
+    fn launch_settings_are_kept_across_a_reopen() {
+        let dir = temp("settings");
+        let l = Ledger::open(&dir, 1).unwrap();
+        let setting = |id: &str, value: &str| v1::LaunchSetting {
+            id: id.into(),
+            value: value.into(),
+        };
+        l.observe(
+            &Body::AgentStarted(v1::AgentStarted {
+                agent_id: "agent-1".into(),
+                kind: "fake".into(),
+                worktree_id: "/wt/a".into(),
+                launch_settings: vec![
+                    setting("model", "opus"),
+                    setting("effort", &"x".repeat(65)),
+                    setting("effort", "high"),
+                ],
+                ..Default::default()
+            }),
+            2,
+        );
+        l.flush().unwrap();
+        let again = Ledger::open(&dir, 3).unwrap();
+        assert_eq!(
+            again.get("agent-1").unwrap().launch_settings,
+            [
+                ("model".to_string(), "opus".to_string()),
+                ("effort".to_string(), "high".to_string())
+            ]
+        );
+        again.observe(&started("agent-1", "/wt/a", ""), 4);
+        assert!(again.get("agent-1").unwrap().launch_settings.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -763,6 +763,7 @@ fn launch_of(v: &crate::supervisor::AgentView) -> crate::launch_options::LaunchC
         ids: v.launch_options.clone(),
         args: Vec::new(),
         skips_permissions: v.skips_permissions,
+        settings: v.launch_settings.clone(),
     }
 }
 
@@ -924,7 +925,7 @@ fn execute(ctx: &ControlContext, cmd: &Cmd) -> Result<v1::CommandOk, Error> {
                 .kinds()
                 .into_iter()
                 .map(|k| v1::AgentKind {
-                    provider: String::new(),
+                    provider: k.provider,
                     kind: k.kind,
                     display_name: k.display_name,
                     level: match k.level {
@@ -2151,6 +2152,7 @@ pub(crate) fn resume_agent(
                         ids: v.launch_options.clone(),
                         args: Vec::new(),
                         skips_permissions: v.skips_permissions,
+                        settings: v.launch_settings.clone(),
                     })
                     .unwrap_or_default(),
                 views.iter().find(|v| v.id == id).and_then(|v| v.run_id),

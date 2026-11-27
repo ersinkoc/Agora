@@ -855,6 +855,16 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 } else {
                     String::new()
                 },
+                model: agent_model(a),
+                effort: agent_effort(a),
+                launch_settings: a
+                    .launch_settings
+                    .iter()
+                    .map(|(id, value)| v1::LaunchSetting {
+                        id: id.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
                 ..session_snapshot(&a.session)
             })
             .collect(),
@@ -2251,8 +2261,60 @@ fn session_snapshot(s: &crate::projection::SessionView) -> v1::AgentSnapshot {
         context_window: s.context_window,
         cost_micros: s.cost_micros,
         currency: s.currency.clone(),
+        // ADR-0123: the options with their current values, so a window that connects later has them.
+        config: s
+            .config
+            .as_ref()
+            .map(|c| {
+                c.options
+                    .iter()
+                    .take(MAX_SNAPSHOT_CONFIG)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..v1::AgentSnapshot::default()
     }
+}
+
+/// ADR-0123: the most config options an agent's snapshot carries.
+const MAX_SNAPSHOT_CONFIG: usize = 16;
+
+/// ADR-0123: a launch setting's value, empty when the agent was not started with it.
+fn launch_setting<'a>(a: &'a crate::projection::AgentView, id: &str) -> &'a str {
+    a.launch_settings
+        .iter()
+        .find(|(i, _)| i == id)
+        .map_or("", |(_, v)| v.as_str())
+}
+
+/// ADR-0123: the model the agent runs on, from the first that is known: its adapter's current model, the launch setting `model`, the
+/// model it last reported with its usage.
+fn agent_model(a: &crate::projection::AgentView) -> String {
+    let current = a
+        .session
+        .options
+        .as_ref()
+        .map_or("", |o| o.current_model.as_str());
+    [current, launch_setting(a, "model"), a.model.as_str()]
+        .into_iter()
+        .find(|m| !m.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// ADR-0123: the reasoning effort, from the adapter's THOUGHT_LEVEL option's current value, else the launch setting `effort`.
+fn agent_effort(a: &crate::projection::AgentView) -> String {
+    let reported = a.session.config.as_ref().and_then(|c| {
+        c.options
+            .iter()
+            .find(|o| o.category == v1::SessionConfigCategory::ThoughtLevel as i32)
+            .map(|o| o.current.as_str())
+    });
+    reported
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| launch_setting(a, "effort"))
+        .to_string()
 }
 
 /// ADR-0061: the device commands a client sends, answered here; `None` for any other command. Registering and listing are open to

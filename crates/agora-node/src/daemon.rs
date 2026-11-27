@@ -395,6 +395,17 @@ fn proto_state(s: AgentState) -> v1::AgentState {
     }
 }
 
+/// ADR-0123: `(id, value)` launch settings as `AgentStarted` carries them.
+fn settings_of(settings: &[(String, String)]) -> Vec<v1::LaunchSetting> {
+    settings
+        .iter()
+        .map(|(id, value)| v1::LaunchSetting {
+            id: id.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
 impl EventSink {
     pub fn open(dir: &Path, producer: &str) -> io::Result<Self> {
         Self::open_with_cap(dir, producer, EVENT_BUFFER_BYTES)
@@ -688,7 +699,7 @@ impl EventSink {
             .map(|e| (e.parent_node_id, e.parent_node_agent_id))
             .unwrap_or_default();
         record(Body::AgentStarted(v1::AgentStarted {
-            launch_settings: Vec::new(),
+            launch_settings: settings_of(&view.launch_settings),
             run_id: view.run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.into(),
             project_id: view.project.clone(),
@@ -884,7 +895,7 @@ impl EventSink {
         remote: Option<&RemoteParent>,
     ) {
         self.record(Body::AgentStarted(v1::AgentStarted {
-            launch_settings: Vec::new(),
+            launch_settings: settings_of(&launch.settings),
             run_id: run_id.map(Vec::from).unwrap_or_default(),
             agent_id: agent.as_str().to_string(),
             project_id: project.to_string(),
@@ -3671,6 +3682,7 @@ fn take_up_held(
             &AgentId::new(id.clone()),
             &entry.launch_options,
             entry.skips_permissions,
+            &entry.launch_settings,
         );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
@@ -3757,6 +3769,7 @@ fn take_up_held(
             &AgentId::new(id.clone()),
             &entry.launch_options,
             entry.skips_permissions,
+            &entry.launch_settings,
         );
         if !entry.parent_agent_id.is_empty() {
             sup.set_parent(
@@ -3973,6 +3986,7 @@ mod announce_tests {
 
     fn view(id: &str, running: bool, terminal: bool) -> AgentView {
         AgentView {
+            launch_settings: Vec::new(),
             directory: false,
             terminal: terminal && running,
             level: agora_core::IntegrationLevel::L1Manifest,
@@ -4805,6 +4819,7 @@ mod process_record_tests {
         use crate::supervisor::{AgentView, SupervisorEvent};
         use agora_core::AgentState;
         let view = |running: bool, state: AgentState| AgentView {
+            launch_settings: Vec::new(),
             directory: false,
             terminal: true,
             level: agora_core::IntegrationLevel::L1Manifest,

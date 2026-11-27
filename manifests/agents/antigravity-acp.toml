@@ -1,5 +1,7 @@
 kind = "antigravity-acp"
 display_name = "Antigravity (structured)"
+# ADR-0123: who serves its models.
+provider = "google"
 version = "2026.11.13.2"
 min_engine = 2
 

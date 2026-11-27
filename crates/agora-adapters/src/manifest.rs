@@ -503,6 +503,10 @@ fn spawnable_env(env: &BTreeMap<String, String>) -> bool {
 pub struct Manifest {
     pub kind: String,
     pub display_name: String,
+    /// ADR-0123: who serves the kind's models (`anthropic`, `openai`, ...: `[a-z0-9-]`, at most 32), shown beside the agent; empty when
+    /// the kind can use many providers or the manifest does not say. Older engines ignore it.
+    #[serde(default)]
+    pub provider: String,
     pub version: String,
     pub min_engine: u32,
     #[serde(default)]
@@ -709,6 +713,14 @@ impl Manifest {
         }
         if self.min_engine == 0 {
             return Err(invalid("min_engine"));
+        }
+        if self.provider.len() > 32
+            || !self
+                .provider
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return Err(invalid("provider"));
         }
         if self.display_name.trim().is_empty()
             || self
@@ -1029,6 +1041,18 @@ mod launch_tests {
 
     fn plain(tail: &str) -> String {
         format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{tail}")
+    }
+
+    /// ADR-0123: a manifest may say who serves its models; a provider in the wrong form refuses the manifest.
+    #[test]
+    fn a_provider_is_a_short_plain_id() {
+        let p = |line: &str| Manifest::parse(&format!("{line}\n{}", with("")));
+        assert_eq!(p("").unwrap().provider, "");
+        assert_eq!(p("provider = \"anthropic\"").unwrap().provider, "anthropic");
+        let long = "a".repeat(33);
+        for bad in ["Anthropic", "open ai", "x/y", "\\u001b[2J", long.as_str()] {
+            assert!(p(&format!("provider = \"{bad}\"")).is_err(), "{bad}");
+        }
     }
 
     #[test]

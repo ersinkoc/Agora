@@ -799,8 +799,8 @@ All additions; nothing published changed.
   `commands.proto`; same name and wire).
 - `AgentSnapshot.model` (49), `effort` (50), `config` (51, the last `AgentSessionConfig` options, at most 16) and `launch_settings`
   (52), filled by the hub's projection: `model` is the adapter's current model, else the launch setting `model`, else the model last
-  reported with usage; `effort` is the THOUGHT_LEVEL option's current value, else the launch setting `effort`. Schema only for now:
-  no node or hub fills them yet (ADR-0123 build step 2).
+  reported with usage; `effort` is the THOUGHT_LEVEL option's current value, else the launch setting `effort`. The node fills
+  `provider` from the manifest and `launch_settings` from the start (kept in its ledger for a take-up); the hub fills the snapshot.
 
 ### Launch options (ADR-0059)
 

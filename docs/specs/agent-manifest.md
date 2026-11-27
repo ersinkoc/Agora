@@ -43,6 +43,7 @@ user and global npm and uv configuration still apply; the agent gets the project
 ```toml
 kind = "example-agent"          # stable id, lowercase, used in protocol and UI
 display_name = "Example Agent"  # brand name, not translated
+provider = "example-provider"   # ADR-0123: who serves its models, [a-z0-9-] at most 32; omit when it can use many
 version = "2026.11.06.1"        # manifest version
 min_engine = 2                  # 6 with `[structured] allow_always` (ADR-0101), 5 with `[quota]` (ADR-0091), 4 with `[accounts] credential_env` (ADR-0084), 3 with [[launch.setting]] (ADR-0066), 2 with [[launch.option]] (ADR-0059); 1 otherwise
 

@@ -72,5 +72,12 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("every agent's pro
    (50), `config` (51), `launch_settings` (52); `LaunchSetting` moved to `common.proto` (same name and wire); round-trip and
    old-fixture test `crates/agora-protocol/tests/agent_model_effort.rs`; `protocol.md` "Provider, model and effort". Nothing fills
    the fields yet.
-2. Node and hub: not started.
-3. Window: not started.
+2. Node and hub: done. The manifest's top-level `provider` (validated; `claude-code` anthropic, `codex` openai, `antigravity-acp`
+   google), `KindInfo.provider` → `AgentKind.provider`; `LaunchChoice.settings` (what `choose` applied) → `AgentStarted.launch_settings`,
+   kept in the ledger and restored at a take-up (`set_kept_launch`); the hub's projection keeps them, and `snapshot_of` fills
+   `model` (adapter current model, launch setting, usage model), `effort` (THOUGHT_LEVEL current, launch setting) and `config`
+   (at most 16). The manifest key is top-level `provider`, not `[agent] provider` (manifests have no `[agent]` table).
+3. Window: in part. `net/view.ts` `modelAndEffort` works out the same model and effort from what the window was told (a start's
+   launch settings, its usage, its adapter's options and config, or the snapshot), and the agent's pane header shows them as a chip
+   (`components/ModelChip.tsx`, "opus · high", the whole of both as its name). Not yet: the provider mark (the window does not read
+   `AgentKind.provider` yet), the chip on the tile, the tree and the phone row, and filters by provider and model.

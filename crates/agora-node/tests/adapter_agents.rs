@@ -817,7 +817,7 @@ fn only_an_adapter_taken_up_from_the_holder_loses_its_launch_options_at_a_crash_
     // Its options put back from the ledger as at a take-up: the restarted process runs without their arguments, so it is shown without.
     let kept = start(&mut s, &e, "kept");
     settle(&mut s, &kept, AgentState::Idle);
-    s.set_kept_launch(&kept, &["skip".to_string()], true);
+    s.set_kept_launch(&kept, &["skip".to_string()], true, &[]);
     assert_eq!(launch_of(&s, &kept), (vec!["skip".to_string()], true));
     assert!(s.skips_permissions_now(&kept));
     let _ = s.adapter_prompt(&kept, "crash", false);

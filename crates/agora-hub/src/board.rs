@@ -1745,6 +1745,7 @@ mod tests {
             v.agents.insert(
                 format!("{n}/a"),
                 AgentView {
+                    launch_settings: Vec::new(),
                     run_id: None,
                     started_seq: 0,
                     node_id: (*n).into(),

@@ -129,6 +129,8 @@ pub struct AgentView {
     /// ADR-0059: the launch options it was started with, and whether it acts without asking (the badge).
     pub launch_options: Vec<String>,
     pub skips_permissions: bool,
+    /// ADR-0123: `AgentStarted.launch_settings`, `(id, value)` (at most 8).
+    pub launch_settings: Vec<(String, String)>,
     /// ADR-0060: the node found this agent interrupted (running when the node stopped). Cleared by its next `AgentStarted`.
     pub interrupted: Option<InterruptedView>,
     /// ADR-0101: the "always" answers the agent's process holds, as `(approval id, action)`, newest last, at most
@@ -1006,6 +1008,12 @@ impl View {
                         parent_node_agent_id: e.parent_node_agent_id.clone(),
                         interrupted: None,
                         launch_options: e.launch_options.clone(),
+                        launch_settings: e
+                            .launch_settings
+                            .iter()
+                            .take(8)
+                            .map(|s| (s.id.clone(), s.value.clone()))
+                            .collect(),
                         skips_permissions: e.skips_permissions,
                         always_allowed: Vec::new(),
                         runs_inside: String::new(),
@@ -1045,6 +1053,7 @@ impl View {
                         interrupted: None,
                         launch_options: Vec::new(),
                         skips_permissions: false,
+                        launch_settings: Vec::new(),
                         always_allowed: Vec::new(),
                         runs_inside: String::new(),
                     });
@@ -1537,6 +1546,74 @@ mod tests {
         assert!(!v
             .quota
             .contains_key(&("n3".into(), "codex".into(), "seven_day".into())));
+    }
+
+    /// ADR-0123: the snapshot says the model and effort of every agent, one way for every kind: a terminal agent's from its launch
+    /// settings, then what its usage or its adapter reported, which wins.
+    #[test]
+    fn the_snapshot_says_each_agents_model_and_effort() {
+        use agora_protocol::v1;
+        let mut v = View::default();
+        let setting = |id: &str, value: &str| v1::LaunchSetting {
+            id: id.into(),
+            value: value.into(),
+        };
+        let mut start = started("a");
+        if let Body::AgentStarted(s) = &mut start {
+            s.launch_settings = vec![setting("model", "opus"), setting("effort", "high")];
+        }
+        v.apply(&ev("n1", 1, start));
+        v.apply(&ev("n1", 2, started("b")));
+        let shown = |v: &View, id: &str| {
+            let snap = crate::server::snapshot_of(v, 0);
+            let a = snap
+                .agents
+                .iter()
+                .find(|a| a.agent_id == id)
+                .unwrap()
+                .clone();
+            (a.model, a.effort, a.launch_settings.len(), a.config.len())
+        };
+        assert_eq!(shown(&v, "n1/a"), ("opus".into(), "high".into(), 2, 0));
+        assert_eq!(shown(&v, "n1/b"), (String::new(), String::new(), 0, 0));
+        // An adapter's own report wins over the launch setting.
+        v.apply(&ev(
+            "n1",
+            3,
+            Body::AgentSessionOptions(v1::AgentSessionOptions {
+                agent_id: "a".into(),
+                current_model: "claude-opus-5".into(),
+                ..Default::default()
+            }),
+        ));
+        v.apply(&ev(
+            "n1",
+            4,
+            Body::AgentSessionConfig(v1::AgentSessionConfig {
+                agent_id: "a".into(),
+                options: vec![v1::SessionConfigOption {
+                    id: "thought".into(),
+                    category: v1::SessionConfigCategory::ThoughtLevel as i32,
+                    current: "max".into(),
+                    ..Default::default()
+                }],
+            }),
+        ));
+        assert_eq!(
+            shown(&v, "n1/a"),
+            ("claude-opus-5".into(), "max".into(), 2, 1)
+        );
+        // Without settings or an adapter, the model its usage reported.
+        v.apply(&ev(
+            "n1",
+            5,
+            Body::AgentUsageReported(AgentUsageReported {
+                agent_id: "b".into(),
+                model: "gpt-6".into(),
+                ..Default::default()
+            }),
+        ));
+        assert_eq!(shown(&v, "n1/b").0, "gpt-6");
     }
 
     fn ev(producer: &str, seq: u64, body: Body) -> Event {

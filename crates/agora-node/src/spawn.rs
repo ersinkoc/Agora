@@ -766,6 +766,10 @@ impl Spawner {
                     .unwrap_or_default(),
                 args: Vec::new(),
                 skips_permissions: view.as_ref().is_some_and(|v| v.skips_permissions),
+                settings: view
+                    .as_ref()
+                    .map(|v| v.launch_settings.clone())
+                    .unwrap_or_default(),
             };
             let run_id = view.as_ref().and_then(|v| v.run_id);
             match remote {
