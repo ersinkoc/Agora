@@ -539,6 +539,15 @@ fn build_output_that_is_tracked_or_a_link_is_kept() {
     fs::write(elsewhere.join("keep.txt"), "keep\n").unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&elsewhere, rig.work.join("target")).unwrap();
+    // On Windows a junction, which needs no privilege (a directory symlink does).
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(rig.work.join("target"))
+        .arg(&elsewhere)
+        .status()
+        .unwrap()
+        .success());
     let users = rig.ended(T0);
     rig.clean(&users, T0, true);
     let out = rig.clean(&users, T0 + 24 * H, true);

@@ -249,6 +249,8 @@ fn the_node_records_its_worktrees_keeps_them_while_used_and_they_go_once_their_a
     let dir = e.root.join("data").join("workspaces");
     let own_folder = PathBuf::from(e.node().ledger.get(&own).unwrap().folder);
     let own_folder = agora_platform::canonicalize_plain(&own_folder).unwrap();
+    // The records are JSON, which escapes a Windows path's backslashes: look for the path as JSON writes it.
+    let own_json = serde_json::to_string(own_folder.to_str().unwrap()).unwrap();
     let records: Vec<PathBuf> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|x| x.unwrap().path())
@@ -256,11 +258,7 @@ fn the_node_records_its_worktrees_keeps_them_while_used_and_they_go_once_their_a
         .collect();
     let claimed = records
         .iter()
-        .find(|p| {
-            std::fs::read_to_string(p)
-                .unwrap()
-                .contains(own_folder.to_str().unwrap())
-        })
+        .find(|p| std::fs::read_to_string(p).unwrap().contains(&own_json))
         .unwrap()
         .clone();
     std::fs::rename(&claimed, claimed.with_extension("claim")).unwrap();
