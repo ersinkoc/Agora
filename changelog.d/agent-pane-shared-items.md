@@ -1,0 +1,1 @@
+- An agent's pane says which servers shared with agents it was started with ("2 shared", the names in its tooltip); a change reaches it at its next start.

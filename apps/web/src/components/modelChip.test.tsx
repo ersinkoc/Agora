@@ -10,7 +10,7 @@ import { readKnown } from '../net/agentKinds';
 import { demoAgents, demoMachines } from '../fixtures';
 import { FleetConsole } from './FleetConsole';
 import { AgentTile } from './AgentTile';
-import { ModelChip, providerName } from './ModelChip';
+import { ModelChip, SharedChip, providerName } from './ModelChip';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -114,5 +114,28 @@ describe('model and effort', () => {
     expect(tilesShown()).toBe(1);
     act(() => { select.value = ''; select.dispatchEvent(new Event('change', { bubbles: true })); });
     expect(tilesShown()).toBe(all);
+  });
+});
+
+// ADR-0122 decision 7: an agent's pane says which shared servers it was started with, from its start and from the hub's snapshot.
+describe('shared with agents', () => {
+  it('comes from the start and from the snapshot, and a new start replaces it', () => {
+    const v = emptyView();
+    applyEvent(v, 1, { producerId: 'mac', body: 'agentStarted', agentStarted: { agentId: 'agent-1', nodeId: 'mac', kind: 'claude-code', sharedItems: [{ name: 'db', itemHash: 'h1' }, { name: '', itemHash: 'x' }, { name: 'docs', itemHash: 'h2' }] } } as never);
+    expect(tiles(v).find((x) => x.id === 'mac/agent-1')?.sharedItems).toEqual(['db', 'docs']);
+    applyEvent(v, 2, { producerId: 'mac', body: 'agentStarted', agentStarted: { agentId: 'agent-1', nodeId: 'mac', kind: 'claude-code' } } as never);
+    expect(tiles(v).find((x) => x.id === 'mac/agent-1')?.sharedItems).toBeUndefined();
+    const s = fromSnapshot({ agents: [{ agentId: 'mac/agent-3', nodeId: 'mac', kind: 'claude-code', running: true, sharedItems: [{ name: 'db', itemHash: 'h1' }] }] } as never);
+    expect(tiles(s).find((x) => x.id === 'mac/agent-3')?.sharedItems).toEqual(['db']);
+  });
+
+  it('shows a count with the names in words, and nothing without any', () => {
+    act(() => root.render(<SharedChip agent={{ sharedItems: ['db', 'docs\u202e'] }} />));
+    const chip = host.querySelector('[data-shared-chip]');
+    expect(chip?.textContent).toBe('2 shared');
+    expect(chip?.getAttribute('aria-label')).toContain('db, docs');
+    expect(chip?.getAttribute('aria-label')).not.toContain('\u202e');
+    act(() => root.render(<SharedChip agent={{}} />));
+    expect(host.querySelector('[data-shared-chip]')).toBeNull();
   });
 });

@@ -46,11 +46,18 @@ export interface AgentV {
   // snapshot, the model the hub worked out).
   launchSettings?: { id: string; value: string }[];
   usageModel?: string;
+  // ADR-0122 decision 7: the shared items it was started with (`AgentStarted.shared_items`), name and version, at most 32.
+  sharedItems?: { name: string; hash: string }[];
 }
 
 // ADR-0123: the model an agent runs on and its reasoning effort, one way for every kind (as the hub's snapshot works them out): the
 // adapter's current model (its name when it lists it), else the launch setting `model`, else the model its usage named; the adapter's
 // thought-level option (its choice's name), else the launch setting `effort`. Empty when not known. Every word is the agent's own.
+/** ADR-0122: the shared items an agent was started with, as the hub or its node said them (at most 32, unnamed ones left out). */
+export function sharedItemsOfStart(items: readonly { name?: string | null; itemHash?: string | null }[]): { name: string; hash: string }[] {
+  return items.filter((i) => !!i.name).slice(0, 32).map((i) => ({ name: i.name ?? '', hash: i.itemHash ?? '' }));
+}
+
 export function modelAndEffort(a: Pick<AgentV, 'session' | 'launchSettings' | 'usageModel'>): { model: string; effort: string } {
   const setting = (id: string) => a.launchSettings?.find((s) => s.id === id)?.value ?? '';
   const s = a.session;
@@ -243,6 +250,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       ...(a.running && a.runsInside && insideKind(a.runsInside) ? { runsInside: a.runsInside } : {}),
       ...(a.launchSettings?.length ? { launchSettings: a.launchSettings.slice(0, 8).map((s) => ({ id: s.id ?? '', value: s.value ?? '' })) } : {}),
       ...(a.model ? { usageModel: a.model } : {}),
+      ...(a.sharedItems?.length ? { sharedItems: sharedItemsOfStart(a.sharedItems) } : {}),
     });
     const modes = optionsOf(a.modes, true), models = optionsOf(a.models, false);
     const reported = a.costMicros !== undefined && a.costMicros !== null && !!a.currency;
@@ -453,6 +461,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
         skipsPermissions: !!b.skipsPermissions,
         ...(session ? { session } : {}),
         ...(b.launchSettings?.length ? { launchSettings: b.launchSettings.slice(0, 8).map((s: { id?: string | null; value?: string | null }) => ({ id: s.id ?? '', value: s.value ?? '' })) } : {}),
+        ...(b.sharedItems?.length ? { sharedItems: sharedItemsOfStart(b.sharedItems) } : {}),
       });
       break;
     }
@@ -749,6 +758,7 @@ export function tiles(v: View, kindName?: (node: string, kind: string) => string
       ...me,
       provider: providerOf(shownKind ? kindProvider?.(a.nodeId, shownKind) : undefined, me.model),
       ...(a.running && a.alwaysAllowed?.length ? { alwaysAllowed: a.alwaysAllowed.map((h) => h.action) } : {}),
+      ...(a.sharedItems?.length ? { sharedItems: a.sharedItems.map((i) => i.name) } : {}),
       ...(a.running && a.runsInside ? { runsInside: { kind: a.runsInside, name: kindName?.(a.nodeId, a.runsInside) || kindWords(a.runsInside) } } : {}),
     } as AgentTileModel;
   });

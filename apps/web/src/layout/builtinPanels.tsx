@@ -8,7 +8,7 @@ import { asksUnderHeader } from '../net/chatView';
 import { AgentAddress } from '../components/AgentAddress';
 import { AsksLessChip } from '../components/AllowAlways';
 import { RunsInsideChip } from '../components/RunsInside';
-import { ModelChip } from '../components/ModelChip';
+import { ModelChip, SharedChip } from '../components/ModelChip';
 import { ApprovalBanners } from '../components/ApprovalBanner';
 import { CloseAgentContext, CloseAgentMenu, CloseConfirm } from '../components/CloseAgent';
 import { ChatActionsContext } from '../components/chatActions';
@@ -85,6 +85,7 @@ function agentView(ctx: PanelContext, a: AgentTileModel): ReactNode {
           {a.shared && <span role="img" className="ms-1 inline-flex flex-none text-muted" title={t('workspace-shared')} aria-label={t('workspace-shared')} data-shared-mark><Icon name="shared" className="size-3.5" /></span>}
           <RunsInsideChip agent={a} />
           <ModelChip agent={a} />
+          <SharedChip agent={a} />
           <NoAskBadge agent={a} />
           <AsksLessChip agent={a} />
         </div>

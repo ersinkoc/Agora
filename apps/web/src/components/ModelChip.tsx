@@ -1,6 +1,7 @@
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { visible } from '../net/view';
+import { Icon } from './Icon';
 import { plain } from './boardColumns';
 
 /** A provider's name in the UI's words (`provider-<id>` in the locale files), else its id as the manifest wrote it. */
@@ -34,6 +35,20 @@ export function ModelChip({ agent, nested }: { agent: Pick<AgentTileModel, 'mode
   return (
     <span role="img" aria-label={words.full} data-model-chip className="tip ide-chip w-fit max-w-[24ch] flex-none self-center justify-self-start" {...props}>
       <span aria-hidden className="truncate">{words.short}</span>
+    </span>
+  );
+}
+
+// ADR-0122 decision 7: what of Settings → Shared with agents this agent was started with ("2 shared"); the names are the tooltip. It is
+// what it started with: a server shared or changed later reaches it at its next start. Nothing when it was started with none.
+export function SharedChip({ agent, nested }: { agent: Pick<AgentTileModel, 'sharedItems'>; nested?: boolean }) {
+  const names = (agent.sharedItems ?? []).map((n) => visible(plain(n, 48)));
+  if (names.length === 0) return null;
+  const full = t('agent-shared-title', { count: names.length, names: names.join(', ') });
+  const props = nested ? { title: full } : { tabIndex: 0, 'data-tip': full };
+  return (
+    <span role="img" aria-label={full} data-shared-chip className="tip ide-chip w-fit flex-none items-center gap-1 self-center" {...props}>
+      <Icon name="puzzle" className="size-3.5" /><span aria-hidden>{t('agent-shared-chip', { count: names.length })}</span>
     </span>
   );
 }

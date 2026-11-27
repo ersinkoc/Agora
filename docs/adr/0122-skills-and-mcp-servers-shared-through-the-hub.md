@@ -186,5 +186,5 @@ mesh tool, not a hub message): proposed as a mesh tool name only, no schema chan
    secret: not given to agents yet"), and publishes, changes and removes a server, each word signed by this device
    (`apps/web/src/net/share.ts`, the shared vectors; a change is signed after the word it replaces). The form keeps secrets off the
    command line, warns that an agent may send what it reads to an address, and says that a server naming a secret is not given to
-   agents yet. Not built: skills in the form (step 5 first), a scope of some kinds only, and the agent's started-with list in its details.
+   agents yet. Not built: skills in the form (step 5 first) and a scope of some kinds only. The agent's started-with list is built: the hub keeps `AgentStarted.shared_items` (at most 32) in `AgentSnapshot.shared_items`, replaced by the agent's next start, and the agent's pane says "2 shared" with the names in its tooltip (`SharedChip`).
 5. Skills per kind: not started.

@@ -59,6 +59,7 @@ export interface AgentTileModel {
   model?: string; // ADR-0123: the model it runs on (`modelAndEffort`), empty when not known; the agent's own words
   effort?: string; // ADR-0123: its reasoning effort, empty when not known
   provider?: string; // ADR-0123: the provider id (`anthropic`, …) from its kind's manifest, else from a `provider/model` model id; empty when not known
+  sharedItems?: string[]; // ADR-0122 decision 7: the names of the shared items (Settings → Shared with agents) it was started with
   alwaysAllowed?: string[]; // ADR-0101: the actions of the "always" answers it holds (the "Asks less" chip), newest last
   runsInside?: { kind: string; name: string }; // ADR-0094: the agent a person runs by hand in this Shell (its kind and display name), while it runs
   // ADR-0094: the agent's own kind (`shell`) while another agent runs inside it; `kind` and `name` then show that agent, so the Shell is

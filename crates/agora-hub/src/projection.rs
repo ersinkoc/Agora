@@ -99,6 +99,9 @@ const MAX_CONFIG_OPTIONS: usize = 64;
 const MAX_CONFIG_CHOICES: usize = 64;
 const MAX_COMMANDS: usize = 100;
 
+/// ADR-0122 (open question 4): at most this many shared items are given to one agent, so at most this many are kept for it.
+pub const MAX_SHARED_ITEMS: usize = 32;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentView {
     pub(crate) run_id: Option<[u8; 16]>,
@@ -143,6 +146,9 @@ pub struct AgentView {
     /// ADR-0094: the kind of the program a person runs by hand in this plain terminal (`AgentRunsInside`); empty when none. Only a
     /// running agent has one (a node sends it for its `shell` agents); cleared by its next `AgentStarted`, its end, its interruption and its node's start.
     pub runs_inside: String,
+    /// ADR-0122: the shared items it was started with (`AgentStarted.shared_items`), `(name, item hash)`, at most
+    /// [`MAX_SHARED_ITEMS`]. Replaced by its next `AgentStarted`; kept after it ends, since it says what that run had.
+    pub shared_items: Vec<(String, String)>,
 }
 
 /// ADR-0094: a kind id the hub keeps from `AgentRunsInside`: a manifest's id, at most 64 lowercase letters, digits, `-`, `_` or `.`.
@@ -1077,6 +1083,12 @@ impl View {
                         skips_permissions: e.skips_permissions,
                         always_allowed: Vec::new(),
                         runs_inside: String::new(),
+                        shared_items: e
+                            .shared_items
+                            .iter()
+                            .take(MAX_SHARED_ITEMS)
+                            .map(|i| (i.name.clone(), i.item_hash.clone()))
+                            .collect(),
                     },
                 );
             }
@@ -1118,6 +1130,7 @@ impl View {
                         launch_settings: Vec::new(),
                         always_allowed: Vec::new(),
                         runs_inside: String::new(),
+                        shared_items: Vec::new(),
                     });
                 a.running = false;
                 a.awaiting_restart_start = false;
@@ -1634,6 +1647,41 @@ mod tests {
         assert!(!v
             .quota
             .contains_key(&("n3".into(), "codex".into(), "seven_day".into())));
+    }
+
+    /// ADR-0122 decision 7: the snapshot says which shared items each agent was started with (at most [`MAX_SHARED_ITEMS`]); its next
+    /// start replaces them.
+    #[test]
+    fn the_snapshot_says_which_shared_items_each_agent_started_with() {
+        use agora_protocol::v1;
+        let item = |n: usize| v1::SharedItemRef {
+            name: format!("db{n}"),
+            item_hash: format!("h{n}"),
+        };
+        let mut v = View::default();
+        let mut start = started("a");
+        if let Body::AgentStarted(s) = &mut start {
+            s.shared_items = (0..40).map(item).collect();
+        }
+        v.apply(&ev("n1", 1, start));
+        let items = |v: &View| {
+            crate::server::snapshot_of(v, 0)
+                .agents
+                .iter()
+                .find(|a| a.agent_id == "n1/a")
+                .unwrap()
+                .shared_items
+                .clone()
+        };
+        let first = items(&v);
+        assert_eq!(first.len(), MAX_SHARED_ITEMS);
+        assert_eq!(first[0], item(0));
+        let mut again = started("a");
+        if let Body::AgentStarted(s) = &mut again {
+            s.shared_items = vec![item(7)];
+        }
+        v.apply(&ev("n1", 2, again));
+        assert_eq!(items(&v), vec![item(7)]);
     }
 
     /// ADR-0123: the snapshot says the model and effort of every agent, one way for every kind: a terminal agent's from its launch

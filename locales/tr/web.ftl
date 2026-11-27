@@ -941,6 +941,12 @@ fleet-model-count = { $name } ({ $count })
 agent-model-title = Model: { $value }
 agent-effort-title = Akıl yürütme düzeyi: { $value }
 agent-effort-chip = düzey { $value }
+# ADR-0122: in an agent's pane, what of Settings → Shared with agents it was started with; the names in the tooltip.
+agent-shared-chip = { $count } paylaşılan
+agent-shared-title = { $count ->
+    [one] Ajanlarla paylaşılan 1 sunucuyla başlatıldı: { $names }. Bir değişiklik, ajan yeniden başlayınca ona ulaşır.
+   *[other] Ajanlarla paylaşılan { $count } sunucuyla başlatıldı: { $names }. Bir değişiklik, ajan yeniden başlayınca ona ulaşır.
+}
 agent-runs-inside = Shell içinde { $name }
 agent-runs-inside-explain = Makinesi bu programı terminalin önünde buldu, terminalde görünenden değil. npm betiği olarak kurulan bir ajan Node olarak çalışır ve tanınmaz; Windows'ta arka planda başlatılan bir ajan, istem öndeyken de işaretli kalır.
 agent-always-allowed-explain = Bu oturum için { $count } isteğine izin verdin. Sona erene kadar bunlar için bir daha sormaz.

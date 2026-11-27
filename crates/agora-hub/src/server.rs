@@ -894,6 +894,14 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                         value: value.clone(),
                     })
                     .collect(),
+                shared_items: a
+                    .shared_items
+                    .iter()
+                    .map(|(name, item_hash)| v1::SharedItemRef {
+                        name: name.clone(),
+                        item_hash: item_hash.clone(),
+                    })
+                    .collect(),
                 ..session_snapshot(&a.session)
             })
             .collect(),

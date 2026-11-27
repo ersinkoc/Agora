@@ -2078,6 +2078,7 @@ mod tests {
                     skips_permissions: false,
                     always_allowed: Vec::new(),
                     runs_inside: String::new(),
+                    shared_items: Vec::new(),
                 },
             );
         }

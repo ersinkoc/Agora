@@ -969,6 +969,12 @@ fleet-model-count = { $name } ({ $count })
 agent-model-title = Model: { $value }
 agent-effort-title = Reasoning effort: { $value }
 agent-effort-chip = effort { $value }
+# ADR-0122: in an agent's pane, what of Settings → Shared with agents it was started with; the names in the tooltip.
+agent-shared-chip = { $count } shared
+agent-shared-title = { $count ->
+    [one] Started with 1 server shared with agents: { $names }. A change reaches it when it starts again.
+   *[other] Started with { $count } servers shared with agents: { $names }. A change reaches it when it starts again.
+}
 agent-runs-inside = { $name } in Shell
 agent-runs-inside-explain = Its machine found this program in front of the terminal, never from what the terminal shows. An agent installed as an npm script runs as Node and is not recognised; on Windows, an agent started in the background stays marked while the prompt is in front.
 agent-always-allowed-explain = You allowed { $count } of its requests for this session. It does not ask again for those until it ends.
