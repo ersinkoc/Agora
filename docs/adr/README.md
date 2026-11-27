@@ -143,3 +143,4 @@ Date: YYYY-MM-DD
 | 0125 | Review a task before accepting it | Accepted |
 | 0126 | Subtasks on the shared board | Accepted |
 | 0127 | Show accepted task notices | Accepted |
+| 0128 | Notify the parent agent on task acceptance | Proposed |
