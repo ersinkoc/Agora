@@ -58,6 +58,9 @@ export interface AgentTileModel {
   skipsPermissions?: boolean; // ADR-0059: started with an option that lets it act without asking (the "does not ask" badge)
   alwaysAllowed?: string[]; // ADR-0101: the actions of the "always" answers it holds (the "Asks less" chip), newest last
   runsInside?: { kind: string; name: string }; // ADR-0094: the agent a person runs by hand in this Shell (its kind and display name), while it runs
+  // ADR-0094: the agent's own kind (`shell`) while another agent runs inside it; `kind` and `name` then show that agent, so the Shell is
+  // listed, tabbed and drawn as Claude Code while Claude Code runs in it. What the agent can do (take a task, ...) follows this one.
+  hostKind?: string;
   parentName?: string;
   // ADR-0060: it was running when its machine stopped. `resumable`: it can continue its own conversation (Resume); otherwise only Start
   // again (a new session in the same folder).

@@ -348,7 +348,7 @@ pub fn agent_label(s: &Snapshot, agent_id: &str) -> String {
         .find(|a| a.agent_id == agent_id)
         .map_or_else(
             || local(agent_id).to_string(),
-            |a| agent_name(&a.agent_id, &a.kind),
+            |a| agent_name(&a.agent_id, crate::render::shown_kind(a)),
         )
 }
 
@@ -491,7 +491,10 @@ pub fn app_rows(s: &Snapshot, now_ms: u64, t: Text<'_>) -> Vec<crate::app::Row> 
         let asks_always = own.is_some_and(|x| crate::client::always_offer(x).is_some());
         crate::app::Row {
             id: a.agent_id.clone(),
-            label: format!(" {lead}{}{no_ask}", agent_name(&a.agent_id, &a.kind)),
+            label: format!(
+                " {lead}{}{no_ask}",
+                agent_name(&a.agent_id, crate::render::shown_kind(a))
+            ),
             state,
             needs_you: asks || (a.running && !unreachable && st == AgentState::Blocked),
             terminal: s.terminals.iter().any(|x| x.agent_id == a.agent_id),
@@ -700,7 +703,7 @@ fn details(
     match s.agents.iter().find(|a| a.agent_id == selected) {
         None => lines.push(t(key!("tui-split-pick"), &[])),
         Some(a) => {
-            lines.push(agent_name(&a.agent_id, &a.kind));
+            lines.push(agent_name(&a.agent_id, crate::render::shown_kind(a)));
             // Where it runs, in words (the machine's name and the folder), not its id.
             let machine = s
                 .nodes

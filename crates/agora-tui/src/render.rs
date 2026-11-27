@@ -56,18 +56,28 @@ pub fn asks_less(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
 /// ADR-0094: "Claude Code in Shell" while a person runs an agent by hand in this running Shell (`AgentSnapshot.runs_inside`, as its machine
 /// found it from the program in front of the terminal). The kind is named by its id's words; anything but a plain kind id says nothing.
 pub fn runs_inside(a: &AgentSnapshot, t: Text<'_>) -> Option<String> {
+    inside_kind(a).map(|kind| {
+        t(
+            key!("tui-runs-inside"),
+            &[("name", Arg::Str(kind_words(kind)))],
+        )
+    })
+}
+
+/// ADR-0094: the kind a person runs by hand in this running Shell, when it is a plain kind id.
+fn inside_kind(a: &AgentSnapshot) -> Option<&str> {
     let kind = a.runs_inside.as_str();
     let plain = !kind.is_empty()
         && kind.len() <= 64
         && kind.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
         });
-    (a.running && plain).then(|| {
-        t(
-            key!("tui-runs-inside"),
-            &[("name", Arg::Str(kind_words(kind)))],
-        )
-    })
+    (a.running && plain).then_some(kind)
+}
+
+/// The kind an agent is shown as (its name, its column): the agent run inside a Shell while it runs (ADR-0094), else its own.
+pub fn shown_kind(a: &AgentSnapshot) -> &str {
+    inside_kind(a).unwrap_or(&a.kind)
 }
 
 /// A kind id's words, each with a capital ("claude-code" → "Claude Code"), as the window names a kind it has no name for.
@@ -328,7 +338,7 @@ pub fn render(
             out.push(format!(
                 "{pointer} {indent}{on}{marker} {word:<10}{off} {}  {dim}{}  {}{by}{reset}{no_ask}",
                 visible(local(&a.agent_id)),
-                visible(&a.kind),
+                visible(shown_kind(a)),
                 visible(&a.node_id),
             ));
         }
@@ -1000,6 +1010,10 @@ mod tests {
             "[tui-runs-inside[name=Codex]] [tui-badge-no-ask[]]"
         );
         assert_eq!(kind_words("registry-qwen-code"), "Registry Qwen Code");
+        // Shown as the agent that runs inside while it runs; a closed Shell or a bad mark is shown as itself.
+        assert_eq!(shown_kind(&shell(true, "claude-code")), "claude-code");
+        assert_eq!(shown_kind(&shell(false, "claude-code")), "shell");
+        assert_eq!(shown_kind(&shell(true, "Not A Kind")), "shell");
     }
 
     /// ADR-0101: the request box quotes the agent's own name for its always option as one short plain line, only when offered.

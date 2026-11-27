@@ -59,7 +59,7 @@ export function giveCandidates(agents: readonly AgentTileModel[], projectId: str
 /** Whether this agent may be given a task of `projectId` now. By its lifecycle, not its state word: a running agent whose last turn is
  *  Finished is between turns and takes it; a closed or interrupted one does not. */
 export function canTake(a: AgentTileModel, projectId: string, online?: ReadonlySet<string>): boolean {
-  return !!projectId && a.projectId === projectId && !a.closed && !a.interrupted && !!a.machineId && a.kind !== 'shell'
+  return !!projectId && a.projectId === projectId && !a.closed && !a.interrupted && !!a.machineId && (a.hostKind ?? a.kind) !== 'shell'
     && (!online || online.has(a.machineId)) && offersGive(a.machineId);
 }
 

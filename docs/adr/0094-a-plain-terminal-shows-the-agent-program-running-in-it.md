@@ -13,8 +13,10 @@ Step 2's schema part (approved by the maintainer on 2026-11-26: "onay veriyorum"
 `AgentSnapshot.runs_inside` (46); the node records the mark's changes and says it again after every `AgentStarted` it restates; the hub keeps
 it for a running agent and clears it with the process (`docs/specs/protocol.md`, "What runs inside a plain terminal").
 Step 4 (2026-11-27): the window's "Claude Code in Shell" chip on the Shell's tile, pane header and phone row, named by the machine's own
-name for the kind when the window has it (else the kind id's words), and `[Claude Code in Shell]` on the terminal client's line; the Shell
-keeps its own name and avatar (`docs/ux/main-window.md`).
+name for the kind when the window has it (else the kind id's words), and `[Claude Code in Shell]` on the terminal client's line. After the maintainer saw it live (2026-11-27: "Claude olarak
+görünsün"), the Shell is also shown as that agent while it runs: its name and avatar in the sidebar, tabs, tiles and the terminal
+client, with its own colour, id and abilities unchanged (decision 3's "the shell stays a shell" holds for what it is, not how it is
+listed; `docs/ux/main-window.md`).
 The registry's names (the second open question, 2026-11-27): rather than the converter writing them (its golden outputs are never
 edited), the node takes a kind's ACP program as its name when the kind lists none and that program is a plain file name of its own
 (`docs/specs/agent-manifest.md`).

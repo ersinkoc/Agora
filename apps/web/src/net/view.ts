@@ -579,10 +579,14 @@ export function tiles(v: View, kindName?: (node: string, kind: string) => string
     const branch = selected?.branch || wt?.branch || '';
     // A closed agent is finished, whatever state it had when its machine lost it (a blocked one that ended is not waiting for anyone).
     const state = !a.running ? 'finished' : waiting.has(id) ? 'needs-you' : uiState(a.state);
+    // ADR-0094: while a person runs an agent by hand in this Shell, the Shell is shown as that agent (its name and avatar), in its colour.
+    const inside = a.running ? a.runsInside : undefined;
+    const shownKind = inside ?? a.kind;
     return {
       id,
-      name: `${visible(a.kind)} · ${ACCENT_NAMES[i]}`,
-      ...(a.kind ? { kind: a.kind } : {}),
+      name: `${visible(shownKind)} · ${ACCENT_NAMES[i]}`,
+      ...(shownKind ? { kind: shownKind } : {}),
+      ...(inside && a.kind ? { hostKind: a.kind } : {}),
       accent: ACCENTS[i] as string,
       machine: visible(node?.hostname || a.nodeId),
       machineId: a.nodeId,

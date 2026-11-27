@@ -11,8 +11,15 @@ describe('what runs inside a Shell', () => {
     started(v, 1);
     let pos = 2;
     const inside = (kind: string) => applyEvent(v, pos++, { producerId: 'n', body: 'agentRunsInside', agentRunsInside: { agentId: 'a', kind } });
+    expect(tiles(v)[0]).toMatchObject({ kind: 'shell' });
+    expect(tiles(v)[0]?.hostKind).toBeUndefined();
     inside('claude-code');
     expect(tiles(v)[0]?.runsInside).toEqual({ kind: 'claude-code', name: 'Claude Code' });
+    // Shown as that agent while it runs: its kind and a name made from it, in the Shell's own colour; the Shell's kind is kept apart.
+    const shown = tiles(v)[0];
+    expect(shown?.kind).toBe('claude-code');
+    expect(shown?.hostKind).toBe('shell');
+    expect(shown?.name.startsWith('claude-code · ')).toBe(true);
     // Not a plain kind id: left out, the mark stays.
     for (const bad of ['Claude', 'claude code', 'x\u001b[31m', 'k'.repeat(65)]) {
       inside(bad);
@@ -20,6 +27,8 @@ describe('what runs inside a Shell', () => {
     }
     inside(''); // the program ended
     expect(tiles(v)[0]?.runsInside).toBeUndefined();
+    expect(tiles(v)[0]).toMatchObject({ kind: 'shell' });
+    expect(tiles(v)[0]?.name.startsWith('shell · ')).toBe(true);
     inside('codex');
     started(v, pos++); // a new process starts with none
     expect(tiles(v)[0]?.runsInside).toBeUndefined();

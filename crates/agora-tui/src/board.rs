@@ -167,7 +167,7 @@ pub fn project_label(s: &Snapshot, project_id: &str) -> String {
 
 /// An agent's name as the tree shows it (kind and colour), with its number when another agent reads the same.
 pub fn agent_name(s: &Snapshot, a: &AgentSnapshot) -> String {
-    let name = crate::split::agent_name(&a.agent_id, &a.kind);
+    let name = crate::split::agent_name(&a.agent_id, crate::render::shown_kind(a));
     let twin = s.agents.iter().any(|o| {
         o.agent_id != a.agent_id && crate::split::agent_name(&o.agent_id, &o.kind) == name
     });

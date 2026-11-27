@@ -75,6 +75,8 @@ describe('Give to an agent on the board', () => {
       agent('n1/other', { projectId: 'q' }),
       agent('n1/closed', { closed: true, state: 'finished' }),
       agent('n1/sh', { kind: 'shell' }),
+      // ADR-0094: a Shell shown as the agent a person runs in it is still a Shell: it takes no task.
+      agent('n1/sh-claude', { kind: 'claude-code', hostKind: 'shell' }),
       agent('n3/away', { machineId: 'n3' }),
     ], 'p', new Set(['n1', 'n2']));
     expect(list.map(({ agent: a, depth }) => [a.id, depth])).toEqual([['n2/parent', 0], ['n1/helper', 1]]);
