@@ -203,3 +203,93 @@ fn the_share_item_vectors_match_the_layout() {
         assert_eq!(hex(&out), s(c, "hex"), "{name}: signed bytes");
     }
 }
+
+/// The item a vector names, as the protocol carries it.
+fn item_of(v: &Value) -> agora_protocol::v1::ShareItem {
+    use agora_protocol::v1::{
+        McpServerDef, ShareItem, ShareItemKind, ShareValue, SkillDef, SkillFile,
+    };
+    let values = |x: &Value| -> Vec<ShareValue> {
+        x.as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|p| ShareValue {
+                        name: p[0].as_str().expect("name").into(),
+                        value: p[1].as_str().expect("value").into(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if s(v, "kind") == "mcp_server" {
+        let m = &v["mcp"];
+        ShareItem {
+            name: s(v, "name").into(),
+            kind: ShareItemKind::McpServer as i32,
+            mcp: Some(McpServerDef {
+                command: s(m, "command").into(),
+                args: strs(&m["args"]),
+                env: values(&m["env"]),
+                url: s(m, "url").into(),
+                headers: values(&m["headers"]),
+            }),
+            skill: None,
+        }
+    } else {
+        let k = &v["skill"];
+        ShareItem {
+            name: s(v, "name").into(),
+            kind: ShareItemKind::Skill as i32,
+            mcp: None,
+            skill: Some(SkillDef {
+                description: s(k, "description").into(),
+                files: k["files"]
+                    .as_array()
+                    .expect("files")
+                    .iter()
+                    .map(|f| SkillFile {
+                        path: s(f, "path").into(),
+                        content: s(f, "content").as_bytes().to_vec(),
+                    })
+                    .collect(),
+            }),
+        }
+    }
+}
+
+/// `agora_protocol::share`, which the hub and the node use, builds the same bytes as the vectors, and every vector's item keeps the
+/// rules.
+#[test]
+fn the_protocols_share_module_builds_the_vectors() {
+    use agora_protocol::share::{check_item, content_bytes, signed_message, Action};
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schema/fixtures/signing/share-item-v1.json");
+    let doc: Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("vectors")).expect("json");
+    for c in doc["cases"].as_array().expect("cases") {
+        let name = s(c, "name");
+        let action = if s(c, "action") == "remove" {
+            Action::Remove
+        } else {
+            Action::Publish
+        };
+        if !c["item"].is_null() {
+            let item = item_of(&c["item"]);
+            assert_eq!(check_item(&item), Ok(()), "{name}");
+            let bytes = content_bytes(&item, |b| hex(&sha256(b)));
+            assert_eq!(hex(&bytes), s(c, "content_hex"), "{name}: content");
+        }
+        let scope = agora_protocol::v1::ShareScope {
+            project_id: s(c, "project_id").into(),
+            kinds: strs(&c["kinds"]),
+        };
+        let msg = signed_message(
+            action,
+            s(c, "item_name"),
+            s(c, "item_hash"),
+            &scope,
+            c["issued_ms"].as_u64().expect("issued_ms"),
+        );
+        assert_eq!(hex(&msg), s(c, "hex"), "{name}: signed bytes");
+    }
+}

@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 19;
+const SCHEMA_VERSION: i64 = 20;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -536,6 +536,32 @@ impl SqliteStore {
                  PRAGMA user_version = 19;
                  COMMIT;"
             ))?;
+        }
+        if version < 20 {
+            // ADR-0122: the owner's newest signed word on each shared item's name (a removal included, `kind` 0, so a node can be
+            // handed the word that ended an item), and what each machine said when it refused one.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE IF NOT EXISTS shared_items (
+                     name      TEXT PRIMARY KEY,
+                     kind      INTEGER NOT NULL,
+                     item_hash TEXT NOT NULL,
+                     issued_ms INTEGER NOT NULL,
+                     signer    TEXT NOT NULL,
+                     signed    BLOB NOT NULL
+                 );
+                 CREATE TABLE IF NOT EXISTS shared_item_refusals (
+                     name      TEXT NOT NULL,
+                     node_id   TEXT NOT NULL,
+                     item_hash TEXT NOT NULL,
+                     code      TEXT NOT NULL,
+                     reason    TEXT NOT NULL,
+                     at_ms     INTEGER NOT NULL,
+                     PRIMARY KEY (name, node_id)
+                 );
+                 PRAGMA user_version = 20;
+                 COMMIT;",
+            )?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1301,6 +1327,37 @@ mod tests {
     /// 19): a fresh database is at 19 with every table; one at 14 gains the theme catalog, the plugin tables, the settings table, the
     /// plugin catalog and the gallery's columns and screenshots, in that order; one at 15 keeps its catalog rows (their date and
     /// popularity empty), one at 16 its plugins too, and each gains what came after. Its events stay.
+    /// ADR-0122: a schema-19 database gains the shared items' tables, empty, and keeps what it had.
+    #[test]
+    fn a_schema_19_database_gains_the_shared_items_tables() {
+        let d = tmpdir("upgrade19");
+        let path = d.join("hub.db");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            s.append("n1", 1, 5, b"a").unwrap();
+            s.lock()
+                .unwrap()
+                .execute_batch("DROP TABLE shared_items; DROP TABLE shared_item_refusals; PRAGMA user_version = 19;")
+                .unwrap();
+        }
+        let s = SqliteStore::open(&path).unwrap();
+        let conn = s.lock().unwrap();
+        let v: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 20);
+        for t in ["shared_items", "shared_item_refusals"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{t}");
+        }
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(events, 1);
+    }
+
     #[test]
     fn databases_at_14_to_18_upgrade_to_the_gallery_columns() {
         let all = [
@@ -1333,10 +1390,11 @@ mod tests {
                 .unwrap()
         };
         let fresh = store();
-        assert_eq!(version(&fresh), 19);
+        assert_eq!(version(&fresh), 20);
         assert_eq!(tables(&fresh), all);
         // What schema 19 added, taken out first (its columns are on tables an older database has).
-        let gallery = "DROP TABLE plugin_catalog_screenshot; ALTER TABLE theme_catalog DROP COLUMN added; \
+        let gallery = "DROP TABLE shared_items; DROP TABLE shared_item_refusals; \
+                       DROP TABLE plugin_catalog_screenshot; ALTER TABLE theme_catalog DROP COLUMN added; \
                        ALTER TABLE theme_catalog DROP COLUMN popularity; ALTER TABLE plugin_catalog DROP COLUMN added; \
                        ALTER TABLE plugin_catalog DROP COLUMN popularity;";
         for (from, undo) in [
@@ -1371,7 +1429,7 @@ mod tests {
             }
             assert!(verify(&path).is_ok(), "an older database is a valid backup");
             let s = SqliteStore::open(&path).unwrap();
-            assert_eq!(version(&s), 19, "from {from}");
+            assert_eq!(version(&s), SCHEMA_VERSION, "from {from}");
             assert_eq!(tables(&s), all, "from {from}");
             assert_eq!(s.acked("n1").unwrap(), 1);
             assert_eq!(count(&s, "theme_catalog"), i64::from(from >= 15), "from {from}");

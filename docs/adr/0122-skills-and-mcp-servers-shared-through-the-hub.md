@@ -92,7 +92,15 @@ Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP se
    the commands), error codes `share.refused`, `share.secret_missing`, `share.unknown`, the `agora-share-item-v1` vectors with their
    test, golden fixtures, `protocol.md` "Shared skills and MCP servers" and threat-model row T75. The signed word carries
    `issued_ms`, and a removal is signed too, so an old signature cannot bring back what a newer word replaced or removed.
-2. The hub: not started.
+2. The hub: done (2026-11-27). `crates/agora-hub/src/shares.rs` (store migration 20: `shared_items`, the newest signed word per
+   name with removals kept, and `shared_item_refusals`); the byte layouts and the item rules are one module for hub and node
+   (`agora_protocol::share`, checked against the vectors). `ShareItemPublish`/`ShareItemRemove`/`ShareItemList` are the owner's alone
+   (a member's or viewer's is refused before anything is kept, audited as `share_item.publish`/`share_item.remove`); the hub checks the
+   word as a node will (one of the owner's unrevoked devices signed it, the content's hash, the item's and the scope's rules, `issued_ms`
+   newer than the word it replaces and at most 5 minutes ahead, at most 64 live items) and writes `ShareItemChanged`. A node asks
+   `ShareItemGet` on its own connection once both agreed on `share.items` (the hub offers it now; no node yet); a client never can.
+   A node's `ShareItemRefused` about itself is kept against the item's current version. `ShareItemSigned.name` (7) was added for a
+   removal, which carries no item. Tests: `shares.rs` units, `dispatch.rs`, store migration, `tests/devices.rs` over a real socket.
 3. The node: not started.
 4. The window: not started.
 5. Skills per kind: not started.

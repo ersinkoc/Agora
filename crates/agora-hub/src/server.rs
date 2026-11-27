@@ -1409,6 +1409,42 @@ where
                 Err(_) => refuse(Error::new(ErrorCode::Internal)),
             })
         }
+        // ADR-0122: the owner's signed word on a shared item, checked and kept by the hub, then announced (no content).
+        crate::dispatch::Route::ShareApply { signed, remove } => {
+            let signed = <v1::ShareItemSigned as prost::Message>::decode(signed.as_slice())
+                .unwrap_or_default();
+            let result = if remove == signed.item.is_some() {
+                Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "item"))
+            } else {
+                crate::shares::Shares::new(hub.store())
+                    .apply(&who.user, &signed, now_ms())
+                    .and_then(|changed| hub.share_item_changed(changed, now_ms()))
+            };
+            let outcome = result.as_ref().map_or_else(|e| e.code.as_str(), |()| "ok");
+            let action = if remove {
+                "share_item.remove"
+            } else {
+                "share_item.publish"
+            };
+            audit(hub, who, action, "", outcome);
+            Some(match result {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::ShareList { with_content } => Some(
+            match crate::shares::Shares::new(hub.store()).list(with_content) {
+                Ok(items) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ShareItemList(v1::ShareItemListResult {
+                            items,
+                        })),
+                    })),
+                },
+                Err(e) => refuse(e),
+            },
+        ),
         crate::dispatch::Route::ThemeCatalogGet { id } => {
             Some(match crate::theme_catalog::get(hub.store(), &id) {
                 Ok(theme) => v1::CommandResponse {
@@ -1714,6 +1750,37 @@ fn post_for_node(
             | command_request::Command::HelperRelease(_),
         ) => {
             return helper_for_node(hub, node_id, req, open, answers);
+        }
+        // ADR-0122: a node fetches a shared item's newest signed word (it checks the signature itself), once both agreed on it.
+        Some(command_request::Command::ShareItemGet(g)) => {
+            use agora_protocol::handshake::SHARE_ITEMS;
+            if !hub
+                .router()
+                .nodes_with(SHARE_ITEMS)
+                .iter()
+                .any(|n| n == node_id)
+            {
+                return refuse(
+                    Error::new(ErrorCode::ProtocolCapabilityMissing)
+                        .with("capability", SHARE_ITEMS),
+                );
+            }
+            let _ = answers.send(
+                match crate::shares::Shares::new(hub.store()).get(&g.name, &g.item_hash) {
+                    Ok(signed) => v1::CommandResponse {
+                        request_id: rid.clone(),
+                        result: Some(command_response::Result::Ok(v1::CommandOk {
+                            result: Some(command_ok::Result::ShareItemGet(
+                                v1::ShareItemGetResult {
+                                    signed: Some(signed),
+                                },
+                            )),
+                        })),
+                    },
+                    Err(e) => error_response(&rid, &e),
+                },
+            );
+            return;
         }
         _ => {
             return refuse(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "command"));

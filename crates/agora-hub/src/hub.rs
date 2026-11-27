@@ -561,6 +561,21 @@ impl Hub {
                 };
                 // Read before the event is folded in: whether an agent is new, and what a decision was about.
                 let audit = spawn_audit(&g.view, &event);
+                // ADR-0122: a machine that will not give a shared item to its agents says so; kept against that item's version.
+                if let Some(Body::ShareItemRefused(r)) = &event.body {
+                    if r.node_id == event.producer_id {
+                        if let Err(e) = crate::shares::Shares::new(&self.store).refusal(
+                            &event.producer_id,
+                            r,
+                            at_ms,
+                        ) {
+                            crate::log_line!(
+                                "share: refusal from {} not kept: {e:?}",
+                                event.producer_id
+                            );
+                        }
+                    }
+                }
                 // ADR-0119 (review of step 3, finding 2): a helper with a parent on another machine joins that machine's chain only when
                 // the hub sees it start new here under exactly the parent a carried start named.
                 if let Some(Body::AgentStarted(st)) = &event.body {
@@ -718,6 +733,17 @@ impl Hub {
             }
         }
         Ok((node.to_string(), local.to_string()))
+    }
+
+    /// ADR-0122: announces a shared item's change (written by the hub, no content) to every subscriber the scope lets see it.
+    pub fn share_item_changed(
+        &self,
+        changed: agora_protocol::v1::ShareItemChanged,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        let mut g = self.lock();
+        self.emit(&mut g, Body::ShareItemChanged(changed), now_ms)
+            .map_err(|_| agora_protocol::Error::new(agora_protocol::ErrorCode::Internal))
     }
 
     /// ADR-0073: the hub stops listing an offline machine and what it ran. With `refuse_return`, every certificate enrolled under it

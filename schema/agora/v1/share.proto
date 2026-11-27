@@ -66,6 +66,8 @@ message ShareItemSigned {
   string item_hash = 4;
   string signer_device_id = 5;
   bytes signature = 6;
+  // The name the word is about: for a publish, `item.name`; for a removal (no item), the name removed.
+  string name = 7;
 }
 
 // ---- requests ----

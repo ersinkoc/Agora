@@ -81,6 +81,9 @@ const HUB_CAPABILITIES: &[&str] = &[
     agora_protocol::handshake::FLEET_STATUS_V1,
     // ADR-0119: the hub carries helper starts between machines that both agreed on it (a node offers it once its side is built).
     agora_protocol::handshake::MESH_SPAWN_REMOTE,
+    // ADR-0122: keeps the owner's shared skills and MCP servers and hands a node the newest signed word (a node offers it once its
+    // side is built).
+    agora_protocol::handshake::SHARE_ITEMS,
 ];
 
 /// `<hub dir>/listen`: the address the running hub bound, written at every start.
@@ -3154,6 +3157,13 @@ mod tests {
             }
             assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
         }
+    }
+
+    /// ADR-0122 step 2: the hub keeps the owner's shared items and hands a node their signed words, so it agrees on `share.items`
+    /// before any node offers it (`crates/agora-hub/tests/devices.rs` drives the commands over a real socket).
+    #[test]
+    fn the_hub_agrees_on_shared_items() {
+        assert!(HUB_CAPABILITIES.contains(&agora_protocol::handshake::SHARE_ITEMS));
     }
 
     #[test]

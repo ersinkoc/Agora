@@ -51,6 +51,15 @@ pub enum Route {
     ThemeCatalogGet {
         id: String,
     },
+    /// ADR-0122: the owner publishes, changes or removes a shared item (a signed word), or lists them; the hub's own.
+    ShareApply {
+        /// The `ShareItemSigned` as it came, encoded (decoded where it is checked).
+        signed: Vec<u8>,
+        remove: bool,
+    },
+    ShareList {
+        with_content: bool,
+    },
     /// Everything else goes to the node the request names (the router still checks that it is known, connected and able).
     Forward,
 }
@@ -69,6 +78,9 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         // ADR-0109: only the hub can issue a durable handoff delivery.
         !matches!(c, C::DeliverTaskHandoff(_))
             && (!matches!(c, C::AcknowledgeTaskHandoff(_)) || who.role == Role::Owner)
+            // ADR-0122: a shared item reaches every agent on every machine: the owner's alone (a node asks on its own connection).
+            && (!matches!(c, C::ShareItemPublish(_) | C::ShareItemRemove(_) | C::ShareItemList(_)) || who.role == Role::Owner)
+            && !matches!(c, C::ShareItemGet(_))
             && (who.role != Role::Viewer || viewer_may(c))
             && scope.is_none_or(|s| s.command_allowed(&req.target_node, c))
     });
@@ -103,6 +115,22 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
             Route::TargetNotAllowed
         }
         Some(C::ThemeCatalogList(_)) => Route::ThemeCatalogList,
+        Some(C::ShareItemPublish(_) | C::ShareItemRemove(_) | C::ShareItemList(_))
+            if names_a_node =>
+        {
+            Route::TargetNotAllowed
+        }
+        Some(C::ShareItemPublish(p)) => Route::ShareApply {
+            signed: prost::Message::encode_to_vec(&p.signed.clone().unwrap_or_default()),
+            remove: false,
+        },
+        Some(C::ShareItemRemove(r)) => Route::ShareApply {
+            signed: prost::Message::encode_to_vec(&r.signed.clone().unwrap_or_default()),
+            remove: true,
+        },
+        Some(C::ShareItemList(l)) => Route::ShareList {
+            with_content: l.with_content,
+        },
         Some(C::ThemeCatalogGet(g)) => Route::ThemeCatalogGet { id: g.id.clone() },
         _ => Route::Forward,
     }
@@ -261,6 +289,46 @@ mod tests {
         assert!(matches!(
             route(&who(Role::Owner), None, &request),
             Route::TargetNotAllowed
+        ));
+    }
+
+    /// ADR-0122: shared items are the owner's: a member's or a viewer's publish, removal or listing is refused before anything is
+    /// kept, a target machine is refused, and a client can never fetch an item as a node does.
+    #[test]
+    fn only_the_owner_publishes_removes_or_lists_shared_items_and_no_client_fetches_one() {
+        let commands = [
+            C::ShareItemPublish(v1::ShareItemPublish::default()),
+            C::ShareItemRemove(v1::ShareItemRemove::default()),
+            C::ShareItemList(v1::ShareItemList { with_content: true }),
+        ];
+        for c in commands {
+            let mut request = CommandRequest {
+                command: Some(c),
+                ..Default::default()
+            };
+            for role in [Role::Viewer, Role::Member] {
+                assert!(matches!(
+                    route(&who(role), None, &request),
+                    Route::Forbidden { .. }
+                ));
+            }
+            assert!(matches!(
+                route(&who(Role::Owner), None, &request),
+                Route::ShareApply { .. } | Route::ShareList { with_content: true }
+            ));
+            request.target_node = "node".into();
+            assert!(matches!(
+                route(&who(Role::Owner), None, &request),
+                Route::TargetNotAllowed
+            ));
+        }
+        let get = CommandRequest {
+            command: Some(C::ShareItemGet(v1::ShareItemGet::default())),
+            ..Default::default()
+        };
+        assert!(matches!(
+            route(&who(Role::Owner), None, &get),
+            Route::Forbidden { .. }
         ));
     }
 

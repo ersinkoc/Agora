@@ -9,6 +9,7 @@ pub mod error;
 pub mod frame;
 pub mod handshake;
 pub mod jsonrpc;
+pub mod share;
 #[cfg(feature = "ws")]
 pub mod ws;
 

@@ -607,3 +607,122 @@ async fn an_endorsement_reaches_only_machines_its_person_works_on() {
         Some(cr::Command::DeviceEndorse(_))
     ));
 }
+
+/// ADR-0122 step 2, over a real socket: the owner's device publishes a shared MCP server, the hub announces the change (no content)
+/// and lists it, refuses a word signed with another key, and the owner's signed removal ends it.
+#[tokio::test]
+async fn the_owner_publishes_lists_and_removes_a_shared_item_with_a_signed_word() {
+    use agora_protocol::share::{signed_message, Action};
+    let st = state(None);
+    let addr = start(Arc::clone(&st)).await;
+    let mut c = client(addr).await;
+    c.send(&command("r1", register("web-1", 1))).await.unwrap();
+    answer(&mut c).await;
+    let item = v1::ShareItem {
+        name: "db-tools".into(),
+        kind: v1::ShareItemKind::McpServer as i32,
+        mcp: Some(v1::McpServerDef {
+            command: "npx".into(),
+            args: vec!["-y".into(), "@example/db-mcp".into()],
+            ..Default::default()
+        }),
+        skill: None,
+    };
+    let hash = agora_hub::shares::item_hash(&item);
+    let scope = v1::ShareScope::default();
+    let now = server::now_ms();
+    let word = |n: u8, action: Action, item: Option<v1::ShareItem>, hash: &str, at: u64| {
+        v1::ShareItemSigned {
+            item,
+            scope: Some(scope.clone()),
+            issued_ms: at,
+            item_hash: hash.into(),
+            signer_device_id: "web-1".into(),
+            signature: sign(n, &signed_message(action, "db-tools", hash, &scope, at)),
+            name: "db-tools".into(),
+        }
+    };
+    // Signed with a key that is not web-1's: refused, nothing kept.
+    c.send(&command(
+        "p0",
+        cr::Command::ShareItemPublish(v1::ShareItemPublish {
+            signed: Some(word(2, Action::Publish, Some(item.clone()), &hash, now)),
+        }),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(err(&answer(&mut c).await), "approval.signature_invalid");
+    c.send(&command(
+        "p1",
+        cr::Command::ShareItemPublish(v1::ShareItemPublish {
+            signed: Some(word(1, Action::Publish, Some(item.clone()), &hash, now)),
+        }),
+    ))
+    .await
+    .unwrap();
+    // The change is announced on the events stream (no content), and the command is answered.
+    let mut announced = None;
+    let mut answered = false;
+    while announced.is_none() || !answered {
+        let fr = recv(&mut c).await;
+        if (fr.stream_id, fr.kind) == (STREAM_COMMANDS, 1) {
+            let r = v1::CommandResponse::decode(fr.payload.as_slice()).unwrap();
+            assert!(
+                matches!(ok(&r), Some(command_ok::Result::Empty(_))),
+                "{r:?}"
+            );
+            answered = true;
+        } else if fr.stream_id == STREAM_EVENTS {
+            if let Ok(p) = v1::PositionedEvent::decode(fr.payload.as_slice()) {
+                if let Some(Body::ShareItemChanged(ch)) = p.event.and_then(|e| e.body) {
+                    announced = Some(ch);
+                }
+            }
+        }
+    }
+    let ch = announced.unwrap();
+    assert_eq!(
+        (ch.name.as_str(), ch.item_hash.as_str()),
+        ("db-tools", hash.as_str())
+    );
+    c.send(&command(
+        "l1",
+        cr::Command::ShareItemList(v1::ShareItemList {
+            with_content: false,
+        }),
+    ))
+    .await
+    .unwrap();
+    match ok(&answer(&mut c).await) {
+        Some(command_ok::Result::ShareItemList(l)) => {
+            assert_eq!(l.items.len(), 1);
+            assert_eq!(l.items[0].item_hash, hash);
+            assert!(l.items[0].signed.is_none());
+        }
+        other => panic!("{other:?}"),
+    }
+    c.send(&command(
+        "rm",
+        cr::Command::ShareItemRemove(v1::ShareItemRemove {
+            signed: Some(word(1, Action::Remove, None, "", now + 1)),
+        }),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        ok(&answer(&mut c).await),
+        Some(command_ok::Result::Empty(_))
+    ));
+    c.send(&command(
+        "l2",
+        cr::Command::ShareItemList(v1::ShareItemList {
+            with_content: false,
+        }),
+    ))
+    .await
+    .unwrap();
+    match ok(&answer(&mut c).await) {
+        Some(command_ok::Result::ShareItemList(l)) => assert!(l.items.is_empty()),
+        other => panic!("{other:?}"),
+    }
+}

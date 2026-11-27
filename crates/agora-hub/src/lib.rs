@@ -44,6 +44,7 @@ pub mod router;
 pub mod scope;
 pub mod server;
 pub mod session;
+pub mod shares;
 pub mod signin;
 pub mod ssh;
 pub mod ssh_install;

@@ -1662,12 +1662,15 @@ four requests below with `protocol.capability_missing` (`capability = mesh.spawn
 
 ## Shared skills and MCP servers (ADR-0122)
 
-Schema only so far: capability `share.items` is named and offered by no one; node and hub refuse the commands.
+The hub keeps the items and offers `share.items` (ADR-0122 step 2); no node offers it yet, and a node refuses the commands.
+Publish, remove and list are the owner's alone; the hub checks each word as a node will (the owner's unrevoked device, the content
+hash, the rules in `agora_protocol::share`, a newer `issued_ms` than the word it replaces and at most 5 minutes ahead, at most 64 live
+items) and keeps the newest word per name (a removal too); `ShareItemGet` answers a node with that word.
 
 - **Messages** (`schema/agora/v1/share.proto`): `ShareItem { name, kind, mcp | skill }` (an MCP server is a program `command`/`args`/`env`
   or a remote `url`/`headers`; secrets as `{secret:NAME}`; a skill is a description and its text files), `ShareScope { project_id,
-  kinds }`, and the owner's signed word `ShareItemSigned { item?, scope, issued_ms, item_hash, signer_device_id, signature }` (no item:
-  a removal). Commands `ShareItemPublish` (127), `ShareItemList` (128), `ShareItemRemove` (129) are the hub's (publish and remove owner
+  kinds }`, and the owner's signed word `ShareItemSigned { item?, scope, issued_ms, item_hash, signer_device_id, signature, name }` (no
+  item: a removal of `name`; for a publish `name` is `item.name`). Commands `ShareItemPublish` (127), `ShareItemList` (128), `ShareItemRemove` (129) are the hub's (publish and remove owner
   only); `ShareItemGet` (130) comes only from a node's connection. Results `ShareItemListResult` (CommandOk 43) and `ShareItemGetResult`
   (44). Events `ShareItemChanged` (92, hub-written, no content) and `ShareItemRefused` (93, a node about itself, a code and a reason).
   `AgentStarted.shared_items` (36) and `AgentSnapshot.shared_items` (53) name the items an agent was started with.
