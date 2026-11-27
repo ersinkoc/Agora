@@ -202,8 +202,6 @@ struct Table {
     open: BTreeMap<String, Forward>,
     /// Ids that ended by expiry, newest last.
     expired: VecDeque<String>,
-    /// The number of the last id handed out (`fwd-<n>`); ids are not reused while the node runs.
-    last: u64,
 }
 
 /// The node's forwards. One per node, shared by the control socket and (through it) the hub's commands.
@@ -223,6 +221,11 @@ impl Previews {
             budgets: Mutex::new(Budgets::default()),
             connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// How many connections are relayed now, all forwards together.
+    pub fn relayed(&self) -> usize {
+        self.connections.load(Ordering::Acquire)
     }
 
     /// The budgets new connections are held to (tests use small ones).
@@ -335,8 +338,14 @@ impl Previews {
             0 => DEFAULT_SECONDS,
             s => s.min(MAX_SECONDS),
         };
-        t.last += 1;
-        let id = format!("fwd-{}", t.last);
+        // Unguessable (review of 6221f9c9): whoever may route to this node learns an id only where the forward is shown, never by
+        // counting. Drawn again in the (astronomically unlikely) case it names a forward the table still knows.
+        let id = loop {
+            let id = new_forward_id()?;
+            if !t.open.contains_key(&id) && !t.expired.contains(&id) {
+                break id;
+            }
+        };
         let f = Forward {
             port: p,
             opened_at_ms: now_ms,
@@ -650,6 +659,20 @@ impl rustls::client::danger::ServerCertVerifier for Seen {
     }
 }
 
+/// A new forward id: `fwd-` and 128 random bits in hex. `preview.unavailable {reason: random}` in the unlikely case the system gives
+/// no random bytes.
+fn new_forward_id() -> Result<String, Error> {
+    use ring::rand::SecureRandom;
+    let mut b = [0u8; 16];
+    ring::rand::SystemRandom::new()
+        .fill(&mut b)
+        .map_err(|_| Error::new(ErrorCode::PreviewUnavailable).with("reason", "random"))?;
+    Ok(format!(
+        "fwd-{}",
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    ))
+}
+
 /// A file of at most 4 KiB as text; `None` when it is missing, larger, or not text.
 fn read_small(path: &std::path::Path) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
@@ -816,13 +839,17 @@ mod tests {
         let (_l, port) = listener();
         let p = Previews::new(Vec::new());
         let (f, changed) = p.open(u32::from(port), 0, "owner", 1_000).unwrap();
-        assert_eq!(f.forward_id, "fwd-1");
+        assert!(
+            f.forward_id.starts_with("fwd-") && f.forward_id.len() == 4 + 32,
+            "{}",
+            f.forward_id
+        );
         assert_eq!((f.port, f.creator.as_str()), (u32::from(port), "owner"));
         assert_eq!(f.expires_at_ms, 1_000 + 28_800_000);
         assert_eq!(f.state, v1::PreviewState::Open as i32);
         assert_eq!(changed, vec![f.clone()]);
         let (g, _) = p.open(u32::from(port), 999_999, "dev-1", 2_000).unwrap();
-        assert_eq!(g.forward_id, "fwd-2");
+        assert_ne!(g.forward_id, f.forward_id);
         assert_eq!(g.expires_at_ms, 2_000 + 86_400_000, "capped at a day");
         assert_eq!(p.list(3_000).0.len(), 2);
     }
@@ -899,22 +926,19 @@ mod tests {
     fn at_most_eight_are_open_and_closing_frees_a_place() {
         let (_l, port) = listener();
         let p = Previews::new(Vec::new());
-        for _ in 0..MAX_FORWARDS {
-            p.open(u32::from(port), 0, "owner", 1).unwrap();
-        }
+        let ids: Vec<String> = (0..MAX_FORWARDS)
+            .map(|_| p.open(u32::from(port), 0, "owner", 1).unwrap().0.forward_id)
+            .collect();
         let e = p.open(u32::from(port), 0, "owner", 1).unwrap_err();
         assert_eq!(code(&e), "preview.limit");
-        let changed = p.close("fwd-3", false, 2).unwrap();
+        let changed = p.close(&ids[2], false, 2).unwrap();
         assert_eq!(changed.len(), 1);
         assert_eq!(
             changed[0].close_reason,
             v1::PreviewCloseReason::Closed as i32
         );
-        assert_eq!(
-            p.open(u32::from(port), 0, "owner", 3).unwrap().0.forward_id,
-            "fwd-9",
-            "ids are not reused"
-        );
+        let again = p.open(u32::from(port), 0, "owner", 3).unwrap().0.forward_id;
+        assert!(!ids.contains(&again), "ids are not reused");
         let all = p.close("", true, 4).unwrap();
         assert_eq!(all.len(), MAX_FORWARDS);
         assert!(p.list(5).0.is_empty());

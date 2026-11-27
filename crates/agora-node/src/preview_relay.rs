@@ -26,6 +26,9 @@ use crate::preview::{Budgets, Lease};
 const POLL: Duration = Duration::from_millis(200);
 /// How long a connection to the program may take, on each loopback address.
 const CONNECT: Duration = Duration::from_secs(1);
+/// After the window ended a connection, how long what it sent may still take to reach a program that reads slowly; a program that
+/// does not read at all does not hold the connection longer.
+const DRAIN: Duration = Duration::from_secs(5);
 
 /// Sends one frame on the connection's stream (kind, payload). The control socket's writer, shared with everything else on it.
 pub type Send = Arc<dyn Fn(u8, Vec<u8>) -> std::io::Result<()> + std::marker::Send + Sync>;
@@ -53,6 +56,9 @@ struct In {
     may_send: u64,
     /// The window ended the connection (`PREVIEW_END` or `STREAM_CLOSE`), or the local connection went.
     peer_done: bool,
+    /// When `peer_done` was set: what the window sent is still written to the program for [`DRAIN`], then the connection ends
+    /// whatever the program does.
+    done_at: Option<Instant>,
     /// The window broke the stream's rules.
     violation: bool,
     /// The connection is over; frames that still come are dropped.
@@ -67,6 +73,7 @@ impl Inbox {
                 may_receive: u64::from(b.window),
                 may_send: u64::from(b.window),
                 peer_done: false,
+                done_at: None,
                 violation: false,
                 finished: false,
             }),
@@ -152,6 +159,7 @@ impl Inbox {
             kinds::PREVIEW_END | STREAM_CLOSE => {
                 self.peer_closed.store(true, Ordering::Release);
                 st.peer_done = true;
+                st.done_at.get_or_insert_with(Instant::now);
             }
             _ => {}
         }
@@ -162,7 +170,10 @@ impl Inbox {
     /// The local connection that carried the stream went: the connection ends without a word.
     pub fn gone(&self) {
         self.peer_closed.store(true, Ordering::Release);
-        self.st().peer_done = true;
+        let mut st = self.st();
+        st.peer_done = true;
+        st.done_at.get_or_insert_with(Instant::now);
+        drop(st);
         self.cv.notify_all();
     }
 
@@ -358,6 +369,19 @@ fn from_target(c: &Conn, mut tcp: TcpStream) {
         }
         if let Some(r) = c.outside() {
             return c.end(r);
+        }
+        // The window broke the rules while the other thread is held in a write to a program that does not read: ended from here,
+        // and the shutdown frees that write.
+        {
+            let st = c.inbox.st();
+            if st.violation {
+                drop(st);
+                return c.end(Some(Reason::Protocol));
+            }
+            if st.done_at.is_some_and(|t| t.elapsed() >= DRAIN) {
+                drop(st);
+                return c.end(None);
+            }
         }
         // Wait for credit.
         let allowed = {

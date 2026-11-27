@@ -489,8 +489,8 @@ fn a_node_takes_only_stream_opening_commands_on_a_dynamic_stream() {
         "{:?}",
         seen.streams
     );
-    // A preview stream is allowed there; the node has no preview yet, so it says so.
-    assert_eq!(a("preview"), "protocol.capability_missing");
+    // A preview stream is allowed there (ADR-0088); this node has no forward by that id.
+    assert_eq!(a("preview"), "preview.unknown");
 
     std::thread::sleep(Duration::from_millis(500));
     assert!(!e.marker.exists(), "the stub ran");

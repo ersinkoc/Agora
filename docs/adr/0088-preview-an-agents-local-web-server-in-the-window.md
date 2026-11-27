@@ -67,14 +67,17 @@ port and to open the node's control port: all must fail).
    `preview.v1`, error codes `preview.port_refused`, `preview.limit`, `preview.expired`, `preview.unknown`, `preview.unavailable`, golden
    fixtures, the signing domain `preview-action-v1` with vectors, and `docs/specs/preview.md`. The capability is not advertised yet (steps
    2 and 3 add it); node and hub refuse the commands with `protocol.capability_missing`.
-2. Node forwarder and policy checks: the forward table is done (`crates/agora-node/src/preview.rs`, tests in
+2. Node forwarder and policy checks: done. The forward table (`crates/agora-node/src/preview.rs`, tests in
    `crates/agora-node/tests/preview.rs`): open, close and list on the control socket and, signed under `preview-action-v1`, through the
    hub; the port rules (1024 and up, never the node's own ports, the port must answer on `127.0.0.1` or `::1`), at most 8, expiry
    (default 8 hours, at most 24), `PreviewChanged` on every open and end, every forward ended when the node stops. A port that shows a
    known hub's certificate, or a desktop app's recorded tunnel port, is refused too (review of 96786517). The relay is done on the
    control socket (`crates/agora-node/src/preview_relay.rs`): frames 20..22 under credit, chunk, rate and total budgets, at most 32
    connections per forward and 64 per node (one more ends at once with `BUDGET`, the maintainer's choice of 2026-11-27 instead of a new
-   error code), the port checked again at every connect. Left: the hub link carrying a connection's frames (lowest priority, with a
-   benchmark), then the capability `preview.v1`.
+   error code), the port checked again at every connect. The hub link carries connections too (`uplink_client.rs`: a local
+   connection per preview connection, a 16-frame queue sent only while no answer or terminal frame waits, frames tied to their
+   connection), and the node offers `preview.v1`. Measured (release, blackview, 2026-11-27): a command's round trip through the link
+   p50 98 us / p95 147 us alone, p50 294 us / p95 459 us while one preview connection carries 749 MB/s, well inside ADR-0022's
+   5 ms of Agora overhead for a remote node's keystroke round trip. Forward ids are 128 random bits (review of 6221f9c9). Done.
 3. Hub relay, origin per forward, audit: not started.
 4. Web Browser pane: not started.

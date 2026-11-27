@@ -5,7 +5,7 @@
 //! The hub is trusted only through the CA the node was given at enrollment (pinned), never the system roots.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -30,6 +30,8 @@ use crate::uplink::{Replay, Uplink, UplinkError};
 /// hub's list (`crates/agora/src/hubcli.rs`, checked there by a test), or the hub refuses every command that needs it.
 pub const CAPABILITIES: &[&str] = &[
     "terminal.raw",
+    // ADR-0088: forwards and their relayed connections (`PreviewConnect`, frames 20..22).
+    "preview.v1",
     "workspace.directory",
     "board.join",
     "mesh.spawn",
@@ -626,6 +628,13 @@ where
     // Terminal frames from relay threads, bounded so a slow hub slows the thread (and, through the local socket,
     // makes the node's own pump resync) instead of growing a queue.
     let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<Frame>(256);
+    // ADR-0088: preview frames, the lowest priority (ADR-0022): sent only while no answer and no terminal frame waits, and bounded, so
+    // a slow hub slows the preview bridges (and through their own local connections, the node's preview pumps) and nothing else. Each
+    // carries its connection's generation: a frame of a connection the hub already closed is dropped, never sent on a stream the hub
+    // gave a new connection.
+    let (preview_tx, mut preview_rx) = tokio::sync::mpsc::channel::<(u64, Frame)>(PREVIEW_QUEUE);
+    let mut previews: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    let mut next_preview: u64 = 0;
     let mut relays = Relays::default();
     // The worker for commands whose order matters; it ends when this connection (and so `ordered`) is dropped.
     let (ordered, ordered_rx) = std::sync::mpsc::channel::<(
@@ -754,6 +763,22 @@ where
                     return Err(LinkError::Suspended);
                 }
                 put(&mut conn, &f, limit).await?;
+                waited = Wake::now();
+                continue;
+            }
+            Some((generation, f)) = preview_rx.recv(), if relay_rx.is_empty() && answers.is_empty() => {
+                if waited.jumped(live.suspended_after) {
+                    return Err(LinkError::Suspended);
+                }
+                if previews.get(&f.stream_id) == Some(&generation) {
+                    let closes = f.kind == STREAM_CLOSE;
+                    put(&mut conn, &f, limit).await?;
+                    // The node closed the stream toward the hub: nothing later of this connection may follow, so it is forgotten now
+                    // and the map holds only live connections (review of 6221f9c9).
+                    if closes {
+                        previews.remove(&f.stream_id);
+                    }
+                }
                 waited = Wake::now();
                 continue;
             }
@@ -934,7 +959,7 @@ where
                     let open = relays
                         .0
                         .get(&stream)
-                        .is_some_and(|a| a.load(Ordering::Acquire));
+                        .is_some_and(|r| r.alive.load(Ordering::Acquire));
                     if open
                         || !req
                             .command
@@ -944,22 +969,62 @@ where
                         let _ = answers_tx.send(misplaced(req.request_id));
                         continue;
                     }
-                    // ADR-0088: this link does not carry a preview connection's frames toward the node yet (step 2b-ii), so a
-                    // connection would run one way only; refused as the capability it needs, which this node does not offer yet.
+                    // ADR-0088: a preview connection runs both ways, on a dedicated thread with a local connection of its own.
                     if matches!(
                         req.command,
                         Some(command_request::Command::PreviewConnect(_))
                     ) {
-                        let _ = answers_tx.send(CommandResponse {
-                            request_id: req.request_id,
-                            result: Some(command_response::Result::Err(
-                                agora_protocol::Error::new(
-                                    agora_protocol::ErrorCode::ProtocolCapabilityMissing,
-                                )
-                                .with("capability", "preview.v1")
-                                .to_info(),
-                            )),
-                        });
+                        let alive = Arc::new(AtomicBool::new(true));
+                        let inbound = Arc::new(PreviewInbound::default());
+                        relays.0.retain(|_, r| r.alive.load(Ordering::Acquire));
+                        // A preview stream the node ended and the hub never closed (an older hub, a bug) is forgotten once there are
+                        // many; not sooner, so the end of a connection still waiting in the queue reaches the hub (review of 6221f9c9).
+                        if previews.len() > PREVIEW_STREAMS_KEPT {
+                            previews.retain(|s, _| {
+                                relays
+                                    .0
+                                    .get(s)
+                                    .is_some_and(|r| r.alive.load(Ordering::Acquire))
+                            });
+                        }
+                        relays.0.insert(
+                            stream,
+                            Relay {
+                                alive: Arc::clone(&alive),
+                                inbound: Some(Arc::clone(&inbound)),
+                            },
+                        );
+                        next_preview += 1;
+                        let generation = next_preview;
+                        previews.insert(stream, generation);
+                        let (socket, answers, out, grants) = (
+                            commands.map(std::path::Path::to_path_buf),
+                            answers_tx.clone(),
+                            preview_tx.clone(),
+                            grants.clone(),
+                        );
+                        let spawned = std::thread::Builder::new()
+                            .name("agora-preview-bridge".into())
+                            .spawn({
+                                let alive = Arc::clone(&alive);
+                                move || {
+                                    relay_preview(
+                                        socket.as_deref(),
+                                        &req,
+                                        grants.as_deref(),
+                                        stream,
+                                        generation,
+                                        &alive,
+                                        &inbound,
+                                        &answers,
+                                        &out,
+                                    );
+                                    alive.store(false, Ordering::Release);
+                                }
+                            });
+                        if spawned.is_err() {
+                            alive.store(false, Ordering::Release);
+                        }
                         continue;
                     }
                     // The stream is held from here so a second request on it is refused; it is let go as soon as its relay ends,
@@ -967,8 +1032,24 @@ where
                     let alive = Arc::new(AtomicBool::new(true));
                     // Streams whose relay ended (refused, exited, closed by the node) are not closed by the hub; drop them here so the
                     // map stays as small as the relays that run (#1144 review).
-                    relays.0.retain(|_, a| a.load(Ordering::Acquire));
-                    relays.0.insert(stream, Arc::clone(&alive));
+                    relays.0.retain(|_, r| r.alive.load(Ordering::Acquire));
+                    // A preview stream the node ended and the hub never closed (an older hub, a bug) is forgotten once there are
+                    // many; not sooner, so the end of a connection still waiting in the queue reaches the hub (review of 6221f9c9).
+                    if previews.len() > PREVIEW_STREAMS_KEPT {
+                        previews.retain(|s, _| {
+                            relays
+                                .0
+                                .get(s)
+                                .is_some_and(|r| r.alive.load(Ordering::Acquire))
+                        });
+                    }
+                    relays.0.insert(
+                        stream,
+                        Relay {
+                            alive: Arc::clone(&alive),
+                            inbound: None,
+                        },
+                    );
                     let (socket, answers, out, grants) = (
                         commands.map(std::path::Path::to_path_buf),
                         answers_tx.clone(),
@@ -989,8 +1070,21 @@ where
                     });
                 }
                 (stream, STREAM_CLOSE) if stream >= FIRST_DYNAMIC_STREAM => {
-                    if let Some(alive) = relays.0.remove(&stream) {
-                        alive.store(false, Ordering::Release);
+                    // ADR-0088: nothing more of a preview connection goes to the hub on this stream; the node hears the close.
+                    previews.remove(&stream);
+                    if let Some(r) = relays.0.remove(&stream) {
+                        if let Some(inbound) = &r.inbound {
+                            inbound.push(f);
+                        }
+                        r.alive.store(false, Ordering::Release);
+                    }
+                }
+                // ADR-0088: data, credit and the end of a preview connection, toward the node.
+                (stream, kinds::PREVIEW_DATA | kinds::PREVIEW_CREDIT | kinds::PREVIEW_END)
+                    if stream >= FIRST_DYNAMIC_STREAM =>
+                {
+                    if let Some(inbound) = relays.0.get(&stream).and_then(|r| r.inbound.as_ref()) {
+                        inbound.push(f);
                     }
                 }
                 // The hub saw a gap and says where to start again.
@@ -1053,16 +1147,193 @@ impl Drop for Disconnect<'_> {
     }
 }
 
-/// The relayed terminals of one connection; when it ends their threads are told to stop.
+/// One relayed stream: whether its thread still runs, and for a preview connection what the hub sent toward the node.
+struct Relay {
+    alive: Arc<AtomicBool>,
+    inbound: Option<Arc<PreviewInbound>>,
+}
+
+/// The relayed terminals, chats and preview connections of one connection; when it ends their threads are told to stop.
 #[derive(Default)]
-struct Relays(std::collections::HashMap<u32, Arc<AtomicBool>>);
+struct Relays(std::collections::HashMap<u32, Relay>);
 
 impl Drop for Relays {
     fn drop(&mut self) {
-        for alive in self.0.values() {
-            alive.store(false, Ordering::Release);
+        for r in self.0.values() {
+            r.alive.store(false, Ordering::Release);
         }
     }
+}
+
+/// How many preview streams' generations are kept before those whose relay ended are forgotten.
+const PREVIEW_STREAMS_KEPT: usize = 1024;
+/// How many preview frames wait for the hub at most, all connections together (16 KiB each at most).
+const PREVIEW_QUEUE: usize = 16;
+/// What the hub may have sent toward the node on one preview connection and the bridge has not written yet: its credit (one window,
+/// 256 KiB) and room for the frames' own size. Past it the hub broke the credit rules and the connection ends.
+const PREVIEW_INBOUND_BYTES: usize = 2 * 262_144;
+const PREVIEW_INBOUND_FRAMES: usize = 4096;
+
+/// ADR-0088: what the hub sent on one preview connection, waiting for the bridge to write it to the node's control socket. Bounded in
+/// bytes and frames; going over marks it, and the bridge ends the connection (`PROTOCOL`).
+#[derive(Default)]
+struct PreviewInbound {
+    q: Mutex<(std::collections::VecDeque<Frame>, usize, bool)>,
+    cv: std::sync::Condvar,
+}
+
+impl PreviewInbound {
+    fn push(&self, f: Frame) {
+        let mut q = self.q.lock().unwrap_or_else(|e| e.into_inner());
+        let n = f.payload.len();
+        if q.2 {
+            return;
+        }
+        if q.1 + n > PREVIEW_INBOUND_BYTES || q.0.len() >= PREVIEW_INBOUND_FRAMES {
+            q.2 = true;
+        } else {
+            q.1 += n;
+            q.0.push_back(f);
+        }
+        drop(q);
+        self.cv.notify_all();
+    }
+
+    /// The next frame, waiting up to `wait`; `Err(())` once it overflowed.
+    fn pop(&self, wait: Duration) -> Result<Option<Frame>, ()> {
+        let mut q = self.q.lock().unwrap_or_else(|e| e.into_inner());
+        if q.0.is_empty() && !q.2 {
+            q = self
+                .cv
+                .wait_timeout(q, wait)
+                .map_or_else(|e| e.into_inner().0, |(g, _)| g);
+        }
+        if q.2 {
+            return Err(());
+        }
+        Ok(q.0.pop_front().inspect(|f| q.1 -= f.payload.len()))
+    }
+
+    fn overflowed(&self) -> bool {
+        self.q.lock().unwrap_or_else(|e| e.into_inner()).2
+    }
+}
+
+/// ADR-0088: bridges one preview connection. Opens it on a local connection of its own (so a slow hub or program slows only this
+/// connection), answers the hub, then copies what the node sends to the hub (at the lowest priority, tagged with `generation`) while
+/// a second thread writes what the hub sends to the node. Ends when either side closes, the hub closes the stream, or the link goes.
+/// Blocking: runs on its own thread.
+#[allow(clippy::too_many_arguments)]
+fn relay_preview(
+    socket: Option<&std::path::Path>,
+    req: &CommandRequest,
+    grants: Option<&crate::grants::Grants>,
+    stream: u32,
+    generation: u64,
+    alive: &Arc<AtomicBool>,
+    inbound: &Arc<PreviewInbound>,
+    answers: &tokio::sync::mpsc::UnboundedSender<CommandResponse>,
+    out: &tokio::sync::mpsc::Sender<(u64, Frame)>,
+) {
+    use agora_protocol::{Error, ErrorCode};
+    let refuse = |e: Error| {
+        alive.store(false, Ordering::Release);
+        let _ = answers.send(CommandResponse {
+            request_id: req.request_id.clone(),
+            result: Some(command_response::Result::Err(e.to_info())),
+        });
+    };
+    if let (Some(g), Some(c)) = (grants, &req.command) {
+        if let Err(e) = g.gate(c, crate::grants::now_ms()) {
+            return refuse(e);
+        }
+    }
+    let Some(socket) = socket else {
+        return refuse(
+            Error::new(ErrorCode::NodePolicyDenied)
+                .with("node_id", "")
+                .with("rule", "commands.routed"),
+        );
+    };
+    let Ok(mut local) = crate::control::Client::connect(socket) else {
+        return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
+    };
+    let Ok(resp) = local.request_on(stream, req, ROUTED_DEADLINE) else {
+        return refuse(Error::new(ErrorCode::NodeTimeout).with("node_id", ""));
+    };
+    let accepted = matches!(resp.result, Some(command_response::Result::Ok(_)));
+    let _ = answers.send(resp);
+    if !accepted {
+        alive.store(false, Ordering::Release);
+        return;
+    }
+    let to_hub = |f: Frame| out.blocking_send((generation, f)).is_ok();
+    let Ok(mut writer) = local.frame_writer() else {
+        alive.store(false, Ordering::Release);
+        let _ = to_hub(frame(stream, STREAM_CLOSE, Vec::new()));
+        return;
+    };
+    // What the hub sends, to the node, in order.
+    let toward_node = {
+        let (alive, inbound) = (Arc::clone(alive), Arc::clone(inbound));
+        std::thread::Builder::new()
+            .name("agora-preview-bridge-in".into())
+            .spawn(move || {
+                while alive.load(Ordering::Acquire) {
+                    match inbound.pop(Duration::from_millis(200)) {
+                        Ok(Some(f)) => {
+                            let last = f.kind == STREAM_CLOSE;
+                            if writer.send(&f).is_err() || last {
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(()) => {
+                            // The hub broke the credit rules: the node ends the program's connection.
+                            let _ = writer.send(&frame(stream, STREAM_CLOSE, Vec::new()));
+                            break;
+                        }
+                    }
+                }
+                alive.store(false, Ordering::Release);
+            })
+    };
+    if toward_node.is_err() {
+        alive.store(false, Ordering::Release);
+        let _ = to_hub(frame(stream, STREAM_CLOSE, Vec::new()));
+        return;
+    }
+    // What the node sends, to the hub, until its end.
+    let mut closed = false;
+    while alive.load(Ordering::Acquire) {
+        match local.read_frame(Some(Duration::from_millis(200))) {
+            Ok(Some(f)) if f.stream_id == stream => {
+                let last = f.kind == STREAM_CLOSE;
+                if !to_hub(f) {
+                    break;
+                }
+                if last {
+                    closed = true;
+                    break;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    if inbound.overflowed() && !closed {
+        let end = agora_protocol::v1::PreviewEnd {
+            reason: agora_protocol::v1::PreviewCloseReason::Protocol as i32,
+            bytes_to_target: 0,
+            bytes_from_target: 0,
+        };
+        let _ = to_hub(frame(stream, kinds::PREVIEW_END, end.encode_to_vec()));
+        let _ = to_hub(frame(stream, STREAM_CLOSE, Vec::new()));
+    } else if !closed && alive.load(Ordering::Acquire) {
+        // The node's side went without a close: tell the hub.
+        let _ = to_hub(frame(stream, STREAM_CLOSE, Vec::new()));
+    }
+    alive.store(false, Ordering::Release);
 }
 
 /// Bridges one terminal subscription: opens the stream on the node's control socket, answers the hub's request,

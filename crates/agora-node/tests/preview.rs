@@ -265,9 +265,11 @@ fn the_owner_opens_lists_and_closes_a_forward_and_each_change_is_recorded() {
     let r = local(&e, open(port, 0));
     assert_eq!(code(&r), "ok");
     let f = forward(&r);
-    assert_eq!(
-        (f.port, f.creator.as_str(), f.forward_id.as_str()),
-        (port, "owner", "fwd-1")
+    assert_eq!((f.port, f.creator.as_str()), (port, "owner"));
+    assert!(
+        f.forward_id.starts_with("fwd-") && f.forward_id.len() == 36,
+        "unguessable: {}",
+        f.forward_id
     );
     assert_eq!(f.expires_at_ms - f.opened_at_ms, 8 * 3600 * 1000);
     assert_eq!(listed(&e), vec![f.clone()]);
@@ -296,7 +298,7 @@ fn the_owner_opens_lists_and_closes_a_forward_and_each_change_is_recorded() {
     let both = local(
         &e,
         Cmd::PreviewClose(v1::PreviewClose {
-            forward_id: "fwd-1".into(),
+            forward_id: "fwd-any".into(),
             all: true,
         }),
     );
@@ -802,4 +804,299 @@ fn a_stream_used_again_right_after_a_close_carries_nothing_of_the_old_connection
             "round {round}: bytes of two connections on one stream"
         );
     }
+}
+
+// ---- through the hub link (step 2b-ii) ----
+
+type Ws = agora_protocol::ws::Conn<tokio::net::TcpStream>;
+
+/// The node's link to a fake hub: the runtime, the hub's side once the handshake is done, and the link (dropped to stop it).
+fn hub_link(
+    n: &Node,
+    e: &Env,
+) -> (
+    tokio::runtime::Runtime,
+    Ws,
+    agora_node::uplink_client::UplinkHandle,
+) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let l = rt
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let port = l.local_addr().unwrap().port();
+    let uplink = spawn(
+        Arc::clone(&n.events),
+        HubLink {
+            url: format!("ws://127.0.0.1:{port}"),
+            ca_pem: String::new(),
+            cert_pem: String::new(),
+            key_pem: String::new(),
+            commands: Some(e.dir.join("c.sock")),
+            mesh_out: None,
+            grants: Some(Arc::clone(&n.grants)),
+            mesh: None,
+            devices: None,
+            state_dir: None,
+            certs: None,
+        },
+    )
+    .unwrap();
+    let ws = rt.block_on(async move {
+        let (s, _) = l.accept().await.unwrap();
+        let mut c = agora_protocol::ws::accept(s).await.unwrap();
+        let hello = c.recv().await.unwrap().unwrap();
+        assert_eq!(hello.kind, kinds::HELLO);
+        let hello = v1::Hello::decode(hello.payload.as_slice()).unwrap();
+        assert!(
+            hello.capabilities.iter().any(|c| c == "preview.v1"),
+            "the node offers previews"
+        );
+        let welcome = v1::Welcome {
+            chosen_generation: 1,
+            ..Default::default()
+        };
+        c.send(&frame(
+            STREAM_CONTROL,
+            kinds::WELCOME,
+            welcome.encode_to_vec(),
+        ))
+        .await
+        .unwrap();
+        while c.recv().await.unwrap().unwrap().kind != kinds::RESUME {}
+        let ok = v1::ResumeOk { from_seq: 1 };
+        c.send(&frame(STREAM_CONTROL, kinds::RESUME_OK, ok.encode_to_vec()))
+            .await
+            .unwrap();
+        c
+    });
+    (rt, ws, uplink)
+}
+
+/// Frames from the node on `stream` (and the answers on stream 1) until `until` holds or 10 s pass; pings are answered.
+async fn hub_frames(c: &mut Ws, stream: u32, until: impl Fn(&[Frame]) -> bool) -> Vec<Frame> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut out = Vec::new();
+    while !until(&out) {
+        let Ok(Ok(Some(f))) = tokio::time::timeout_at(deadline, c.recv()).await else {
+            break;
+        };
+        if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) {
+            let _ = c.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload)).await;
+        } else if f.stream_id == stream || (f.stream_id, f.kind) == (STREAM_COMMANDS, 1) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+fn connect_req(id: &str, forward_id: &str) -> Vec<u8> {
+    CommandRequest {
+        request_id: id.into(),
+        command: Some(Cmd::PreviewConnect(v1::PreviewConnect {
+            forward_id: forward_id.into(),
+        })),
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
+fn answered(fs: &[Frame], id: &str) -> Option<String> {
+    fs.iter()
+        .filter(|f| (f.stream_id, f.kind) == (STREAM_COMMANDS, 1))
+        .map(|f| CommandResponse::decode(f.payload.as_slice()).unwrap())
+        .find(|r| r.request_id == id)
+        .map(|r| code(&r))
+}
+
+#[test]
+fn through_the_hub_a_connection_carries_bytes_both_ways_and_a_reused_stream_gets_only_its_own() {
+    let e = env("hub-relay", "");
+    let n = node(&e);
+    let (port, _) = echo();
+    let id = opened(&e, port);
+    let (rt, mut c, uplink) = hub_link(&n, &e);
+    rt.block_on(async {
+        c.send(&frame(3, 0, connect_req("c1", &id))).await.unwrap();
+        let fs = hub_frames(&mut c, 3, |fs| answered(fs, "c1").is_some()).await;
+        assert_eq!(answered(&fs, "c1").as_deref(), Some("ok"));
+        c.send(&frame(3, kinds::PREVIEW_DATA, b"hello".to_vec()))
+            .await
+            .unwrap();
+        let fs = hub_frames(&mut c, 3, |fs| data(fs).len() >= 5).await;
+        assert_eq!(data(&fs), b"hello");
+        // The hub ends it and gives the stream a new connection at once.
+        c.send(&frame(3, STREAM_CLOSE, Vec::new())).await.unwrap();
+        c.send(&frame(3, 0, connect_req("c2", &id))).await.unwrap();
+        let fs = hub_frames(&mut c, 3, |fs| answered(fs, "c2").is_some()).await;
+        assert_eq!(answered(&fs, "c2").as_deref(), Some("ok"));
+        c.send(&frame(3, kinds::PREVIEW_DATA, b"again".to_vec()))
+            .await
+            .unwrap();
+        let fs = hub_frames(&mut c, 3, |fs| data(fs).len() >= 5).await;
+        assert_eq!(
+            data(&fs),
+            b"again",
+            "only the new connection's bytes after its answer"
+        );
+    });
+    drop(uplink);
+}
+
+#[test]
+fn through_the_hub_data_beyond_the_credit_ends_the_connection() {
+    let e = env("hub-credit", "");
+    let n = node(&e);
+    // A program that never reads: the node's credit is not given back.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = u32::from(l.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in l.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let id = opened(&e, port);
+    let (rt, mut c, uplink) = hub_link(&n, &e);
+    rt.block_on(async {
+        c.send(&frame(3, 0, connect_req("c1", &id))).await.unwrap();
+        let fs = hub_frames(&mut c, 3, |fs| answered(fs, "c1").is_some()).await;
+        assert_eq!(answered(&fs, "c1").as_deref(), Some("ok"));
+        // Far beyond the window, without waiting for credit.
+        for _ in 0..200 {
+            c.send(&frame(3, kinds::PREVIEW_DATA, vec![b'x'; 16_384]))
+                .await
+                .unwrap();
+        }
+        let fs = hub_frames(&mut c, 3, |fs| fs.iter().any(|f| f.kind == STREAM_CLOSE)).await;
+        let end = end_of(&fs);
+        assert!(
+            end.reason == v1::PreviewCloseReason::Protocol as i32,
+            "ended for breaking the credit rules: {end:?}"
+        );
+    });
+    drop(uplink);
+}
+
+#[test]
+fn a_program_that_never_reads_does_not_hold_a_connection_the_window_ended() {
+    let e = env("never-reads", "");
+    let n = node(&e);
+    // The program neither reads nor writes: only the node's own drain time can end the connection.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = u32::from(l.local_addr().unwrap().port());
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in l.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let id = opened(&e, port);
+    let mut c = client(&e);
+    assert_eq!(code(&connect(&mut c, 3, &id)), "ok");
+    // Send within the credit until the node stops giving it back (it is held in a write to the program), then end it.
+    let mut credit: u64 = 262_144;
+    let mut quiet_since = std::time::Instant::now();
+    while quiet_since.elapsed() < Duration::from_secs(1) {
+        if credit >= 16_384 {
+            c.send_frame(3, kinds::PREVIEW_DATA, vec![b'x'; 16_384])
+                .unwrap();
+            credit -= 16_384;
+            continue;
+        }
+        if let Ok(Some(f)) = c.read_frame(Some(Duration::from_millis(50))) {
+            if f.stream_id == 3 && f.kind == kinds::PREVIEW_CREDIT {
+                credit += u64::from(
+                    v1::PreviewCredit::decode(f.payload.as_slice())
+                        .unwrap()
+                        .bytes,
+                );
+                quiet_since = std::time::Instant::now();
+            }
+        }
+    }
+    assert_eq!(n.previews.relayed(), 1);
+    let ended = std::time::Instant::now();
+    c.send_frame(3, STREAM_CLOSE, Vec::new()).unwrap();
+    while n.previews.relayed() > 0 && ended.elapsed() < Duration::from_secs(15) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let took = ended.elapsed();
+    assert_eq!(n.previews.relayed(), 0, "the connection was let go");
+    assert!(
+        took >= Duration::from_secs(4),
+        "what the window sent had its drain time first: {took:?}"
+    );
+    assert!(took < Duration::from_secs(10), "and not longer: {took:?}");
+}
+
+/// ADR-0022 measurement for step 2b-ii (run with `--ignored --nocapture`): the round trip of a command through the hub link, alone
+/// and while a preview connection floods the link from a program that writes without end (the hub grants credit as fast as it reads).
+/// Preview frames go only when no answer and no terminal frame waits, so the round trip must stay where it is.
+#[test]
+#[ignore = "a measurement, printed; run by hand"]
+fn measure_answers_through_the_hub_while_a_preview_floods_the_link() {
+    let e = env("bench", "");
+    let n = node(&e);
+    let port = streamer();
+    let id = opened(&e, port);
+    let (rt, mut c, uplink) = hub_link(&n, &e);
+    rt.block_on(async {
+        async fn round_trips(c: &mut Ws, count: usize, flood: bool) -> (Vec<Duration>, u64) {
+            let mut times = Vec::new();
+            let mut bytes = 0u64;
+            for i in 0..count {
+                let id = format!("q{i}-{flood}");
+                let req = CommandRequest {
+                    request_id: id.clone(),
+                    command: Some(Cmd::PreviewList(v1::PreviewList {})),
+                    ..Default::default()
+                };
+                let at = tokio::time::Instant::now();
+                c.send(&frame(STREAM_COMMANDS, 0, req.encode_to_vec())).await.unwrap();
+                loop {
+                    let f = c.recv().await.unwrap().unwrap();
+                    if f.stream_id == 3 && f.kind == kinds::PREVIEW_DATA {
+                        bytes += f.payload.len() as u64;
+                        let credit = v1::PreviewCredit { bytes: u32::try_from(f.payload.len()).unwrap() };
+                        c.send(&frame(3, kinds::PREVIEW_CREDIT, credit.encode_to_vec())).await.unwrap();
+                    } else if (f.stream_id, f.kind) == (STREAM_CONTROL, kinds::PING) {
+                        let _ = c.send(&frame(STREAM_CONTROL, kinds::PONG, f.payload)).await;
+                    } else if (f.stream_id, f.kind) == (STREAM_COMMANDS, 1)
+                        && CommandResponse::decode(f.payload.as_slice()).unwrap().request_id == id
+                    {
+                        times.push(at.elapsed());
+                        break;
+                    }
+                }
+            }
+            (times, bytes)
+        }
+        fn p(times: &mut [Duration], q: f64) -> f64 {
+            times.sort();
+            let i = ((times.len() as f64 - 1.0) * q).round() as usize;
+            times[i].as_secs_f64() * 1e6
+        }
+        let (mut alone, _) = round_trips(&mut c, 300, false).await;
+        c.send(&frame(3, 0, connect_req("flood", &id))).await.unwrap();
+        let started = std::time::Instant::now();
+        let (mut flooded, bytes) = round_trips(&mut c, 300, true).await;
+        let secs = started.elapsed().as_secs_f64();
+        println!(
+            "answers alone:      p50 {:.0} us, p95 {:.0} us, max {:.0} us",
+            p(&mut alone, 0.5),
+            p(&mut alone, 0.95),
+            p(&mut alone, 1.0)
+        );
+        println!(
+            "answers in a flood: p50 {:.0} us, p95 {:.0} us, max {:.0} us; preview {:.1} MB/s meanwhile",
+            p(&mut flooded, 0.5),
+            p(&mut flooded, 0.95),
+            p(&mut flooded, 1.0),
+            bytes as f64 / secs / 1e6
+        );
+    });
+    drop(uplink);
 }

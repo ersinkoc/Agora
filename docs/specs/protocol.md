@@ -969,11 +969,10 @@ and means "speaks these messages"; a hub that cannot pair (it does not know its 
 ### Preview (ADR-0088)
 
 `schema/agora/v1/preview.proto`, `docs/specs/preview.md` is the design. A node answers `PreviewOpen`, `PreviewClose` and `PreviewList`,
-records `PreviewChanged`, and relays `PreviewConnect` on its own control socket (build step 2, `crates/agora-node/src/preview.rs` and
-`preview_relay.rs`); its hub link does not carry a connection yet (it answers a routed `PreviewConnect` with `capability` = `preview.v1`),
-and no hub relays one.
-All additions; nothing published changed. Capability `preview.v1` is **not offered yet**: the node offers it once it relays
-`PreviewConnect` (the rest of build step 2) and the hub relay (step 3) adds it, and a hub never sends a preview command to a node that did
+records `PreviewChanged`, and relays `PreviewConnect` on its control socket and through its hub link (build step 2,
+`crates/agora-node/src/preview.rs`, `preview_relay.rs`, `uplink_client.rs`); no hub relays one yet.
+All additions; nothing published changed. Capability `preview.v1`: the node offers it in its `Hello` (from 0.3.42); the hub relay
+(step 3) adds it to the hub's list, and a hub never sends a preview command to a node that did
 not offer it. **Older peers refuse, they do not drop:** until then every peer answers `protocol.capability_missing`. The hub answers
 `PreviewConnect` with `capability` = `preview.v1`; a node that does not handle a preview command answers, as for any command it does
 not know, with `capability` = the command's name (`preview.open`, `preview.close`, `preview.list`, `preview.connect`). A client treats
@@ -1010,7 +1009,10 @@ already sent may still arrive after a side ended a stream; it drops them. Nothin
 and once the next `PreviewConnect` on the same stream is answered, nothing of the old connection follows (the node seals it first); a
 stream whose connection the client has not ended takes no second `PreviewConnect` (`protocol.invalid_message {field: stream_id}`). The node writes every byte
 it read from the program before it says `TARGET_GONE`, and the `PREVIEW_END` counters are the bytes relayed each way. The node never
-reads or changes the bytes (`Host`, `Origin` and every header reach the program as sent). Preview frames are the lowest priority (section 6): they never delay terminal bytes, and input
+reads or changes the bytes (`Host`, `Origin` and every header reach the program as sent). On the node's hub link each preview connection runs on a local connection
+of its own, and its frames to the hub wait in one small queue (16 frames) that is sent only while no answer and no terminal frame
+waits; each frame is tied to its connection, so after the hub closes a stream nothing of that connection is sent on it again. Preview
+frames are the lowest priority (section 6): they never delay terminal bytes, and input
   outranks them. `PreviewCloseReason`: `CLOSED`, `EXPIRED`, `NODE_STOPPED`, `TARGET_GONE`, `BUDGET`, `PROTOCOL`, `POLICY`. Constants:
   `agora_protocol::frame::kinds::{PREVIEW_DATA, PREVIEW_CREDIT, PREVIEW_END}`.
 - **Signing: `preview-action-v1`.** Through the hub a `PreviewOpen` carries a `PreviewAuthorization { device_id, nonce, expires_at_ms,

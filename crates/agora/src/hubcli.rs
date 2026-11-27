@@ -21,6 +21,14 @@ use crate::{home, Opts, Say};
 
 pub(crate) const DEFAULT_LISTEN: &str = "127.0.0.1:7443";
 
+/// What a node offers that this hub does not agree on yet, so it refuses every command that needs it. Each one names the step that
+/// takes it out of here and adds it to `HUB_CAPABILITIES`.
+#[cfg(test)]
+const NOT_YET_ON_THE_HUB: &[&str] = &[
+    // ADR-0088 step 3: the hub relays preview forwards and their connections.
+    "preview.v1",
+];
+
 /// What this hub agrees on with a node that offers it. Every capability a node offers
 /// (`agora_node::uplink_client::CAPABILITIES`) must be here, or the hub refuses each command that needs it (ADR-0053's
 /// `directory.list` was missing once, #378); `the_hub_agrees_on_every_capability_a_node_offers` checks it. A capability added here
@@ -3089,7 +3097,24 @@ mod tests {
         // Including the ones no client can send (`board.join` goes only from the hub to nodes), which the real hub-and-node test
         // in `tests/hub_cli.rs` cannot reach.
         for c in agora_node::uplink_client::CAPABILITIES {
+            if NOT_YET_ON_THE_HUB.contains(c) {
+                continue;
+            }
             assert!(HUB_CAPABILITIES.contains(c), "the hub does not support {c}");
+        }
+    }
+
+    #[test]
+    fn a_capability_waits_on_the_hub_only_while_a_node_offers_it_and_the_hub_does_not() {
+        for c in NOT_YET_ON_THE_HUB {
+            assert!(
+                agora_node::uplink_client::CAPABILITIES.contains(c),
+                "no node offers {c}"
+            );
+            assert!(
+                !HUB_CAPABILITIES.contains(c),
+                "the hub already agrees on {c}: take it out of NOT_YET_ON_THE_HUB"
+            );
         }
     }
 

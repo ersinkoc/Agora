@@ -2813,6 +2813,18 @@ fn pump_chat(
 }
 
 /// A blocking client for the control socket (used by the CLI and tests).
+/// Writes frames on a control connection ([`Client::writer`]).
+pub struct FrameWriter(LocalStream);
+
+impl FrameWriter {
+    pub fn send(&mut self, frame: &Frame) -> io::Result<()> {
+        let bytes = frame
+            .encode(DEFAULT_MAX_PAYLOAD)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame too large"))?;
+        self.0.write_all(&bytes)
+    }
+}
+
 pub struct Client {
     stream: LocalStream,
     decoder: Decoder,
@@ -2983,6 +2995,12 @@ impl Client {
                 self.pending.push_back(frame);
             }
         }
+    }
+
+    /// A second handle on this connection for writing frames from another thread while this one reads (ADR-0088: the hub link's
+    /// preview bridge writes what the hub sends while it reads what the node sends).
+    pub fn frame_writer(&self) -> io::Result<FrameWriter> {
+        Ok(FrameWriter(self.stream.try_clone()?))
     }
 
     /// Sends one frame that is not a request on `stream_id`: the data, credit and end of a relayed preview connection (ADR-0088).
