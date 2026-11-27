@@ -1002,6 +1002,9 @@ fn node_run(say: &Say, o: &Opts) -> ExitCode {
             PortSource::Listen(hubcli::hub_dir(o).join(hubcli::LISTEN_FILE)),
             PortSource::HubUrl(link.join("url")),
             PortSource::Port(link.join("panel-port")),
+            PortSource::HubCa(hubcli::hub_dir(o).join("ca.pem")),
+            PortSource::HubCa(link.join("ca.pem")),
+            PortSource::HubIssuer(agora_hub::ca::HUB_CA_NAME.to_string()),
         ]);
         node.previews
             .add_sources(agora_node::preview::default_sources(&h));

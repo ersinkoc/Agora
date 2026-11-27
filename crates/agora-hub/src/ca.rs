@@ -50,6 +50,10 @@ pub struct IssuedCert {
     pub serial_hex: String,
 }
 
+/// The common name of a hub's own CA (`agora hub` makes it once). A node refuses a preview of a port that shows a certificate issued
+/// under it (ADR-0088), so a hub on the same machine is never reached as a loopback peer.
+pub const HUB_CA_NAME: &str = "Agora hub CA";
+
 fn name(cn: &str) -> DistinguishedName {
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, cn);

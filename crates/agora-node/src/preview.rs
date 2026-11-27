@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agora_protocol::v1;
@@ -38,9 +38,17 @@ pub enum PortSource {
     Listen(PathBuf),
     /// A file holding a port number alone: the panel's `panel-port`.
     Port(PathBuf),
+    /// A folder whose file names are ports: the desktop app's tunnels (`<home>/desktop/tunnels/<port>`), one per running app.
+    PortDir(PathBuf),
+    /// The common name a hub's CA carries (`agora_hub::ca::HUB_CA_NAME`, passed in by the binary): a port that shows a certificate
+    /// issued under that name is refused even when the node cannot read that hub's CA. A name match, not a proof; it only refuses.
+    HubIssuer(String),
     /// A file holding the hub's address as the node dials it (`wss://host:port`, the link's `url`): its port counts when the host is
     /// this machine, or when the node cannot tell.
     HubUrl(PathBuf),
+    /// A hub CA certificate (PEM): the hub's own `ca.pem`, the link's `ca.pem`. A port that answers a TLS handshake with a
+    /// certificate this CA signed is a hub, wherever its `listen` file is (another home, a write that failed): the node's own.
+    HubCa(PathBuf),
 }
 
 /// The sources for a home laid out the default way: `<home>/hub/listen`, `<home>/link/url` and `<home>/link/panel-port`.
@@ -49,6 +57,9 @@ pub fn default_sources(home: &std::path::Path) -> Vec<PortSource> {
         PortSource::Listen(home.join("hub").join("listen")),
         PortSource::HubUrl(home.join("link").join("url")),
         PortSource::Port(home.join("link").join("panel-port")),
+        PortSource::PortDir(home.join("desktop").join("tunnels")),
+        PortSource::HubCa(home.join("hub").join("ca.pem")),
+        PortSource::HubCa(home.join("link").join("ca.pem")),
     ]
 }
 
@@ -141,7 +152,7 @@ impl Previews {
         if port < FIRST_UNPRIVILEGED_PORT {
             return Err(refused("privileged"));
         }
-        if self.own_ports().contains(&p) {
+        if self.own_ports().contains(&p) || self.is_a_hub(p) {
             return Err(refused("node_port"));
         }
         // Before the table's lock: a probe waits up to a second, and a list or a close must not wait for it.
@@ -277,6 +288,36 @@ impl Previews {
             .collect()
     }
 
+    /// Whether `p` answers like a hub this node knows: a TLS handshake on a loopback address shows a certificate one of the
+    /// [`PortSource::HubCa`] certificates signed. A port that speaks no TLS, or shows another certificate, is not one.
+    fn is_a_hub(&self, p: u16) -> bool {
+        let (cas, issuers): (Vec<Vec<u8>>, Vec<String>) = {
+            let sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+            let cas = sources
+                .iter()
+                .filter_map(|s| match s {
+                    PortSource::HubCa(path) => read_ca(path),
+                    _ => None,
+                })
+                .collect();
+            let issuers = sources
+                .iter()
+                .filter_map(|s| match s {
+                    PortSource::HubIssuer(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect();
+            (cas, issuers)
+        };
+        if cas.is_empty() && issuers.is_empty() {
+            return false;
+        }
+        loopback_order(p)
+            .iter()
+            .filter_map(|a| shown_certificate(*a))
+            .any(|leaf| cas.iter().any(|ca| signed_by(&leaf, ca)) || issued_under(&leaf, &issuers))
+    }
+
     /// The node's own ports, read now from every source. A source that cannot be read names no port (the file is not there when the
     /// hub or the panel does not run on this machine).
     fn own_ports(&self) -> Vec<u16> {
@@ -300,6 +341,14 @@ impl Previews {
                         out.push(p);
                     }
                 }
+                PortSource::PortDir(dir) => {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        out.extend(entries.flatten().take(256).filter_map(|e| {
+                            e.file_name().to_str().and_then(|n| n.parse::<u16>().ok())
+                        }));
+                    }
+                }
+                PortSource::HubCa(_) | PortSource::HubIssuer(_) => {}
                 PortSource::HubUrl(path) => {
                     if let Some((host, port)) = read_small(path).as_deref().and_then(url_host_port)
                     {
@@ -311,6 +360,128 @@ impl Previews {
             }
         }
         out
+    }
+}
+
+/// The first certificate (DER) of a PEM file of at most 64 KiB.
+fn read_ca(path: &std::path::Path) -> Option<Vec<u8>> {
+    use rustls::pki_types::pem::PemObject;
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > 64 * 1024 {
+        return None;
+    }
+    let pem = std::fs::read(path).ok()?;
+    let der = rustls::pki_types::CertificateDer::pem_slice_iter(&pem)
+        .next()?
+        .ok()?;
+    Some(der.as_ref().to_vec())
+}
+
+/// Whether `leaf`'s issuer has one of `names` as its common name.
+fn issued_under(leaf: &[u8], names: &[String]) -> bool {
+    let Ok((_, cert)) = x509_parser::parse_x509_certificate(leaf) else {
+        return false;
+    };
+    let found = cert
+        .issuer()
+        .iter_common_name()
+        .filter_map(|cn| cn.as_str().ok())
+        .any(|cn| names.iter().any(|n| n == cn));
+    found
+}
+
+/// Whether `leaf` is `ca` itself or carries a signature `ca`'s key made.
+fn signed_by(leaf: &[u8], ca: &[u8]) -> bool {
+    if leaf == ca {
+        return true;
+    }
+    let (Ok((_, leaf)), Ok((_, ca))) = (
+        x509_parser::parse_x509_certificate(leaf),
+        x509_parser::parse_x509_certificate(ca),
+    ) else {
+        return false;
+    };
+    leaf.verify_signature(Some(ca.public_key())).is_ok()
+}
+
+/// The certificate a TLS server on `addr` shows, if it speaks TLS: the handshake is started and given up as soon as the certificate
+/// arrives (nothing is sent after it, no key is trusted). `None` when nothing answers, the program is not a TLS server, or it does not
+/// answer within [`PROBE`].
+fn shown_certificate(addr: SocketAddr) -> Option<Vec<u8>> {
+    use std::io::Write;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let seen = Arc::new(Seen {
+        provider: Arc::clone(&provider),
+        leaf: Mutex::new(None),
+    });
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .ok()?
+        .dangerous()
+        .with_custom_certificate_verifier(
+            Arc::clone(&seen) as Arc<dyn rustls::client::danger::ServerCertVerifier>
+        )
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
+    let mut conn = rustls::ClientConnection::new(Arc::new(config), name).ok()?;
+    let mut sock = TcpStream::connect_timeout(&addr, PROBE).ok()?;
+    sock.set_read_timeout(Some(PROBE)).ok()?;
+    sock.set_write_timeout(Some(PROBE)).ok()?;
+    // A few rounds at most: the client hello, then the server's flight, which carries the certificate.
+    for _ in 0..8 {
+        if conn.complete_io(&mut sock).is_err() || !conn.is_handshaking() {
+            break;
+        }
+    }
+    let _ = sock.flush();
+    let leaf = seen.leaf.lock().unwrap_or_else(|e| e.into_inner()).take();
+    leaf
+}
+
+/// A verifier that only remembers the server's certificate and then ends the handshake. Used by [`shown_certificate`] alone: it
+/// trusts nothing, since the connection is closed before any byte of data.
+#[derive(Debug)]
+struct Seen {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    leaf: Mutex<Option<Vec<u8>>>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for Seen {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        *self.leaf.lock().unwrap_or_else(|e| e.into_inner()) = Some(end_entity.as_ref().to_vec());
+        // Ends the handshake here: the probe has what it came for.
+        Err(rustls::Error::General("preview probe".into()))
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("preview probe".into()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("preview probe".into()))
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -640,6 +811,102 @@ mod tests {
             v1::PreviewCloseReason::NodeStopped as i32
         );
         assert!(p.list(2).0.is_empty());
+    }
+
+    /// A CA (PEM) and a TLS server on loopback showing a leaf it signed; the server answers handshakes until the test ends.
+    fn tls_server(dir: &std::path::Path, name: &str) -> (std::path::PathBuf, u16) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut cp = CertificateParams::new(Vec::<String>::new()).unwrap();
+        cp.distinguished_name = rcgen::DistinguishedName::new();
+        cp.distinguished_name
+            .push(rcgen::DnType::CommonName, "test hub CA");
+        cp.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        let ca = cp.self_signed(&ca_key).unwrap();
+        let issuer = Issuer::from_ca_cert_pem(&ca.pem(), &ca_key).unwrap();
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf = CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .signed_by(&leaf_key, &issuer)
+            .unwrap();
+        let ca_file = dir.join(format!("{name}.pem"));
+        std::fs::write(&ca_file, ca.pem()).unwrap();
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![leaf.der().clone()],
+                rustls::pki_types::PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+            )
+            .unwrap(),
+        );
+        let (l, port) = listener();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut c = rustls::ServerConnection::new(Arc::clone(&config)).unwrap();
+                while c.is_handshaking() {
+                    if c.complete_io(&mut s).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (ca_file, port)
+    }
+
+    #[test]
+    fn a_recorded_desktop_tunnel_port_is_the_nodes_own() {
+        let dir =
+            std::env::temp_dir().join(format!("agora-preview-tunnels-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("desktop/tunnels")).unwrap();
+        let (_tunnel, tunnel) = listener();
+        let (_app, app) = listener();
+        std::fs::write(dir.join("desktop/tunnels").join(tunnel.to_string()), b"").unwrap();
+        std::fs::write(dir.join("desktop/tunnels/not-a-port"), b"").unwrap();
+        let p = Previews::new(default_sources(&dir));
+        assert_eq!(
+            reason(&p.open(u32::from(tunnel), 0, "owner", 1).unwrap_err()),
+            Some("node_port")
+        );
+        assert!(p.open(u32::from(app), 0, "owner", 1).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_port_that_shows_a_known_hubs_certificate_is_the_nodes_own() {
+        let dir = std::env::temp_dir().join(format!("agora-preview-tls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (hub_ca, hub) = tls_server(&dir, "hub");
+        let (_other_ca, other) = tls_server(&dir, "other");
+        let (_plain, plain) = listener();
+        let p = Previews::new(vec![PortSource::HubCa(hub_ca)]);
+        let e = p.open(u32::from(hub), 0, "owner", 1).unwrap_err();
+        assert_eq!(
+            reason(&e),
+            Some("node_port"),
+            "a hub with no listen file this node can read"
+        );
+        assert!(
+            p.open(u32::from(other), 0, "owner", 1).is_ok(),
+            "a TLS server under another CA"
+        );
+        assert!(
+            p.open(u32::from(plain), 0, "owner", 1).is_ok(),
+            "a server that speaks no TLS"
+        );
+        // A hub whose CA this node cannot read, known by its CA's name.
+        let named = Previews::new(vec![PortSource::HubIssuer("test hub CA".into())]);
+        assert_eq!(
+            reason(&named.open(u32::from(other), 0, "owner", 1).unwrap_err()),
+            Some("node_port")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

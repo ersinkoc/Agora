@@ -395,11 +395,15 @@ async fn connect(
         .to_string()
     })?;
     // The remembered port first; if something else holds it now, any free one (the page then signs in again).
-    let tunnel = match open(&hub, &ca_pem, port.unwrap_or(0)).await {
+    let mut tunnel = match open(&hub, &ca_pem, port.unwrap_or(0)).await {
         Ok(t) => t,
         Err(_) if port.is_some() => open(&hub, &ca_pem, 0).await.map_err(|e| format!("{e:?}"))?,
         Err(e) => return Err(format!("{e:?}")),
     };
+    // ADR-0088: a node on this machine never forwards a preview to the tunnel (the page's requests are addressed to it).
+    if let Some(dir) = agora_desktop_tunnel::record_dir() {
+        tunnel.record_in(&dir);
+    }
     let local = tunnel.local;
     let saved = Saved {
         hub,

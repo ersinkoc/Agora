@@ -22,8 +22,12 @@ shows the page in an isolated frame. Nothing else on the node's loopback becomes
 
 ## Rules the node enforces (never widened by the hub)
 The node's own ports are read again at every open from where the binary writes them: the hub on this machine (`<home>/hub/listen`,
-also any `--hub-dir`), the hub the node dials when its address is this machine or the node cannot tell (`<home>/link/url`), and the
-panel (`<home>/link/panel-port`). The node itself listens on no TCP port (its control socket and the holder's are local sockets). A
+also any `--hub-dir`), the hub the node dials when its address is this machine or the node cannot tell (`<home>/link/url`), the
+panel (`<home>/link/panel-port`), the desktop app's tunnels (`<home>/desktop/tunnels/<port>`, written by each running app and
+removed when its tunnel closes: inside the app a page's requests are addressed to the tunnel itself and would pass its own check), and
+any port that answers a TLS handshake with a certificate signed by a hub CA the node knows (`<home>/hub/ca.pem`, `<home>/link/ca.pem`)
+or issued under a hub CA's name: that covers a hub under another home and a hub whose `listen` file was not written.
+The probe starts the handshake, takes the certificate and closes; it trusts nothing and sends no data. The node itself listens on no TCP port (its control socket and the holder's are local sockets). A
 hub on this machine trusts a peer on its loopback more than a remote one (proxy headers, ADR-0067's local exemptions), so a forward to
 it would hand the window that trust; that is why those ports are refused even for the owner.
 

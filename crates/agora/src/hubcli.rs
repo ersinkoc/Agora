@@ -144,7 +144,7 @@ fn load_or_create_ca(dir: &Path) -> Result<Ca, String> {
         }
         (false, false) => {}
     }
-    let ca = Ca::generate("Agora hub CA").map_err(|e| e.to_string())?;
+    let ca = Ca::generate(agora_hub::ca::HUB_CA_NAME).map_err(|e| e.to_string())?;
     std::fs::write(&cert, ca.cert_pem()).map_err(|e| e.to_string())?;
     agora_platform::write_private(&key, ca.key_pem().as_bytes()).map_err(|e| e.to_string())?;
     Ok(ca)

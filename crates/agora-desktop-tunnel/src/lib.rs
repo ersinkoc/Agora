@@ -298,12 +298,44 @@ pub struct Tunnel {
     /// The loopback address the webview loads.
     pub local: SocketAddr,
     task: tokio::task::JoinHandle<()>,
+    /// The file that names this tunnel's port for the node ([`Tunnel::record_in`]), removed with the tunnel.
+    record: Option<std::path::PathBuf>,
 }
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
         self.task.abort();
+        if let Some(f) = self.record.take() {
+            let _ = std::fs::remove_file(f);
+        }
     }
+}
+
+impl Tunnel {
+    /// ADR-0088: writes this tunnel's port as `<dir>/<port>` (closed to other users) so a node on this machine never forwards a
+    /// preview to it. Inside the desktop app a page's requests are addressed to the tunnel itself, so they would pass its own address
+    /// check and reach the hub as a loopback peer. The file goes with the tunnel; one left by an app that was killed only keeps that
+    /// port refused. A file that cannot be written is ignored: the tunnel works the same.
+    pub fn record_in(&mut self, dir: &std::path::Path) {
+        let file = dir.join(self.local.port().to_string());
+        if std::fs::create_dir_all(dir).is_ok() && agora_platform::write_private(&file, b"").is_ok()
+        {
+            self.record = Some(file);
+        }
+    }
+}
+
+/// Where tunnel ports are recorded for the node: `<home>/desktop/tunnels`, home being `AGORA_HOME` or `.agora` in the user's home
+/// folder, as the `agora` command finds it. `None` when there is no home folder.
+pub fn record_dir() -> Option<std::path::PathBuf> {
+    let home = match std::env::var_os("AGORA_HOME") {
+        Some(h) => std::path::PathBuf::from(h),
+        None => std::path::PathBuf::from(
+            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?,
+        )
+        .join(".agora"),
+    };
+    Some(home.join("desktop").join("tunnels"))
 }
 
 /// Opens a tunnel on `127.0.0.1:port` (0 picks a free one) to the hub at `hub` (`host:port`), trusting only `ca_pem`. Must be called
@@ -383,7 +415,11 @@ async fn open_with_limit(
             });
         }
     });
-    Ok(Tunnel { local, task })
+    Ok(Tunnel {
+        local,
+        task,
+        record: None,
+    })
 }
 
 /// One TLS handshake with the hub at `hub`, trusting only `ca_pem`, then the connection is closed. The shell calls it before it
@@ -514,6 +550,21 @@ mod tests {
         assert_eq!(send(t.local, &[&two]).await, REFUSED);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// ADR-0088: the tunnel's port is named for the node while the tunnel lives, and the name goes with it.
+    #[tokio::test]
+    async fn a_recorded_tunnel_names_its_port_until_it_closes() {
+        let ca = Ca::generate("hub CA").unwrap();
+        let addr = hub(&ca).await;
+        let dir = std::env::temp_dir().join(format!("agora-tunnel-record-{}", std::process::id()));
+        let mut t = open(&addr.to_string(), ca.cert_pem(), 0).await.unwrap();
+        t.record_in(&dir);
+        let file = dir.join(t.local.port().to_string());
+        assert!(file.exists());
+        drop(t);
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
