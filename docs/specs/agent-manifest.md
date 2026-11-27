@@ -99,6 +99,15 @@ format = "json"                         # only json for now
 # [mcp.env]                                  # env: variables set for the agent
 # AGORA_MCP_SOCKET = "{socket}"
 
+[detection]
+# ADR-0117 decision 1 (optional; older engines ignore it and detect as without it): how long a screen reading must hold before it
+# changes the state. Working -> idle (or done) only after every check for idle_confirm_ms read it (any other reading drops it);
+# blocked -> anything else only after no blocked rule matched for blocked_hold_ms, and the person's input to the terminal ends that
+# hold at once. Working and blocked readings apply at once. While a change waits, the next check is at the visible floor (100 ms).
+# The node's facts and the agent's own reports bypass it. 0 (or no table) is "at once".
+# idle_confirm_ms = 300                      # 0..=2000
+# blocked_hold_ms = 800                      # 0..=5000
+
 [skills]
 # ADR-0122 step 5 (optional; older engines ignore it): how the kind loads a folder of the owner's shared skills. The node writes the
 # folder under its own data folder (outside the worktree), appends `flag` only when the agent gets a skill, and removes the folder

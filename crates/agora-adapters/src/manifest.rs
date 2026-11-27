@@ -548,9 +548,33 @@ pub struct Manifest {
     pub accounts: Option<Accounts>,
     /// ADR-0091: the plan limits the tool reports in its usage file (`min_engine` 5).
     pub quota: Option<QuotaSpec>,
+    /// ADR-0117 decision 1: the timing gate of screen detection. Older engines ignore it and detect as without it.
+    pub detection: Option<DetectionSpec>,
     /// ADR-0122 decision 5: how the kind loads a folder of the owner's shared skills. Older engines ignore it, and a kind without it
     /// gets no shared skill.
     pub skills: Option<SkillsSpec>,
+}
+
+/// `[detection]`: how long a screen reading must hold before it changes the state (ADR-0117 decision 1); `0` is "at once".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionSpec {
+    /// Working -> idle (or done) only after every check for this long read it; 0..=2000.
+    #[serde(default)]
+    pub idle_confirm_ms: u32,
+    /// Blocked -> anything else only after no blocked rule matched for this long (the person's input ends it); 0..=5000.
+    #[serde(default)]
+    pub blocked_hold_ms: u32,
+}
+
+impl DetectionSpec {
+    /// The gate's timings.
+    pub fn timing(&self) -> crate::gate::Timing {
+        crate::gate::Timing {
+            idle_confirm: std::time::Duration::from_millis(u64::from(self.idle_confirm_ms)),
+            blocked_hold: std::time::Duration::from_millis(u64::from(self.blocked_hold_ms)),
+        }
+    }
 }
 
 /// `[skills]`: how a kind loads a folder of shared skills the node writes under its own data folder, outside the worktree.
@@ -739,6 +763,11 @@ impl Manifest {
         }
         if self.min_engine == 0 {
             return Err(invalid("min_engine"));
+        }
+        if let Some(d) = &self.detection {
+            if d.idle_confirm_ms > 2000 || d.blocked_hold_ms > 5000 {
+                return Err(invalid("detection"));
+            }
         }
         if let Some(sk) = &self.skills {
             if !sk.flag.iter().any(|a| a.contains("{skills_dir}")) {
@@ -1072,6 +1101,32 @@ mod launch_tests {
 
     fn plain(tail: &str) -> String {
         format!("kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 1\n{tail}")
+    }
+
+    /// ADR-0117 decision 1: `[detection]` gives the timing gate, within its bounds; absent, there is none.
+    #[test]
+    fn detection_timings_are_bounded() {
+        assert!(Manifest::parse(&with("")).unwrap().detection.is_none());
+        let m = Manifest::parse(&with(
+            "[detection]\nidle_confirm_ms = 300\nblocked_hold_ms = 800\n",
+        ))
+        .unwrap();
+        let t = m.detection.unwrap().timing();
+        assert_eq!(
+            (t.idle_confirm.as_millis(), t.blocked_hold.as_millis()),
+            (300, 800)
+        );
+        for bad in [
+            "idle_confirm_ms = 2001",
+            "blocked_hold_ms = 5001",
+            "idle_confirm_ms = -1",
+            "other = 1",
+        ] {
+            assert!(
+                Manifest::parse(&with(&format!("[detection]\n{bad}\n"))).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     /// ADR-0122 step 5: `[skills]` says how a kind loads a folder of shared skills; its flag must name the folder, and a layout this

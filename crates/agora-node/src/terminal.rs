@@ -428,6 +428,34 @@ pub struct TerminalHandle {
     launch_file: Option<crate::gitconfig::LaunchFile>,
     /// When the process was started through `systemd-run` in a scope of its own (`agora_platform::in_own_scope`); `None` otherwise.
     scoped_at: Option<Instant>,
+    /// ADR-0117: how many writes of input reached the process (a person's keys, a paste, a typed prompt), so detection can tell that
+    /// someone answered a blocked agent.
+    inputs: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// A handle that writes input without the terminal (see [`TerminalHandle::input_handle`]); every write is counted for detection
+/// (ADR-0117). Everything else is the platform's [`PtyControl`].
+#[derive(Clone)]
+pub struct InputHandle {
+    control: PtyControl,
+    inputs: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl InputHandle {
+    /// Send input to the process (see [`PtyControl::write_input`]), counted once it was written.
+    pub fn write_input(&self, bytes: &[u8]) -> io::Result<()> {
+        self.control.write_input(bytes)?;
+        self.inputs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for InputHandle {
+    type Target = PtyControl;
+    fn deref(&self) -> &PtyControl {
+        &self.control
+    }
 }
 
 impl TerminalHandle {
@@ -473,6 +501,7 @@ impl TerminalHandle {
             held: false,
             launch_file: None,
             scoped_at: None,
+            inputs: Arc::default(),
         })
     }
 
@@ -558,14 +587,22 @@ impl TerminalHandle {
 
     /// A handle that writes input without the terminal (or whatever lock reached it): clone it, let go of the locks, then
     /// write. A program that never reads its input blocks the writer, and only the writer.
-    pub fn input_handle(&self) -> io::Result<PtyControl> {
-        self.control().cloned()
+    pub fn input_handle(&self) -> io::Result<InputHandle> {
+        Ok(InputHandle {
+            control: self.control()?.clone(),
+            inputs: Arc::clone(&self.inputs),
+        })
     }
 
     /// Send input to the process, immediately and on the caller's thread. Blocks only while the process is
     /// not reading and the terminal's input queue is full.
     pub fn send_input(&self, bytes: Vec<u8>) -> io::Result<()> {
-        self.control()?.write_input(&bytes)
+        self.input_handle()?.write_input(&bytes)
+    }
+
+    /// ADR-0117: how many writes of input reached the process so far.
+    pub fn inputs(&self) -> u64 {
+        self.inputs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Resize the terminal. The PTY and the screen change together, between two output chunks.
@@ -1187,6 +1224,7 @@ mod tests {
             held: false,
             launch_file: None,
             scoped_at: None,
+            inputs: Arc::default(),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {

@@ -258,3 +258,13 @@ The maintainer resolved these questions on 2026-11-27.
 1. Step 1: done (2026-11-28). The detection benchmark (`agora-bench detection`, baseline in `docs/design/performance.md` "Screen
    detection") and the tie-break test of decision 5 in `crates/agora-adapters/tests/shipped_manifests.rs`, with its sentence in
    `docs/specs/agent-manifest.md`. No shipped screen relies on file order to choose a state.
+2. Step 2: the gate is built (2026-11-28), not yet enabled in a shipped manifest. `agora_adapters::Gate` (`crates/agora-adapters/src/gate.rs`,
+   tests on an injected clock) and the `[detection]` table (`DetectionSpec`, bounds 2000 and 5000 ms); the supervisor offers each
+   paced reading to the agent's gate, checks at the visible floor while a change waits, ends a blocked hold when the terminal's input
+   count moved (`TerminalHandle::inputs`, every write through `InputHandle` counted), and clears the gate on every state that is not
+   the screen's. `crates/agora-node/tests/detection_gate.rs`: a screen flickering every 150 ms is said idle once under
+   `idle_confirm_ms = 300`, many times without. Detection benchmark after it: tick p50 905 µs, one terminal p50 20.1 µs (baseline
+   886 µs and 19.6 µs; the gate is in the supervisor, not in `detect`). Left: timed captures of the real Claude Code and Codex, then
+   300 and 800 ms in their manifests (the maintainer's starting values, to be confirmed by the captures). **Engine note:** the engine
+   was already at 7 (ADR-0122's `shared_flag`); `[detection]` needs no `min_engine` (an older engine ignores it), and hold rules
+   (step 3) will raise `ENGINE_VERSION` to 8 and need `min_engine = 8`.

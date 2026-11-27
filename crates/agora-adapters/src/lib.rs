@@ -3,6 +3,7 @@
 pub mod acp;
 pub mod agent_install;
 pub mod agent_packages;
+pub mod gate;
 pub mod host;
 pub mod inject;
 pub mod manifest;
@@ -15,6 +16,7 @@ pub mod rules;
 pub mod text;
 pub mod usage;
 
+pub use gate::{Gate, Timing};
 pub use manifest::{Manifest, ManifestError};
 pub use pacer::Pacer;
 pub use rules::{Detection, Detector, Explanation, Region, RuleCheck, RuleOutcome};

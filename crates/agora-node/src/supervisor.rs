@@ -992,6 +992,8 @@ struct KindEntry {
     ready: Detector,
     /// ADR-0057: the manifest's `[[typed]]` rules and `input_box` pattern (typed text in the box, nothing else on screen).
     typed: Detector,
+    /// ADR-0117: the manifest's `[detection]` timings (none: every reading applies at once).
+    timing: agora_adapters::Timing,
 }
 
 /// What a terminal agent's live screen shows right now (ADR-0057), read when asked rather than from the paced detection.
@@ -1377,6 +1379,9 @@ struct Entry {
     branch: String,
     terminal: Option<TerminalHandle>,
     pacer: Pacer,
+    /// ADR-0117: what a screen reading waits for before it changes the state, and the terminal's input count at the last check.
+    gate: agora_adapters::Gate,
+    inputs_seen: u64,
     next_check: Instant,
     visible: bool,
     /// ADR-0094: the kind of the program a person runs by hand in this plain terminal (a `shell` agent), found by its foreground
@@ -2298,6 +2303,7 @@ impl Supervisor {
         let detector = Detector::new(&manifest);
         let ready = Detector::ready(&manifest);
         let typed = Detector::typed(&manifest);
+        let timing = manifest.detection.map(|d| d.timing()).unwrap_or_default();
         self.kinds.insert(
             manifest.kind.clone(),
             KindEntry {
@@ -2306,6 +2312,7 @@ impl Supervisor {
                 detector,
                 ready,
                 typed,
+                timing,
             },
         );
     }
@@ -2477,6 +2484,8 @@ impl Supervisor {
                 branch,
                 terminal: Some(terminal),
                 pacer: Pacer::default(),
+                gate: agora_adapters::Gate::default(),
+                inputs_seen: 0,
                 next_check: now,
                 inside: None,
                 next_look: now,
@@ -2747,6 +2756,8 @@ impl Supervisor {
                     branch: String::new(),
                     terminal: Some(terminal),
                     pacer: Pacer::default(),
+                    gate: agora_adapters::Gate::default(),
+                    inputs_seen: 0,
                     next_check: now,
                     inside: None,
                     next_look: now,
@@ -4517,9 +4528,23 @@ impl Supervisor {
             return;
         };
         let detected = term.inspect(|t| kind.detector.detect(t)).map(|d| d.state);
-        let changed = detected.is_some_and(|state| set_state(entry, state, Origin::Screen, events));
+        // ADR-0117: the person's input since the last check ends a blocked hold; the gate decides when a reading changes the state.
+        let inputs = term.inputs();
+        if inputs != entry.inputs_seen {
+            entry.inputs_seen = inputs;
+            entry.gate.input();
+        }
+        let current = entry.agent.state();
+        let applied = detected.and_then(|r| entry.gate.offer(current, r, now, &kind.timing));
+        let changed = applied.is_some_and(|state| set_state(entry, state, Origin::Screen, events));
         entry.pacer.record(changed);
-        entry.next_check = now + entry.pacer.interval(entry.visible);
+        // While a change waits, the next check is due at the visible floor, visible or not, without the back-off.
+        entry.next_check = now
+            + if entry.gate.waiting() {
+                entry.pacer.visible_min
+            } else {
+                entry.pacer.interval(entry.visible)
+            };
     }
 
     fn restart(&mut self, id: &AgentId, now: Instant, events: &mut Vec<SupervisorEvent>) {
@@ -4815,6 +4840,8 @@ impl Supervisor {
                 branch: r.branch,
                 terminal: None,
                 pacer: Pacer::default(),
+                gate: agora_adapters::Gate::default(),
+                inputs_seen: 0,
                 next_check: Instant::now(),
                 inside: None,
                 next_look: Instant::now(),
@@ -6383,6 +6410,10 @@ fn set_state(
     origin: Origin,
     events: &mut Vec<SupervisorEvent>,
 ) -> bool {
+    // ADR-0117: a node fact or the agent's own report leaves nothing of the screen's timing gate waiting.
+    if origin != Origin::Screen {
+        entry.gate.clear(state, Instant::now());
+    }
     apply_state(
         &mut entry.agent,
         &mut entry.state_reported,
