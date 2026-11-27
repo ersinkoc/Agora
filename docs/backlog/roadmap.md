@@ -45,12 +45,12 @@ resume after a restart, Codex plan limits, the model in the agent snapshot, Shel
   open task it is allowed (an automation rule: **decision**, ADR first)
 - [ ] **M8.3 Messages that arrive**: a person's input ends an `inbox_wait` (built); a reply keeps its link across machines (M3.6,
   **schema**); completion notices in the inbox. Handoff delivery and acknowledgment are built on the web board (ADR-0121 Accepted)
-- [ ] **M8.4 Shared skills and MCP servers through the hub** (**decision**: ADR-0122 Proposed): the owner publishes a skill or an MCP server
+- [ ] **M8.4 Shared skills and MCP servers through the hub** (ADR-0122 Accepted 2026-11-27): the owner publishes a skill or an MCP server
   definition to every agent or to one project; each node installs it into the agents' own configuration under its policy (the hub
   cannot widen it); secrets stay on the node (ADR-0084)
 - [ ] **M8.5 Agents never stop, also through updates**: the Windows holder (M2.6, **win**); the node's exec handoff (M2.7); the hub
   hands out signed node builds after approval (M7.8); a whole-fleet update from the window that keeps every agent and its state
-- [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (**schema**: ADR-0123 Proposed); plan limits
+- [ ] **M8.6 Everything about every agent is visible**: provider, model and effort per agent in the snapshot (ADR-0123 Accepted 2026-11-27, schema with it); plan limits
   for Claude Code (ADR-0091 step 4, **decision**) and the other tools; each agent's folder and worktree, and the machine's workspaces,
   sizes and free disk in the window (M3.7's schema part)
 - [ ] **M8.7 Detection that never misses**: Shell catches every supported kind started by hand (ADR-0094, verify on each OS); ADR-0117
@@ -140,7 +140,7 @@ fixes it.
 - [ ] **M2.8 Plan limits for more tools** (ADR-0091): Claude Code's windows, from its own files, read like Codex's
 - [ ] **M2.9 ACP registry** (ADR-0092): the next steps after the conversion (the reviewed list in a release, "Add an agent" reads it)
 - [ ] **M2.10 Preview a local web server** (ADR-0088): node forwarder (done), hub relay, the Browser pane (schema is in); the hub's
-  part is written as ADR-0088 Amendment A (**decision**: Proposed 2026-11-27)
+  part is ADR-0088 Amendment A (Accepted 2026-11-27)
 - [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
   the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
 - [ ] **M2.13 The window knows what each machine can do** (**schema**): the web window never reads node capabilities (no Hello

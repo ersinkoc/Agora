@@ -1,6 +1,8 @@
 # 0122. Skills and MCP servers shared through the hub
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+
+Accepted: 2026-11-27 (the maintainer's answer to the question listing the written decisions). The open questions' proposed answers stand.
 
 Origin: the maintainer's orchestration request of 2026-11-27 ("skills and MCP servers shared through the hub"), roadmap M8.4.
 

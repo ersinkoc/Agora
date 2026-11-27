@@ -3,7 +3,7 @@ Status: Accepted
 Date: 2026-11-19
 
 Accepted: 2026-11-19 (the maintainer's explicit message in the merger chat: "ADR-0088'i kabul ediyorum"). The open questions' proposed answers stand.
-Amended: Amendment A (Proposed, 2026-11-27) answers how the hub carries a preview (step 3); it waits for the maintainer's decision.
+Amended: Amendment A (Accepted 2026-11-27, the maintainer's answer; point 6 option (a)) answers how the hub carries a preview (step 3).
 
 Builds on ADR-0020 (signed approvals), ADR-0067 (remote access and the screen password), ADR-0068 (a customizable workspace) and ADR-0070
 (the hub owns whether a machine is online). Touches the threat model (networking) and the invariant "Secrets never leave the node".
@@ -63,7 +63,7 @@ port and to open the node's control port: all must fail).
 3. Hub relay, origin per forward, audit.
 4. Web Browser pane.
 
-## Amendment A (Proposed, 2026-11-27): how the hub carries a preview (step 3)
+## Amendment A (Accepted, 2026-11-27): how the hub carries a preview (step 3)
 
 The step-3 questions the decision left open (`docs/specs/preview.md`, "Not decided"), answered for the maintainer's decision. It
 changes decision 4's "the hub does not parse them" for one thing only: the head of each HTTP request, as below.

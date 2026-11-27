@@ -1,6 +1,8 @@
 # 0123. Every agent shows its provider, model and effort
-Status: Proposed
+Status: Accepted
 Date: 2026-11-27
+
+Accepted: 2026-11-27 (the maintainer's answer to the question listing the written decisions). The open questions' proposed answers stand.
 
 Origin: the maintainer's orchestration request of 2026-11-27 ("every agent's provider, model, effort … visible"), roadmap M8.6.
 
