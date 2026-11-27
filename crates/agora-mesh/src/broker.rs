@@ -16,8 +16,8 @@ use std::sync::Arc;
 use agora_core::{AgentId, LeaseError, LeaseTable, Task, TaskId, TaskState};
 use agora_protocol::v1::event::Body;
 use agora_protocol::v1::{
-    HandoffCreated, LeaseGranted, LeaseReleased, MessagePosted, TaskChanged, TaskReview,
-    TaskReviewChanged, TaskReviewReport, TaskReviewState,
+    HandoffCreated, LeaseGranted, LeaseReleased, MessagePosted, TaskChanged, TaskParentLinked,
+    TaskReview, TaskReviewChanged, TaskReviewReport, TaskReviewState,
 };
 use agora_protocol::{Error, ErrorCode};
 
@@ -130,6 +130,8 @@ pub enum MeshError {
     /// The task is not open (claimed or done).
     TaskNotOpen(String),
     TaskReviewStale(String),
+    SubtaskLimit(usize),
+    SubtasksUnavailable(String),
     /// A dependency of the task is not done yet.
     TaskBlocked {
         task: String,
@@ -176,6 +178,12 @@ impl MeshError {
             }
             Self::TaskUnknown(t) | Self::DependencyUnknown(t) => {
                 Error::new(ErrorCode::TaskNotFound).with("task_id", t.as_str())
+            }
+            Self::SubtaskLimit(limit) => {
+                Error::new(ErrorCode::TaskSubtaskLimit).with("limit", *limit as i64)
+            }
+            Self::SubtasksUnavailable(project) => {
+                Error::new(ErrorCode::BoardSubtasksUnavailable).with("project_id", project.as_str())
             }
             Self::TaskReviewStale(t) => {
                 Error::new(ErrorCode::TaskReviewStale).with("task_id", t.as_str())
@@ -242,6 +250,7 @@ pub struct TaskEntry {
     pub title: String,
     pub detail: String,
     pub depends_on: Vec<TaskId>,
+    pub parent_task_id: Option<TaskId>,
     pub status: TaskStatus,
     pub owner: Option<AgentId>,
     pub summary: Option<String>,
@@ -262,6 +271,7 @@ struct TaskRec {
     project: String,
     detail: String,
     depends_on: Vec<TaskId>,
+    parent_task_id: Option<TaskId>,
     summary: Option<String>,
     review: Option<ReviewReport>,
 }
@@ -270,6 +280,9 @@ struct TaskRec {
 /// takes no more from one node, so the rest stays on the node's broker instead of being lost.
 pub const MAX_HANDOVER_TASKS: usize = 500;
 pub const MAX_HANDOVER_LEASES: usize = 500;
+
+pub const MAX_TASK_TREE_LEVELS: usize = 3;
+pub const MAX_TASK_CHILDREN: usize = 50;
 
 #[derive(Clone)]
 struct LeaseBatch {
@@ -1166,6 +1179,7 @@ impl Mesh {
             title: t.task.title.clone(),
             detail: t.detail.clone(),
             depends_on: t.depends_on.clone(),
+            parent_task_id: t.parent_task_id.clone(),
             status,
             owner,
             summary: t.summary.clone(),
@@ -1180,7 +1194,57 @@ impl Mesh {
         detail: &str,
         depends_on: &[String],
     ) -> Result<TaskId, MeshError> {
+        self.create_task(by, title, detail, depends_on, None)
+    }
+
+    pub fn task_create_subtask(
+        &mut self,
+        by: &AgentId,
+        title: &str,
+        detail: &str,
+        depends_on: &[String],
+        parent: &str,
+    ) -> Result<TaskId, MeshError> {
+        self.create_task(by, title, detail, depends_on, Some(TaskId::new(parent)))
+    }
+
+    fn create_task(
+        &mut self,
+        by: &AgentId,
+        title: &str,
+        detail: &str,
+        depends_on: &[String],
+        parent_task_id: Option<TaskId>,
+    ) -> Result<TaskId, MeshError> {
         let project = self.caller(by)?.project.clone();
+        if let Some(parent) = &parent_task_id {
+            if !self.review_enabled {
+                return Err(MeshError::SubtasksUnavailable(project));
+            }
+            let mut ancestor = Some(parent);
+            for _ in 1..MAX_TASK_TREE_LEVELS {
+                let Some(id) = ancestor else { break };
+                let task = self
+                    .tasks
+                    .get(id)
+                    .filter(|task| task.project == project)
+                    .ok_or_else(|| MeshError::TaskUnknown(parent.as_str().to_string()))?;
+                ancestor = task.parent_task_id.as_ref();
+            }
+            if ancestor.is_some() {
+                return Err(MeshError::SubtaskLimit(MAX_TASK_TREE_LEVELS));
+            }
+            if self
+                .tasks
+                .values()
+                .filter(|task| task.parent_task_id.as_ref() == Some(parent))
+                .take(MAX_TASK_CHILDREN)
+                .count()
+                == MAX_TASK_CHILDREN
+            {
+                return Err(MeshError::SubtaskLimit(MAX_TASK_CHILDREN));
+            }
+        }
         if !self.ids_open(1) {
             return Err(MeshError::IdsUnreserved);
         }
@@ -1199,14 +1263,22 @@ impl Mesh {
             id.clone(),
             TaskRec {
                 task: Task::new(id.clone(), title),
-                project,
+                project: project.clone(),
                 detail: detail.to_string(),
                 depends_on: deps,
+                parent_task_id: parent_task_id.clone(),
                 summary: None,
                 review: None,
             },
         );
         self.task_changed(&id);
+        if let Some(parent) = parent_task_id {
+            self.events.push(Body::TaskParentLinked(TaskParentLinked {
+                project_id: project,
+                task_id: id.as_str().to_string(),
+                parent_task_id: parent.as_str().to_string(),
+            }));
+        }
         Ok(id)
     }
 
@@ -1243,6 +1315,7 @@ impl Mesh {
                     project: e.project.clone(),
                     detail: e.detail.clone(),
                     depends_on: e.depends_on.clone(),
+                    parent_task_id: e.parent_task_id.clone(),
                     summary: e.summary.clone(),
                     review: e.review.clone(),
                 },
@@ -1827,6 +1900,25 @@ impl Mesh {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_subtask_cannot_link_to_a_parent_in_another_project() {
+        let mut mesh = Mesh::new(Limits::default());
+        let a = AgentId::new("first");
+        let b = AgentId::new("other");
+        mesh.register(agent(a.as_str(), "p", "n"));
+        mesh.register(agent(b.as_str(), "q", "n"));
+        mesh.enable_review();
+        let parent = mesh.task_create(&a, "Parent", "", &[]).unwrap();
+        let before = mesh.export_tasks();
+        mesh.take_events();
+        assert!(matches!(
+            mesh.task_create_subtask(&b, "Child", "", &[], parent.as_str()),
+            Err(MeshError::TaskUnknown(id)) if id == parent.as_str()
+        ));
+        assert_eq!(mesh.export_tasks(), before);
+        assert!(mesh.take_events().is_empty());
+    }
 
     fn agent(id: &str, project: &str, node: &str) -> AgentInfo {
         AgentInfo {

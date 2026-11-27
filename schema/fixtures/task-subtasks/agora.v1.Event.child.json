@@ -1,0 +1,9 @@
+{
+  "producerId": "hub",
+  "seq": "12",
+  "taskParentLinked": {
+    "projectId": "demo",
+    "taskId": "t-2",
+    "parentTaskId": "t-1"
+  }
+}

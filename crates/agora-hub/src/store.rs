@@ -84,7 +84,7 @@ pub trait EventStore {
     fn set_setting(&self, key: &str, value: &[u8]) -> Result<(), StoreError>;
 }
 
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 22;
 
 /// A transaction that reads and then writes, begun with the write lock (`BEGIN IMMEDIATE`). Other processes write to the hub's
 /// database too (the front door and the terminal client make sign-in codes, `agora hub enroll` makes codes): a deferred transaction
@@ -571,6 +571,10 @@ impl SqliteStore {
                  PRAGMA user_version = 21;
                  COMMIT;",
             )?;
+        }
+        if version < 22 {
+            // ADR-0126: earlier hubs would strip parent links when rewriting a stored board.
+            conn.pragma_update(None, "user_version", 22)?;
         }
         Ok(Self {
             conn: Mutex::new(conn),

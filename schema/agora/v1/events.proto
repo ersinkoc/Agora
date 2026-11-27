@@ -78,6 +78,7 @@ message Event {
     // ADR-0125: the hub owns shared-board review.
     TaskReviewChanged task_review_changed = 94;
     TaskReviewEnabled task_review_enabled = 95;
+    TaskParentLinked task_parent_linked = 96; // ADR-0126, hub only.
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -534,6 +535,12 @@ message TaskReviewChanged {
   string project_id = 1;
   string task_id = 2;
   TaskReview review = 3;
+}
+
+message TaskParentLinked {
+  string project_id = 1;
+  string task_id = 2;
+  string parent_task_id = 3;
 }
 
 message TaskReviewEnabled {

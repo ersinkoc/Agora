@@ -902,6 +902,7 @@ mod tests {
             claimed_by_agent_id: owner.into(),
             done,
             review: None,
+            parent_task_id: None,
         }
     }
 

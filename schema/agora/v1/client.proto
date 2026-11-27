@@ -137,6 +137,7 @@ message TaskSnapshot {
   string claimed_by_agent_id = 4;
   bool done = 5;
   TaskReview review = 6; // ADR-0125.
+  optional string parent_task_id = 7; // ADR-0126.
 }
 
 message LeaseSnapshot {

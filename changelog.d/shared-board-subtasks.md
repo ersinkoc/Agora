@@ -1,0 +1,1 @@
+- Agents can create subtasks on Review-enabled shared boards. Child cards show their parent, and the parent card shows how many direct subtasks have been accepted.

@@ -18,7 +18,7 @@ use agora_core::AgentId;
 use agora_mesh::broker::{AgentInfo, AskStatus, Limits, Mesh};
 use agora_mesh::mcp::{
     batch_item, read_line, refuse_batch, BatchItem, BatchReply, HandoffArgs, Line, McpConnection,
-    Outcome, SendMessageArgs, BOARD_TOOLS,
+    Outcome, SendMessageArgs, BOARD_TOOLS, SUBTASK_TOOL,
 };
 use agora_platform::{local_listen_agent, LocalStream};
 use agora_protocol::jsonrpc::{to_line, Message};
@@ -579,6 +579,19 @@ fn board_reply(
         (m.agent_info(conn.agent())?.project.clone(), m.limits())
     };
     let known = shares.get(&project);
+    let subtask = name == SUBTASK_TOOL;
+    let subtasks_unavailable = || {
+        tool_reply(
+            &id,
+            agora_mesh::mcp::protocol_error_result(
+                &agora_protocol::Error::new(agora_protocol::ErrorCode::BoardSubtasksUnavailable)
+                    .with("project_id", project.as_str()),
+            ),
+        )
+    };
+    if subtask && !conn.subtasks_offered() {
+        return Some(subtasks_unavailable());
+    }
     // The calls that carry a message: malformed arguments go to the broker, which answers -32602, as for a local call; nothing
     // goes to the hub. Then the broker's limits that do not depend on the route, checked here too: an older hub does not check the
     // refs' size, and receivers would refuse every copy it sends (or a handoff's message after the task moved). A channel's
@@ -612,9 +625,13 @@ fn board_reply(
     // No link (the node never had a hub, or `mesh.remote` is off): a project known to be shared must not fall back to local
     // state, or two machines could each believe they hold the same path.
     let Some(link) = remote.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
-        return matches!(known, Some((true, _))).then(unavailable);
+        return if subtask {
+            Some(subtasks_unavailable())
+        } else {
+            matches!(known, Some((true, _))).then(unavailable)
+        };
     };
-    if matches!(known, Some((false, at)) if at.elapsed() < LOCAL_FOR) {
+    if !subtask && matches!(known, Some((false, at)) if at.elapsed() < LOCAL_FOR) {
         return None;
     }
     // ADR-0039: the agent's own lease calls and the node's renewals of its leases go to the board one at a time, and a release
@@ -657,8 +674,12 @@ fn board_reply(
     }
     match answer {
         Ok(Ok(r)) if r.shared => {
-            shares.set(&project, true);
-            let result = serde_json::from_str(&r.result_json).ok();
+            let result: Option<Value> = serde_json::from_str(&r.result_json).ok();
+            if !subtask
+                || result.as_ref().and_then(|value| value["isError"].as_bool()) == Some(false)
+            {
+                shares.set(&project, true);
+            }
             if let (Some(result), "lease_acquire") = (&result, name) {
                 note_granted(
                     renewals,
@@ -679,10 +700,12 @@ fn board_reply(
             })
         }
         Ok(Ok(_)) => {
-            shares.set_not_shared_since(&project, asked);
-            None
+            if !subtask {
+                shares.set_not_shared_since(&project, asked);
+            }
+            subtask.then(subtasks_unavailable)
         }
-        _ => matches!(known, Some((true, _))).then(unavailable),
+        _ => (subtask || matches!(known, Some((true, _)))).then(unavailable),
     }
 }
 
@@ -1031,6 +1054,7 @@ pub struct MeshServer {
     remote: Arc<RemoteSlot>,
     /// ADR-0112: node policy `mesh.fleet` and whether the hub offers `fleet_status`.
     fleet: Arc<Fleet>,
+    subtasks_agreed: Arc<AtomicBool>,
     shares: Arc<Shares>,
     /// ADR-0039: the shared-board leases renewed for running agents (a leaf lock).
     renewals: Arc<LeaseRenewals>,
@@ -1154,6 +1178,7 @@ impl MeshServer {
             helpers: Arc::new(Mutex::new(None)),
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote,
+            subtasks_agreed: Arc::new(AtomicBool::new(false)),
             fleet: Arc::new(Fleet {
                 allowed: AtomicBool::new(true),
                 hub: AtomicBool::new(false),
@@ -1220,6 +1245,20 @@ impl MeshServer {
             .iter()
             .any(|c| c == agora_protocol::handshake::FLEET_STATUS_V1);
         self.fleet.hub.store(has, Ordering::Release);
+        self.subtasks_agreed.store(
+            capabilities
+                .iter()
+                .any(|c| c == agora_protocol::handshake::BOARD_SUBTASKS_V1),
+            Ordering::Release,
+        );
+    }
+
+    pub(crate) fn hub_disconnected(&self) {
+        self.subtasks_agreed.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn remote_allowed(&self) -> bool {
+        self.remote_allowed.load(Ordering::Acquire)
     }
 
     /// Opens the node-local inbox before agents are taken up or the hub connects.
@@ -1838,6 +1877,7 @@ impl MeshServer {
         let typed = Arc::new(AtomicU64::new(0));
         let thread = {
             let typed = Arc::clone(&typed);
+            let subtasks_agreed = Arc::clone(&self.subtasks_agreed);
             let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
                 Arc::clone(&self.mesh),
                 Arc::clone(&stop),
@@ -1869,6 +1909,7 @@ impl MeshServer {
                                     continue;
                                 };
                                 let typed = Arc::clone(&typed);
+                                let subtasks_agreed = Arc::clone(&subtasks_agreed);
                                 let (mesh, stop, agent, remote, allowed, shares, fleet, renewals) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
@@ -1894,6 +1935,7 @@ impl MeshServer {
                                                 shares: &shares,
                                                 renewals: &renewals,
                                                 fleet: &fleet,
+                                                subtasks_agreed: &subtasks_agreed,
                                                 helpers,
                                                 typed: &typed,
                                             },
@@ -2195,9 +2237,16 @@ struct Links<'a> {
     shares: &'a Shares,
     renewals: &'a LeaseRenewals,
     fleet: &'a Fleet,
+    subtasks_agreed: &'a AtomicBool,
     helpers: Option<Arc<dyn Helpers>>,
     /// [`AgentServer::typed`].
     typed: &'a AtomicU64,
+}
+
+impl Links<'_> {
+    fn subtasks_offered(&self) -> bool {
+        self.allowed.load(Ordering::Acquire) && self.subtasks_agreed.load(Ordering::Acquire)
+    }
 }
 
 /// The longest `agent_wait`, and the one used when none is given.
@@ -2636,6 +2685,7 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
     // ADR-0112: what the node offers now (the hub may have reconnected since the last line).
     let fleet = links.fleet.offered(allowed);
     s.conn.set_fleet(fleet);
+    s.conn.set_subtasks(links.subtasks_offered());
     // ADR-0057: starting and following helpers is the node's, not the broker's.
     if let Some(h) = &links.helpers {
         if let Some(answer) = spawn_call(&s.conn, text, h, &mut s.spawn_waits, &mut s.starts) {
@@ -3583,16 +3633,31 @@ mod tests {
             done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
         ) {
             let args: Value = serde_json::from_str(arguments_json).unwrap();
-            self.0.lock().unwrap().push((tool.to_string(), args));
-            let text = if tool == "lease_release" {
-                json!({"ok": true})
+            let result = if tool == SUBTASK_TOOL {
+                if args["title"] == "created" {
+                    agora_mesh::mcp::ok_tool_result(&json!({"task_id": "t-9"}))
+                } else {
+                    agora_mesh::mcp::protocol_error_result(
+                        &agora_protocol::Error::new(
+                            agora_protocol::ErrorCode::BoardSubtasksUnavailable,
+                        )
+                        .with("project_id", "p"),
+                    )
+                }
+            } else if tool == "task_list" {
+                agora_mesh::mcp::ok_tool_result(&json!([{"task_id": "t-9"}]))
             } else {
-                json!({"lease_id": "l-9", "expires_at": 1})
+                let text = if tool == "lease_release" {
+                    json!({"ok": true})
+                } else {
+                    json!({"lease_id": "l-9", "expires_at": 1})
+                };
+                agora_mesh::mcp::ok_tool_result(&text)
             };
+            self.0.lock().unwrap().push((tool.to_string(), args));
             done(Ok(BoardReply {
                 shared: true,
-                result_json: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": false})
-                    .to_string(),
+                result_json: result.to_string(),
             }));
         }
     }
@@ -5286,6 +5351,80 @@ mod tests {
             let v = self.rpc("tools/call", json!({"name": name, "arguments": args}));
             agora_mesh::mcp::tool_result_value(&v["result"]).unwrap_or_else(|| panic!("{v}"))
         }
+    }
+
+    #[test]
+    fn a_refused_subtask_never_changes_if_the_local_board_can_work_offline() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("agora-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let link = Arc::new(RecordingLink::default());
+        server.set_remote(link.clone() as Arc<dyn RemoteLink>);
+        let sock = server
+            .register(AgentInfo {
+                id: AgentId::new("a1"),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut c = Client::new(&sock);
+        let subtask = |client: &mut Client| {
+            client.tool(
+                SUBTASK_TOOL,
+                json!({"title": "child", "parent_task_id": "t-1"}),
+            )
+        };
+        let listed = |client: &mut Client| client.names().iter().any(|name| name == SUBTASK_TOOL);
+        assert!(!listed(&mut c), "old hub");
+        assert_eq!(
+            subtask(&mut c)["error"]["code"],
+            "board.subtasks_unavailable"
+        );
+        assert!(link.0.lock().unwrap().is_empty());
+
+        server.hub_welcomed(&[agora_protocol::handshake::BOARD_SUBTASKS_V1.into()]);
+        assert!(listed(&mut c));
+        assert_eq!(
+            subtask(&mut c)["error"]["code"],
+            "board.subtasks_unavailable"
+        );
+        assert_eq!(link.0.lock().unwrap().len(), 1);
+        assert!(
+            server.shares.get("p").is_none(),
+            "a refusal is not a membership fact"
+        );
+        server.hub_disconnected();
+        server.set_remote_allowed(false);
+        assert!(!listed(&mut c));
+        assert_eq!(
+            subtask(&mut c)["error"]["code"],
+            "board.subtasks_unavailable"
+        );
+        let root = c.tool("task_create", json!({"title": "local task"}));
+        assert!(root["task_id"].is_string(), "{root}");
+        assert_eq!(c.tool("task_list", json!({})).as_array().unwrap().len(), 1);
+
+        server.set_remote_allowed(true);
+        server.set_remote(link.clone() as Arc<dyn RemoteLink>);
+        server.hub_welcomed(&[agora_protocol::handshake::BOARD_SUBTASKS_V1.into()]);
+        server.shares.set("p", false);
+        let created = c.tool(
+            SUBTASK_TOOL,
+            json!({"title": "created", "parent_task_id": "t-1"}),
+        );
+        assert_eq!(created["task_id"], "t-9");
+        assert_eq!(c.tool("task_list", json!({}))[0]["task_id"], "t-9");
+        assert_eq!(link.0.lock().unwrap().last().unwrap().0, "task_list");
+
+        drop(c);
+        done(server, dir);
     }
 
     /// ADR-0112, on a real endpoint: `machines_list` is listed and the hub asked only while the hub agreed on

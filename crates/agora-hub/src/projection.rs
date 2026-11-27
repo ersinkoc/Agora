@@ -202,6 +202,7 @@ pub struct TaskView {
     /// `<node>/<agent>`; empty while the task is open.
     pub owner: String,
     pub done: bool,
+    pub(crate) parent_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -499,6 +500,7 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
         Body::TaskReviewChanged(_) => return Err("task_review_changed"),
         Body::TaskReviewEnabled(_) => return Err("task_review_enabled"),
+        Body::TaskParentLinked(_) => return Err("task_parent_linked"),
         // ADR-0122: the hub's word on a shared item; a node speaks only for itself when it refuses one.
         Body::ShareItemChanged(_) => return Err("share_item_changed"),
         Body::ShareItemRefused(e) => &e.node_id,
@@ -1365,6 +1367,12 @@ impl View {
                 }
             }
             Body::TaskReviewEnabled(_) | Body::TaskReviewChanged(_) => {}
+            Body::TaskParentLinked(e) if producer == RESERVED_HUB_ID => {
+                if let Some(child) = self.tasks.get_mut(&format!("{}/{}", e.project_id, e.task_id)) {
+                    child.parent_task_id = Some(e.parent_task_id.clone());
+                }
+            }
+            Body::TaskParentLinked(_) => {}
             Body::TaskChanged(t) => {
                 // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
                 let owner = match (
@@ -1392,6 +1400,7 @@ impl View {
                         title: t.title.clone(),
                         owner,
                         done: t.done,
+                        parent_task_id: self.tasks.get(&key).and_then(|task| task.parent_task_id.clone()),
                     },
                 );
             }

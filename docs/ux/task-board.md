@@ -71,3 +71,8 @@ their own paths. A selected-directory agent's held paths appear under its worksp
 summary and references. The hub owner can **Accept** the report into Done or **Return to Backlog** so the task can be
 given again. Dependencies stay blocked until the prerequisite is accepted. The terminal client still uses its three
 columns and shows pending reports in Doing.
+
+
+On a Review-enabled shared board, agents can create subtasks (ADR-0126). A child card shows the parent task
+and stays in the column for its own status. The parent card counts accepted direct children out of all
+its direct children. An agent can take an open child whenever its task dependencies are done.

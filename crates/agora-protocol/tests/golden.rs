@@ -190,14 +190,16 @@ fn node_startup_with_retained_agent_run_matches_fixture() {
 }
 
 #[test]
-fn shared_board_review_matches_additive_fixtures() {
+fn shared_board_metadata_matches_additive_fixtures() {
     let pool = pool();
-    let path = dir().join("../task-review");
-    for (ty, case) in [
-        ("Event", "pending"),
-        ("Snapshot", "accepted"),
-        ("CommandRequest", "return"),
+    for (folder, ty, case) in [
+        ("task-review", "Event", "pending"),
+        ("task-review", "Snapshot", "accepted"),
+        ("task-review", "CommandRequest", "return"),
+        ("task-subtasks", "Event", "child"),
+        ("task-subtasks", "Snapshot", "family"),
     ] {
+        let path = dir().join("..").join(folder);
         let name = format!("agora.v1.{ty}");
         let json = std::fs::read_to_string(path.join(format!("{name}.{case}.json"))).expect("JSON");
         let desc = pool.get_message_by_name(&name).expect("descriptor");
@@ -218,4 +220,26 @@ fn shared_board_review_matches_additive_fixtures() {
         };
         assert_eq!(round_trip.expect("typed fixture"), bytes);
     }
+}
+
+#[test]
+fn a_legacy_task_snapshot_ignores_the_parent_link() {
+    #[derive(Clone, PartialEq, Message)]
+    struct LegacyTaskSnapshot {
+        #[prost(string, tag = "1")]
+        task_id: String,
+        #[prost(string, tag = "3")]
+        title: String,
+    }
+
+    let current = agora_protocol::v1::TaskSnapshot {
+        task_id: "t-2".into(),
+        title: "Draft changes".into(),
+        parent_task_id: Some("t-1".into()),
+        ..Default::default()
+    };
+    let legacy = LegacyTaskSnapshot::decode(current.encode_to_vec().as_slice())
+        .expect("legacy task snapshot");
+    assert_eq!(legacy.task_id, current.task_id);
+    assert_eq!(legacy.title, current.title);
 }

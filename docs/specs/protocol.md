@@ -1781,3 +1781,15 @@ without a target node. The hub requires the authenticated owner, records the rev
 the board and events together. A repeated identical decision by the same reviewer succeeds without a second event.
 A stale revision or conflicting decision returns `task.review_stale`. Hub database version 21 prevents an older hub
 from loading the board as ordinary claims.
+
+
+### Shared-board subtask links (ADR-0126)
+
+A node and hub negotiate `board.subtasks.v1` to carry `BoardCall { tool: "task_create_subtask" }` on the
+authenticated node link. The project must be shared and have Review enabled. The hub stores the new task
+and its parent link together with `TaskChanged` and `TaskParentLinked` (Event arm 96). Only the hub can produce
+`TaskParentLinked`. Its fields are `project_id`, `task_id` and `parent_task_id`. Shared-board visibility applies
+to this event and the snapshot field. `TaskSnapshot.parent_task_id` (7) is optional, and links that do not fit
+follow with the other task metadata at the snapshot position. The initial ping reply follows this metadata
+and lets the window resume at the snapshot position. Hub database version 22 prevents an older hub from
+rewriting a board whose persisted parent links it cannot restore.

@@ -12,7 +12,7 @@ use agora_core::{AgentId, LeaseTable, TaskId};
 use agora_mesh::broker::{AgentInfo, Limits, Mesh, ReviewReport};
 use agora_mesh::mcp::{
     board_tool, channel_text, protocol_error_result, send_message_args, SendMessageArgs,
-    BOARD_TOOLS,
+    BOARD_TOOLS, SUBTASK_TOOL,
 };
 use agora_protocol::v1::{event::Body, TaskReview, TaskReviewReport, TaskReviewState};
 use agora_protocol::{Error, ErrorCode};
@@ -150,6 +150,8 @@ pub struct Merged {
     /// Each task given a new id, and each task that kept an id another board also had: a window keys a task by project and id, so
     /// it showed the boards' tasks with one id as one, and each is stated again.
     pub restated: BTreeSet<String>,
+    /// Rows with a parent or children whose metadata the merged board supplies.
+    pub(crate) linked: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -193,6 +195,13 @@ fn tool_error(code: ErrorCode, key: &str, value: &str) -> Value {
     json!({
         "content": [{"type": "text", "text": json!({"error": {"code": code.as_str(), "params": {key: value}}}).to_string()}],
         "isError": true,
+    })
+}
+
+pub(crate) fn subtasks_unavailable(project: &str) -> Answer {
+    answer(Verdict::Done {
+        result: tool_error(ErrorCode::BoardSubtasksUnavailable, "project_id", project),
+        is_error: true,
     })
 }
 
@@ -550,6 +559,7 @@ impl Boards {
                 json!({
                     "id": t.id.as_str(), "title": t.title, "detail": t.detail,
                     "depends_on": t.depends_on.iter().map(agora_core::TaskId::as_str).collect::<Vec<_>>(),
+                    "parent_task_id": t.parent_task_id.as_ref().map(TaskId::as_str),
                     "done": t.status == TaskStatus::Done,
                     "owner": t.owner.as_ref().map(AgentId::as_str),
                     "summary": t.summary,
@@ -607,6 +617,7 @@ impl Boards {
         let mut taken = BTreeSet::<String>::new();
         let mut renames = Vec::<BTreeMap<String, String>>::new();
         let mut restated = BTreeSet::<String>::new();
+        let mut linked = BTreeSet::<String>::new();
         let mut notices = Vec::new();
         for board in &boards {
             let mine = tasks_of(board);
@@ -664,6 +675,12 @@ impl Boards {
                         };
                         *d = Value::String(to);
                     }
+                }
+                if let Some(parent) = t["parent_task_id"].as_str().filter(|id| own.contains(*id)) {
+                    let parent = rename(parent);
+                    linked.insert(id_of(&t));
+                    linked.insert(parent.clone());
+                    t["parent_task_id"] = json!(parent);
                 }
                 tasks.push(t);
             }
@@ -753,11 +770,12 @@ impl Boards {
                 .into_bytes(),
             notices,
             restated,
+            linked,
         }
     }
 
-    /// ADR-0115 (#1150): `TaskChanged` for each of `ids` the project's board holds, as the board says it when the task changes: what
-    /// a window must be told again after a merge.
+    /// ADR-0115 (#1150): restate task rows that changed after a merge. Parent links follow separately so
+    /// refreshing a link does not give an untouched task a new board revision (ADR-0109).
     pub fn task_changes(&self, project: &str, ids: &BTreeSet<String>) -> Vec<Body> {
         use agora_mesh::broker::TaskStatus;
         let g = self.by_project.lock().unwrap_or_else(|e| e.into_inner());
@@ -765,23 +783,37 @@ impl Boards {
             return Vec::new();
         };
         let (_, tasks) = mesh.export_tasks();
-        tasks
-            .iter()
-            .filter(|t| t.project == project && ids.contains(t.id.as_str()))
-            .map(|t| {
-                Body::TaskChanged(agora_protocol::v1::TaskChanged {
-                    task_id: t.id.as_str().to_string(),
-                    project_id: project.to_string(),
-                    title: t.title.clone(),
-                    claimed_by_agent_id: t
-                        .owner
-                        .as_ref()
-                        .map(|o| o.as_str().to_string())
-                        .unwrap_or_default(),
-                    done: t.status == TaskStatus::Done,
-                })
+        let restated = || {
+            tasks
+                .iter()
+                .filter(|t| t.project == project && ids.contains(t.id.as_str()))
+        };
+        let changes = restated().map(|t| {
+            Body::TaskChanged(agora_protocol::v1::TaskChanged {
+                task_id: t.id.as_str().to_string(),
+                project_id: project.to_string(),
+                title: t.title.clone(),
+                claimed_by_agent_id: t
+                    .owner
+                    .as_ref()
+                    .map(|o| o.as_str().to_string())
+                    .unwrap_or_default(),
+                done: t.status == TaskStatus::Done,
             })
-            .collect()
+        });
+        let links = tasks
+            .iter()
+            .filter(|t| t.project == project)
+            .filter_map(|t| {
+                Some(Body::TaskParentLinked(
+                    agora_protocol::v1::TaskParentLinked {
+                        project_id: project.to_string(),
+                        task_id: t.id.as_str().to_string(),
+                        parent_task_id: t.parent_task_id.as_ref()?.as_str().to_string(),
+                    },
+                ))
+            });
+        changes.chain(links).collect()
     }
 
     #[cfg(test)]
@@ -815,6 +847,7 @@ impl Boards {
                 || task["title"].as_str().is_none()
                 || task["detail"].as_str().is_none()
                 || (!task["summary"].is_null() && task["summary"].as_str().is_none())
+                || (!task["parent_task_id"].is_null() && !task["parent_task_id"].is_string())
             {
                 return;
             }
@@ -892,6 +925,7 @@ impl Boards {
                             .collect()
                     })
                     .unwrap_or_default(),
+                parent_task_id: t["parent_task_id"].as_str().map(TaskId::new),
                 status: match (&owner, done) {
                     (None, _) => TaskStatus::Open,
                     (Some(_), true) => TaskStatus::Done,
@@ -950,6 +984,28 @@ impl Boards {
                 .any(|dependency| !ids.contains_key(dependency) && !placeholder(dependency))
         }) {
             return;
+        }
+        // Bound a task's ancestry walk as well as its fan-out. This also rejects cycles and dangling parents.
+        use agora_mesh::broker::{MAX_TASK_CHILDREN, MAX_TASK_TREE_LEVELS};
+        let mut child_counts = BTreeMap::new();
+        for child in &tasks {
+            let Some(parent) = &child.parent_task_id else {
+                continue;
+            };
+            let count = child_counts.entry(parent).or_insert(0);
+            *count += 1;
+            if *count > MAX_TASK_CHILDREN {
+                return;
+            }
+            let mut ancestor = Some(parent);
+            for _ in 1..MAX_TASK_TREE_LEVELS {
+                let Some(id) = ancestor else { break };
+                let Some(task) = by_id.get(id) else { return };
+                ancestor = task.parent_task_id.as_ref();
+            }
+            if ancestor.is_some() {
+                return;
+            }
         }
         // Depth-first, without recursion: 0 not seen, 1 on the current path, 2 done.
         let mut mark: BTreeMap<&agora_core::TaskId, u8> = BTreeMap::new();
@@ -1145,6 +1201,9 @@ impl Boards {
         }
         let nodes = nodes_with(view, project);
         let review_enabled = view.review_projects.contains(project);
+        if tool == SUBTASK_TOOL && !review_enabled {
+            return subtasks_unavailable(project);
+        }
         // A node can only speak for a project represented by its checkout, workspace or running session. A board is in use while two nodes share the project, and (ADR-0039
         // amendment A) while it still holds a task that is not done or a lease that has not ended: a node that drops must not make
         // the other one fall back to a local broker that knows nothing of the hub's tasks.
@@ -1585,6 +1644,50 @@ mod tests {
     use super::*;
     use crate::projection::{AgentView, NodeView};
     use agora_protocol::v1::AgentState;
+
+    #[test]
+    fn merging_a_board_remaps_parent_links_without_restating_unaffected_tasks() {
+        let board = |tasks: Value| {
+            json!({"next": 10, "tasks": tasks, "leases": []})
+                .to_string()
+                .into_bytes()
+        };
+        let task = |id: &str, title: &str, parent: Option<&str>| {
+            json!({
+                "id": id, "title": title, "detail": "", "depends_on": [], "done": false,
+                "owner": null, "summary": "", "parent_task_id": parent
+            })
+        };
+        let first = board(json!([
+            task("t-1", "first", None),
+            task("t-3", "unaffected parent", None),
+            task("t-4", "unaffected child", Some("t-3")),
+        ]));
+        let later = board(json!([
+            task("t-1", "second", None),
+            task("t-2", "child", Some("t-1")),
+        ]));
+        let boards = Boards::new();
+        let merged = boards.merge_snapshots(&[first, later], 0, |_| true);
+        assert_eq!(
+            merged.restated,
+            BTreeSet::from(["t-1".into(), "t-10".into()])
+        );
+        boards.load("p", &merged.bytes, 0);
+        let events = boards.task_changes("p", &merged.restated);
+        assert!(!events.iter().any(
+            |b| matches!(b, Body::TaskChanged(e) if e.task_id == "t-3" || e.task_id == "t-4")
+        ));
+        assert!(events.iter().any(|b| matches!(b, Body::TaskParentLinked(e) if e.task_id == "t-2" && e.parent_task_id == "t-10")));
+        let reopened: Value = serde_json::from_slice(&boards.snapshot("p", 0).unwrap()).unwrap();
+        let child = reopened["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["title"] == "child")
+            .unwrap();
+        assert_eq!(child["parent_task_id"], "t-10");
+    }
 
     /// #1150 (ADR-0115 note 4): a dependency on a task its own board no longer has stays unmet after a merge. It never names another
     /// board's task with that id, whichever board came first; its new id is one no task has, and new tasks never get it.

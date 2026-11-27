@@ -79,6 +79,7 @@ const HUB_CAPABILITIES: &[&str] = &[
     // ADR-0112: answers `BoardCall{tool: "fleet_status"}` (every machine and running agent, for agents), on a solo hub or when the
     // owner turned it on (`agora hub fleet on`). A node offers it unless its policy says `mesh.fleet = false`.
     agora_protocol::handshake::FLEET_STATUS_V1,
+    agora_protocol::handshake::BOARD_SUBTASKS_V1,
     // ADR-0119: the hub carries helper starts between machines that both agreed on it (a node offers it once its side is built).
     agora_protocol::handshake::MESH_SPAWN_REMOTE,
     // ADR-0122: keeps the owner's shared skills and MCP servers and hands a node the newest signed word (a node offers it once its

@@ -61,6 +61,7 @@ or a local response timeout has a localized retry message.
 | `device.revoked` | `device_id` | ADR-0061: a revocation of the device was signed at or after this endorsement |
 | `lease.held` | `path`, `holder_agent_id`, `expires_at` | `expires_at` is when the conflicting lease ends, in milliseconds since the epoch |
 | `board.unavailable` | `project_id` | A shared project's board cannot be reached (hub unreachable), or a lease or claim waits while the project's nodes hand over their local work (up to 5 s, ADR-0039 amendment B); the agent keeps working locally (ADR-0039) |
+| `board.subtasks_unavailable` | `project_id` | Subtask creation requires a Review-enabled shared board and a node link with `board.subtasks.v1` (ADR-0126) |
 | `board.not_allowed` | — | ADR-0112: the hub refuses `BoardCall{tool: "fleet_status"}` because it has people besides the owner (team mode, ADR-0049) and the owner has not turned the fleet view on (`agora hub fleet on`); the node then answers `machines_list` and `agents_list {scope: "hub"}` from itself, `partial: true` |
 | `mesh.recipient_unknown` | `to` | |
 | `mesh.rate_limited` | — | Too many messages from this agent in the rate window |
@@ -79,6 +80,7 @@ or a local response timeout has a localized retry message.
 | `task.not_found` | `task_id` | No such task in the caller's project |
 | `task.not_open` | `task_id` | The task is already claimed or done |
 | `task.review_stale` | `task_id` | The completion report revision or decision no longer matches the shared board |
+| `task.subtask_limit` | `limit` | The parent already has 50 children or the new child would exceed three levels (ADR-0126) |
 | `task.blocked` | `task_id`, `depends_on` | A dependency of the task is not done |
 | `task.not_owner` | `task_id` | Only the claiming agent may do this to the task |
 | `lease.not_found` | `lease_id` | No such lease held by the caller |

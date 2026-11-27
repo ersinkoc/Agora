@@ -714,7 +714,10 @@ where
     });
     // Messages this node's agents send to agents on other nodes go out on this connection while it is up.
     let mut jobs = mesh_out.map(MeshOut::connect);
-    let _disconnect = Disconnect(mesh_out);
+    let _disconnect = Disconnect {
+        out: mesh_out,
+        mesh: mesh.as_deref(),
+    };
     let mut posts = Posts::default();
     let mut capabilities = CAPABILITIES.to_vec();
     let has_handoffs = mesh.as_ref().is_some_and(|mesh| mesh.has_handoffs());
@@ -733,6 +736,9 @@ where
     // ADR-0122: offered only while this node's policy gives shared items (`share.items`), so the hub answers its list and fetches.
     if shared.as_ref().is_some_and(|s| s.on()) {
         capabilities.push(agora_protocol::handshake::SHARE_ITEMS);
+    }
+    if mesh.as_ref().is_some_and(|mesh| mesh.remote_allowed()) {
+        capabilities.push(agora_protocol::handshake::BOARD_SUBTASKS_V1);
     }
     let mut up = Uplink::new(Arc::clone(sink), env!("CARGO_PKG_VERSION"), &capabilities);
     conn.send(&frame(
@@ -1214,12 +1220,18 @@ where
 }
 
 /// Marks the mesh link down when the connection's conversation ends, however it ends.
-struct Disconnect<'a>(Option<&'a MeshOut>);
+struct Disconnect<'a> {
+    out: Option<&'a MeshOut>,
+    mesh: Option<&'a crate::mesh_server::MeshServer>,
+}
 
 impl Drop for Disconnect<'_> {
     fn drop(&mut self) {
-        if let Some(m) = self.0 {
-            m.disconnect();
+        if let Some(mesh) = self.mesh {
+            mesh.hub_disconnected();
+        }
+        if let Some(out) = self.out {
+            out.disconnect();
         }
     }
 }

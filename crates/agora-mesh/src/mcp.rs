@@ -87,6 +87,7 @@ pub struct McpConnection {
     /// ADR-0112: the node offers `machines_list` and `agents_list {scope: "hub"}` (its hub has `mesh.fleet_status.v1` and its policy
     /// allows it). Can change while the connection lives (the hub reconnects); `tools/list` says what holds at that moment.
     fleet: bool,
+    subtasks: bool,
 }
 
 fn schema(props: &[(&str, Value)], required: &[&str]) -> Value {
@@ -595,9 +596,12 @@ impl BatchReply {
 }
 
 /// The tools that read or change a project's shared state (ADR-0039): on a shared project they run on the hub's board.
+pub const SUBTASK_TOOL: &str = "task_create_subtask";
+
 pub const BOARD_TOOLS: &[&str] = &[
     "task_list",
     "task_create",
+    SUBTASK_TOOL,
     "task_claim",
     "task_complete",
     "lease_acquire",
@@ -623,6 +627,7 @@ pub fn board_tool(
         version: None,
         spawn: false,
         fleet: false,
+        subtasks: false,
     };
     let params = json!({"name": name, "arguments": args});
     match conn.call(&Value::Null, &params, mesh, now_ms) {
@@ -650,12 +655,21 @@ impl McpConnection {
             version: None,
             spawn: false,
             fleet: false,
+            subtasks: false,
         }
     }
 
     /// ADR-0112: whether `machines_list` is listed and `agents_list` takes `scope`. The node sets it before each line.
     pub fn set_fleet(&mut self, on: bool) {
         self.fleet = on;
+    }
+
+    pub fn set_subtasks(&mut self, on: bool) {
+        self.subtasks = on;
+    }
+
+    pub fn subtasks_offered(&self) -> bool {
+        self.subtasks
     }
 
     /// ADR-0057: list [`SPAWN_TOOLS`] too. The node does this when it answers them itself.
@@ -722,6 +736,21 @@ impl McpConnection {
                 let mut list = tools();
                 if self.fleet {
                     with_fleet(&mut list);
+                }
+                if self.subtasks {
+                    list.push(json!({
+                        "name": SUBTASK_TOOL,
+                        "description": "Add a child task to a task on the project's shared board with Review enabled.",
+                        "inputSchema": schema(
+                            &[
+                                ("parent_task_id", string("The parent task")),
+                                ("title", string("Short title")),
+                                ("detail", string("What needs doing")),
+                                ("depends_on", strings("task_ids that must be done first")),
+                            ],
+                            &["parent_task_id", "title"],
+                        ),
+                    }));
                 }
                 if self.spawn {
                     list.extend(spawn_tools());
@@ -877,15 +906,21 @@ impl McpConnection {
                 let Ok(only) = optional_str_arg(&args, "task_id") else {
                     return bad();
                 };
-                done(mesh.task_list(me, status).map(|ts| json!(ts.iter().filter(|t| only.is_none_or(|id| t.id.as_str() == id)).map(|t| json!({
+                done(mesh.task_list(me, status).map(|ts| json!(ts.iter().filter(|t| only.is_none_or(|id| t.id.as_str() == id)).map(|t| {
+                    let mut row = json!({
                     "task_id": t.id.as_str(), "title": t.title, "detail": t.detail,
                     "status": match t.status { TaskStatus::Open => "open", TaskStatus::Claimed => "claimed", TaskStatus::Review => "review", TaskStatus::Done => "done" },
                     "owner": t.owner.as_ref().map(AgentId::as_str),
                     "depends_on": t.depends_on.iter().map(agora_core::TaskId::as_str).collect::<Vec<_>>(),
                     "summary": t.summary,
-                })).collect::<Vec<_>>())))
+                    });
+                    if let Some(parent) = &t.parent_task_id {
+                        row["parent_task_id"] = json!(parent.as_str());
+                    }
+                    row
+                }).collect::<Vec<_>>())))
             }
-            "task_create" => {
+            "task_create" | SUBTASK_TOOL => {
                 let (Some(title), Ok(detail), Some(deps)) = (
                     str_arg(&args, "title"),
                     optional_str_arg(&args, "detail"),
@@ -893,10 +928,16 @@ impl McpConnection {
                 ) else {
                     return bad();
                 };
-                done(
-                    mesh.task_create(me, title, detail.unwrap_or(""), &deps)
-                        .map(|t| json!({"task_id": t.as_str()})),
-                )
+                let detail = detail.unwrap_or("");
+                let task = if name == SUBTASK_TOOL {
+                    let Some(parent) = str_arg(&args, "parent_task_id") else {
+                        return bad();
+                    };
+                    mesh.task_create_subtask(me, title, detail, &deps, parent)
+                } else {
+                    mesh.task_create(me, title, detail, &deps)
+                };
+                done(task.map(|t| json!({"task_id": t.as_str()})))
             }
             "task_claim" => {
                 let Some(t) = str_arg(&args, "task_id") else {

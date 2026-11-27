@@ -252,6 +252,10 @@ where
     // ADR-0070: the connection is open, so the hub records the node online (a first connect or a reconnect alike: nothing the node
     // runs is reset) and, when it ends, offline with why. Both come from this certificate-authenticated connection only.
     let verifies_devices = welcome.capabilities.iter().any(|c| c == "device.trust");
+    let subtasks_agreed = welcome
+        .capabilities
+        .iter()
+        .any(|c| c == agora_protocol::handshake::BOARD_SUBTASKS_V1);
     // #957: a connection whose opening the hub cannot record is ended (the node dials again and is recorded then), never kept live
     // while every view shows the machine offline.
     let (registration, commands, generation) =
@@ -281,7 +285,7 @@ where
     // A certificate revoked while the connection is open ends it here, inside the conversation, so the end below still records the
     // node offline (it used to be cancelled from outside, and a revoked machine stayed online in every view).
     let result = tokio::select! {
-        r = stream_events(conn, &mut events, hub, node_id, (commands, &load), silence, &mut last_heard) => r,
+        r = stream_events(conn, &mut events, hub, node_id, (commands, &load, subtasks_agreed), silence, &mut last_heard) => r,
         () = still(valid) => Err(revoked()),
     };
     // The certificate check can cancel the stream while a write is running. Wait for that event before recording the link closed.
@@ -560,9 +564,10 @@ async fn stream_events<S>(
     hub: &Arc<Hub>,
     node_id: &str,
     // The commands queued for this node, and the connection's count of them (`GET /api/metrics`).
-    (mut commands, load): (
+    (mut commands, load, subtasks_agreed): (
         tokio::sync::mpsc::UnboundedReceiver<crate::router::ToNode>,
         &crate::router::LinkLoad,
+        bool,
     ),
     silence: Duration,
     last_heard: &mut tokio::time::Instant,
@@ -663,7 +668,14 @@ where
                         let posted_tx = posted_tx.clone();
                         let answer = v1::CommandRequest::decode(f.payload.as_slice())
                             .map_err(|_| invalid("request"))?;
-                        post_for_node(hub, node_id, answer, &posts_open, posted_tx);
+                        post_for_node(
+                            hub,
+                            node_id,
+                            answer,
+                            &posts_open,
+                            posted_tx,
+                            subtasks_agreed,
+                        );
                     }
                     // An answer to a routed command: hand it to whoever asked. A garbled answer is dropped, and
                     // the asker's deadline turns it into `node.timeout`.
@@ -739,6 +751,15 @@ pub(crate) fn client_welcome(access: &crate::users::Access, now_ms: u64) -> v1::
     };
     welcome.set_person_role(role);
     welcome
+}
+
+fn task_field_size(task: &v1::TaskSnapshot, tag: u32, payload: usize) -> usize {
+    let len = task.encoded_len();
+    let extra = prost::encoding::key_len(tag)
+        + prost::encoding::encoded_len_varint(payload as u64)
+        + payload;
+    extra + prost::encoding::encoded_len_varint((len + extra) as u64)
+        - prost::encoding::encoded_len_varint(len as u64)
 }
 
 /// The wire form of the hub's view (ADR-0027). Ids are the hub-wide keys.
@@ -905,6 +926,7 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 claimed_by_agent_id: t.owner.clone(),
                 done: t.done,
                 review: None,
+                parent_task_id: None,
             })
             .collect(),
         leases: view
@@ -930,20 +952,23 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
         }
     }
     for task in &mut snapshot.tasks {
-        if let Some(review) = view
-            .task_reviews
-            .get(&format!("{}/{}", task.project_id, task.task_id))
-        {
-            let len = task.encoded_len();
-            let metadata = review.encoded_len();
-            let extra = prost::encoding::key_len(6)
-                + prost::encoding::encoded_len_varint(metadata as u64)
-                + metadata;
-            let size = extra + prost::encoding::encoded_len_varint((len + extra) as u64)
-                - prost::encoding::encoded_len_varint(len as u64);
+        let key = format!("{}/{}", task.project_id, task.task_id);
+        if let Some(review) = view.task_reviews.get(&key) {
+            let size = task_field_size(task, 6, review.encoded_len());
             if size <= remaining {
                 remaining -= size;
                 task.review = Some(review.clone());
+            }
+        }
+        if let Some(parent) = view
+            .tasks
+            .get(&key)
+            .and_then(|task| task.parent_task_id.as_ref())
+        {
+            let size = task_field_size(task, 7, parent.len());
+            if size <= remaining {
+                remaining -= size;
+                task.parent_task_id = Some(parent.clone());
             }
         }
     }
@@ -1106,7 +1131,7 @@ where
         conn.send(&frame(STREAM_EVENTS, kinds::SNAPSHOT, body.encode_to_vec()))
             .await?;
         if scope.is_none() {
-            send_review_overflow(&mut conn, view, &body, *pos).await?;
+            send_task_metadata_overflow(&mut conn, view, &body, *pos).await?;
         }
         if owner && scope.is_none() && !view.handoff_deliveries.is_empty() {
             // Active reservations must stay reachable even when the base snapshot fills the frame.
@@ -1729,16 +1754,7 @@ where
     Ok(())
 }
 
-/// [`send_positioned`], with what only the owner may see taken out for anyone else (ADR-0069: a machine's full executable path).
-async fn send_review_overflow<S>(
-    conn: &mut Conn<S>,
-    view: &View,
-    snapshot: &v1::Snapshot,
-    pos: u64,
-) -> Result<(), ServeError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
+fn task_metadata_overflow(view: &View, snapshot: &v1::Snapshot) -> Vec<v1::event::Body> {
     use v1::event::Body;
     let mut omitted = Vec::new();
     for project in &view.review_projects {
@@ -1753,8 +1769,8 @@ where
         }
     }
     for task in &snapshot.tasks {
+        let key = format!("{}/{}", task.project_id, task.task_id);
         if task.review.is_none() {
-            let key = format!("{}/{}", task.project_id, task.task_id);
             if let Some(review) = view.task_reviews.get(&key) {
                 omitted.push(Body::TaskReviewChanged(v1::TaskReviewChanged {
                     project_id: task.project_id.clone(),
@@ -1763,8 +1779,33 @@ where
                 }));
             }
         }
+        if task.parent_task_id.is_none() {
+            if let Some(parent) = view
+                .tasks
+                .get(&key)
+                .and_then(|task| task.parent_task_id.as_ref())
+            {
+                omitted.push(Body::TaskParentLinked(v1::TaskParentLinked {
+                    project_id: task.project_id.clone(),
+                    task_id: task.task_id.clone(),
+                    parent_task_id: parent.clone(),
+                }));
+            }
+        }
     }
-    for body in omitted {
+    omitted
+}
+
+async fn send_task_metadata_overflow<S>(
+    conn: &mut Conn<S>,
+    view: &View,
+    snapshot: &v1::Snapshot,
+    pos: u64,
+) -> Result<(), ServeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for body in task_metadata_overflow(view, snapshot) {
         send_positioned(
             conn,
             &crate::hub::Delivered {
@@ -1835,6 +1876,7 @@ fn post_for_node(
     req: v1::CommandRequest,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+    subtasks_agreed: bool,
 ) {
     use std::sync::atomic::Ordering;
     let rid = req.request_id.clone();
@@ -1844,7 +1886,7 @@ fn post_for_node(
     let post = match req.command {
         Some(command_request::Command::MeshPost(post)) => post,
         Some(command_request::Command::BoardCall(call)) => {
-            return board_for_node(hub, node_id, &rid, &call, open, answers);
+            return board_for_node(hub, node_id, &rid, &call, open, answers, subtasks_agreed);
         }
         // ADR-0119: a helper started on another machine, its result, following it and releasing it.
         Some(
@@ -2309,6 +2351,7 @@ fn board_for_node(
     call: &v1::BoardCall,
     open: &Arc<std::sync::atomic::AtomicUsize>,
     answers: tokio::sync::mpsc::UnboundedSender<v1::CommandResponse>,
+    subtasks_agreed: bool,
 ) {
     use crate::board::Verdict;
     use std::sync::atomic::Ordering;
@@ -2320,7 +2363,11 @@ fn board_for_node(
         let _ = answers.send(error_response(rid, &e));
         return;
     }
-    let a = hub.board_call(node_id, call, now_ms());
+    let a = if call.tool == agora_mesh::mcp::SUBTASK_TOOL && !subtasks_agreed {
+        crate::board::subtasks_unavailable(agora_core::fold_project_id(&call.project_id).as_ref())
+    } else {
+        hub.board_call(node_id, call, now_ms())
+    };
     // ADR-0115 (#1150): what restoring the board owes agents (a task of an older board given a new id), whatever the call's answer.
     for n in &a.notices {
         board_notice(hub, n);
@@ -3580,7 +3627,7 @@ mod snapshot_budget_tests {
     }
 
     #[test]
-    fn a_full_snapshot_leaves_review_metadata_for_positioned_replay() {
+    fn a_full_snapshot_leaves_task_metadata_for_positioned_replay() {
         let mut view = fixture("");
         view.messages = Arc::default();
         record(
@@ -3607,11 +3654,25 @@ mod snapshot_budget_tests {
                 ..Default::default()
             },
         );
+        record(
+            &mut view,
+            6,
+            crate::ca::RESERVED_HUB_ID,
+            Body::TaskParentLinked(v1::TaskParentLinked {
+                project_id: "p".into(),
+                task_id: "t-1".into(),
+                parent_task_id: "t-2".into(),
+            }),
+        );
         let result = snapshot(&view);
         assert_eq!(result.encoded_len(), DEFAULT_MAX_PAYLOAD);
         assert!(result.review_enabled_project_ids.is_empty());
         assert!(result.tasks[0].review.is_none());
         assert!(!result.tasks[0].done);
+        assert!(result.tasks[0].parent_task_id.is_none());
+        assert!(matches!(task_metadata_overflow(&view, &result).last(),
+            Some(Body::TaskParentLinked(link)) if link.task_id == "t-1" && link.parent_task_id == "t-2"
+        ));
     }
 
     #[test]

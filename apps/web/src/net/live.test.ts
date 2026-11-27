@@ -834,6 +834,26 @@ it('folds trusted Review metadata even when it follows a full snapshot at the sa
   expect(boards(v)[0]).toMatchObject({ reviewEnabled: true, tasks: [{ title: 'Original', status: 'review' }] });
 });
 
+it('derives direct subtask progress from snapshot links and trusted positioned replay', () => {
+  const state = agora.v1.TaskReviewState;
+  const v = fromSnapshot({ pos: 7, tasks: [
+    { projectId: 'p', taskId: 't-1', title: 'Parent' },
+    { projectId: 'p', taskId: 't-2', title: 'Accepted child', parentTaskId: 't-1', done: true, review: { reportRevision: 1, state: state.TASK_REVIEW_STATE_ACCEPTED } },
+    { projectId: 'p', taskId: 't-3', title: 'Returned child', review: { reportRevision: 1, state: state.TASK_REVIEW_STATE_RETURNED } },
+    { projectId: 'p', taskId: 't-4', title: 'Grandchild', parentTaskId: 't-2', done: true, review: { reportRevision: 1, state: state.TASK_REVIEW_STATE_ACCEPTED } },
+  ] });
+  const tasks = () => boards(v)[0]!.tasks;
+  const link = { body: 'taskParentLinked' as const, taskParentLinked: { projectId: 'p', taskId: 't-3', parentTaskId: 't-1' } };
+
+  applyEvent(v, 7, { ...link, producerId: 'n' });
+  expect(tasks()[0]?.subtasks).toEqual({ accepted: 1, total: 1 });
+  applyEvent(v, 7, { ...link, producerId: 'hub' });
+  applyEvent(v, 8, ev('hub', 1, { taskChanged: { projectId: 'p', taskId: 't-3', title: 'Returned child' } }));
+  expect(tasks()[0]?.subtasks).toEqual({ accepted: 1, total: 2 });
+  expect(tasks()[1]).toMatchObject({ status: 'done', parent: { title: 'Parent' }, subtasks: { accepted: 1, total: 1 } });
+  expect(tasks()[2]).toMatchObject({ status: 'open', parent: { title: 'Parent' } });
+});
+
 it('folds handoff delivery status from snapshot and hub events without changing the task owner', () => {
   const row = { deliveryId: 'one', projectId: 'p', taskId: 't-1', receiverAgentId: 'west/a', state: 1 };
   const view = fromSnapshot({

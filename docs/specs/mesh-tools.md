@@ -423,3 +423,14 @@ On a shared board whose hub owner enabled Review (ADR-0125), the current owner's
 and references for a person to review. `task_list` reports the `review` status and accepts that status as a filter.
 Dependencies stay blocked and the task keeps its reporting agent even if the agent stops. An owner accepts the
 report into Done or returns it to Backlog in the web window. A later report replaces the earlier report for the task.
+
+
+### Shared-board subtasks
+
+On a Review-enabled shared board (ADR-0126), `task_create_subtask { parent_task_id, title, detail?, depends_on? }`
+creates a child on the caller's board and returns `{ task_id }`. The root is level one, the deepest child is level
+three, and a parent may have at most 50 direct children. The node lists this tool when its policy allows remote
+mesh calls and the link negotiated `board.subtasks.v1`. A call never falls back to the local broker. Unsupported
+boards return `board.subtasks_unavailable`, missing parents return `task.not_found`, and a child outside the
+limits returns `task.subtask_limit`. A subtask's row in `task_list` includes `parent_task_id`. Its parent groups it
+in the window. Its `depends_on` list determines which tasks must be done before it can be claimed.

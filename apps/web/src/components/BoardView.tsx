@@ -23,6 +23,12 @@ function Card({ task, projectId, give }: { task: BoardTaskModel; projectId: stri
     <li className="kit-card kit-card--dense min-w-0 gap-1.5" data-task-id={task.id}>
       {/* Task text is untrusted: plain text only, cut short, never HTML or a link. */}
       <span dir="auto" className={`break-words ${task.status === 'done' ? 'text-muted' : 'font-medium'}`}>{plain(task.title, TITLE_MAX) || t('board-task-untitled')}</span>
+      {task.parent && <span dir="auto" className="break-words text-xs text-muted">
+        {t('board-card-parent-task', { title: plain(task.parent.title, TITLE_MAX) || t('board-task-untitled') })}
+      </span>}
+      {task.subtasks && <span className="text-xs text-muted">
+        {t('board-card-subtask-progress', { accepted: task.subtasks.accepted, total: task.subtasks.total })}
+      </span>}
       {task.status !== 'open' && task.owner && <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted">
         <span className="min-w-0 break-words">{t('board-card-owner', { name: plain(task.owner, OWNER_MAX) })}</span>
         {task.status === 'claimed' && task.ownerState && <StatusPill state={task.ownerState} />}

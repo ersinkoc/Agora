@@ -416,7 +416,8 @@ impl Scope {
             Body::TaskChanged(_)
             | Body::TaskHandoffDeliveryChanged(_)
             | Body::TaskReviewChanged(_)
-            | Body::TaskReviewEnabled(_) => false,
+            | Body::TaskReviewEnabled(_)
+            | Body::TaskParentLinked(_) => false,
             // ADR-0122: shared items are the owner's (they reach every agent on every machine).
             Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.

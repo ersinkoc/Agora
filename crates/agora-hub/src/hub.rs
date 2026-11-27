@@ -1089,6 +1089,15 @@ impl Hub {
         // ADR-0115: an older node names a repository on a case-insensitive host in its own case; the board is the folded project's.
         let project = agora_core::fold_project_id(&call.project_id);
         let project = project.as_ref();
+        let subtask = call.tool == agora_mesh::mcp::SUBTASK_TOOL;
+        if subtask
+            && (!g.view.review_projects.contains(project)
+                || !self
+                    .router
+                    .has_capability(node, agora_protocol::handshake::BOARD_SUBTASKS_V1))
+        {
+            return crate::board::subtasks_unavailable(project);
+        }
         let (key, notices) = self.restore_board(&mut g, project, now_ms);
         if self
             .reconcile_board_runs(&mut g, project, &key, now_ms)
@@ -1113,6 +1122,21 @@ impl Hub {
             now_ms,
         );
         a.notices.extend(notices);
+        if subtask
+            && !matches!(
+                a.verdict,
+                crate::board::Verdict::Done {
+                    is_error: false,
+                    ..
+                }
+            )
+        {
+            if let Some(board) = before {
+                self.boards.restore(project, board);
+            }
+            a.events.clear();
+            return a;
+        }
         if a.events.is_empty() {
             return a;
         }
@@ -1732,7 +1756,15 @@ impl Hub {
                 // the merged board is stored with its markers and those events in one transaction. A board stored without its
                 // markers would be merged again at the next start and its tasks added twice; so if the store refuses, the folded
                 // board is used alone, as it was stored, and the merge is tried again at the next start.
-                let mut changes = self.boards.task_changes(project, &m.restated);
+                let mut restated = m.restated;
+                // Publish a base row if this is the first time a linked task appears in this view.
+                restated.extend(m.linked.into_iter().filter(|id| {
+                    !g.view
+                        .tasks
+                        .get(&format!("{project}/{id}"))
+                        .is_some_and(|task| task.board_revision.is_some())
+                }));
+                let mut changes = self.boards.task_changes(project, &restated);
                 changes.extend(self.boards.reconcile_runs(
                     project,
                     runs.retained.clone(),
@@ -3910,6 +3942,183 @@ mod tests {
             .encode_to_vec(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn subtasks_obey_board_capability_scope_limits_and_replay() {
+        use agora_mesh::mcp::SUBTASK_TOOL;
+        use agora_protocol::handshake::BOARD_SUBTASKS_V1;
+        use serde_json::json;
+
+        let (hub, path) = hub_on_file("board-subtasks");
+        let (root, _links) = stage_handoff(&hub, vec![BOARD_SUBTASKS_V1.into()]);
+        let create = |hub: &Hub, node: &str, parent: &str, title: &str| {
+            call_task_board(
+                hub,
+                node,
+                SUBTASK_TOOL,
+                json!({"parent_task_id": parent, "title": title}),
+            )
+        };
+        let error = |answer: crate::board::Answer| {
+            let crate::board::Verdict::Done {
+                result,
+                is_error: true,
+            } = answer.verdict
+            else {
+                panic!("expected a board refusal: {:?}", answer.verdict);
+            };
+            agora_mesh::mcp::tool_result_value(&result).unwrap()
+        };
+
+        let before = hub.view().1;
+        assert_eq!(
+            error(create(&hub, "giver", &root, "disabled"))["error"]["code"],
+            "board.subtasks_unavailable"
+        );
+        assert_eq!(hub.view().1, before);
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(15).unwrap();
+
+        let (_old_link, _commands, _) = hub.node_link_opened("receiver", Vec::new(), 16).unwrap();
+        let before = hub.view().1;
+        assert_eq!(
+            error(create(&hub, "receiver", &root, "old node"))["error"]["code"],
+            "board.subtasks_unavailable"
+        );
+        let (_link, _commands, _) = hub
+            .node_link_opened("receiver", vec![BOARD_SUBTASKS_V1.into()], 17)
+            .unwrap();
+        assert!(before < hub.view().1, "the replacement is recorded");
+        let before = hub.view().1;
+        assert_eq!(
+            error(create(&hub, "giver", "t-99999", "absent parent"))["error"]["code"],
+            "task.not_found"
+        );
+        assert_eq!(hub.view().1, before);
+
+        let child = board_result(create(&hub, "receiver", &root, "child"))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let grandchild = board_result(create(&hub, "giver", &child, "grandchild"))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let after_family = hub.view().1;
+        let too_deep = error(create(&hub, "giver", &grandchild, "too deep"));
+        assert_eq!(too_deep["error"]["code"], "task.subtask_limit");
+        assert_eq!(too_deep["error"]["params"]["limit"], 3);
+        assert_eq!(hub.view().1, after_family);
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TRIGGER refuse_child BEFORE INSERT ON settings WHEN NEW.key = 'board.p' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        let failed = create(&hub, "giver", &root, "disk refused");
+        assert!(
+            matches!(failed.verdict, crate::board::Verdict::Invalid(e) if e.code == agora_protocol::ErrorCode::Internal)
+        );
+        assert_eq!(hub.view().1, after_family);
+        connection
+            .execute_batch("DROP TRIGGER refuse_child;")
+            .unwrap();
+        drop(connection);
+
+        for _ in 1..49 {
+            board_result(create(&hub, "giver", &root, "sibling"));
+        }
+        let before_finish = hub.view().1;
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| create(&hub, "giver", &root, "last slot one"));
+            let b = scope.spawn(|| create(&hub, "receiver", &root, "last slot two"));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        let refused = match (&a.verdict, &b.verdict) {
+            (
+                crate::board::Verdict::Done {
+                    is_error: false, ..
+                },
+                _,
+            ) => b,
+            (
+                _,
+                crate::board::Verdict::Done {
+                    is_error: false, ..
+                },
+            ) => a,
+            _ => panic!("one creation must succeed"),
+        };
+        let limit = error(refused);
+        assert_eq!(limit["error"]["code"], "task.subtask_limit");
+        assert_eq!(limit["error"]["params"]["limit"], 50);
+        assert_eq!(hub.view().1, before_finish + 2);
+        drop(hub);
+
+        let hub = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let replay = hub.subscribe(Some(before_finish)).unwrap();
+        let task_events: Vec<_> = replay
+            .backlog
+            .iter()
+            .filter_map(|d| d.event.body.as_ref())
+            .filter(|body| matches!(body, Body::TaskChanged(_) | Body::TaskParentLinked(_)))
+            .collect();
+        assert!(
+            matches!(&task_events[..], [Body::TaskChanged(task), Body::TaskParentLinked(link)]
+            if link.task_id == task.task_id && link.parent_task_id == root)
+        );
+        let (view, pos) = hub.view();
+        assert_eq!(
+            view.tasks[&format!("p/{child}")].parent_task_id.as_deref(),
+            Some(root.as_str())
+        );
+        let snapshot = crate::server::snapshot_of(&view, pos);
+        assert_eq!(
+            snapshot
+                .tasks
+                .iter()
+                .filter(|t| t.parent_task_id.as_deref() == Some(root.as_str()))
+                .count(),
+            50
+        );
+        let _links: Vec<_> = ["giver", "receiver"]
+            .into_iter()
+            .map(|node| {
+                hub.board_join_settled(node, "p");
+                hub.node_link_opened(node, vec![BOARD_SUBTASKS_V1.into()], 20)
+                    .unwrap()
+            })
+            .collect();
+        let listed = board_result(call_task_board(
+            &hub,
+            "giver",
+            "task_list",
+            json!({"task_id": grandchild}),
+        ));
+        assert_eq!(listed[0]["parent_task_id"], child);
+        assert!(listed[0]["owner"].is_null());
+
+        let support = support();
+        let mut session = open_session(&hub, &support, "giver");
+        let forged = Event {
+            producer_id: "giver".into(),
+            seq: 2,
+            at_ms: 25,
+            body: Some(Body::TaskParentLinked(
+                agora_protocol::v1::TaskParentLinked {
+                    project_id: "p".into(),
+                    task_id: child.clone(),
+                    parent_task_id: grandchild,
+                },
+            )),
+        };
+        assert!(hub.ingest(&mut session, &forged.encode_to_vec()).is_err());
+        assert_eq!(
+            hub.view().0.tasks[&format!("p/{child}")]
+                .parent_task_id
+                .as_deref(),
+            Some(root.as_str())
+        );
+        drop(hub);
+        remove_db(&path);
     }
 
     #[test]
