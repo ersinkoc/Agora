@@ -477,6 +477,10 @@ impl crate::web::SessionApi for HubSessions {
         Box::pin(self.account_op(op, bearer, client, body))
     }
 
+    fn preview_frame_src(&self, host: &str) -> Option<String> {
+        self.hub.previews().frame_src(host)
+    }
+
     fn preview_enter(
         &self,
         bearer: Option<&str>,

@@ -108,6 +108,8 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   certificate); the per-port deny list below would cover it.
 - The owner's policy naming ports below 1024 that may be forwarded, and a per-port deny list (decision 3 says "unless the owner names
   them in policy"; today every port below 1024 is refused and nothing else can be denied by policy).
+- If members ever get preview commands (today `command_allowed` refuses every `Preview*` command to a member), the node's
+  `PreviewList` and `PreviewClose { all }` must filter by the signing device: their answers name every forward (review of 7f16c518).
 - A local client that reads its control connection slowly still holds that connection's other streams while a preview send waits; the
   hub link avoids it with a local connection per preview connection.
 - **Hub step 3, left:** the audit row `preview.enter` names the person, the machine and the outcome but not the forward and its port

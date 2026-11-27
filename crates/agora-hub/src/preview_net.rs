@@ -189,6 +189,25 @@ impl PreviewNet {
         }
     }
 
+    /// The window page's frame sources for previews, asked through a request whose `Host` was `host`: every port of the pool on that
+    /// host, only when previews are on and the window reached the hub's own port (otherwise every entry is `no_origin` anyway).
+    pub fn frame_src(&self, host: &str) -> Option<String> {
+        let g = self.lock();
+        let config = g.config.as_ref()?;
+        if host_port(host) != Some(config.hub_port) {
+            return None;
+        }
+        let name = gate::host_name_of(host)?;
+        let ports = g.pool.as_ref()?.all();
+        Some(
+            ports
+                .iter()
+                .map(|p| format!("https://{name}:{p}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+
     /// A person signed out or was removed: their tickets and tokens end, and so do their live connections.
     pub fn end_user(&self, user: &str) {
         self.lock().gate.end_user(user);
@@ -444,6 +463,13 @@ Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\nContent-Length: 0\r\n
         Ok(l) => l,
         Err(_) => return answer(&mut tls, 502).await,
     };
+    // The window that may frame this preview: the hub's own port on the host the browser used.
+    let hub_port = net.lock().config.as_ref().map(|c| c.hub_port);
+    let framed_by = request
+        .host_name
+        .as_ref()
+        .zip(hub_port)
+        .map(|(h, p)| format!("https://{h}:{p}"));
     let mut first = request.head;
     first.extend_from_slice(&buf[end..]);
     relay(
@@ -456,6 +482,7 @@ Referrer-Policy: no-referrer\r\nCache-Control: no-store\r\nContent-Length: 0\r\n
         first,
         request.upgrade,
         epoch,
+        framed_by,
     )
     .await;
 }
@@ -481,6 +508,7 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin + Send>(
     first: Vec<u8>,
     upgrade: bool,
     mut epoch: watch::Receiver<u64>,
+    framed_by: Option<String>,
 ) {
     let (mut rd, mut wr) = tokio::io::split(tls);
     let max_chunk = match link.limits.max_chunk_bytes {
@@ -532,7 +560,7 @@ async fn relay<S: AsyncRead + AsyncWrite + Unpin + Send>(
                                     Ok(None) => break,
                                     Err(_) => break 'conn,
                                 };
-                                let Ok((status, head)) = gate::rewrite_response(&answer_head[..end], &carried.partition, now_ms(), carried.ends_ms) else {
+                                let Ok((status, head)) = gate::rewrite_response(&answer_head[..end], &carried.partition, now_ms(), carried.ends_ms, framed_by.as_deref()) else {
                                     break 'conn;
                                 };
                                 if wr.write_all(&head).await.is_err() {
@@ -702,6 +730,15 @@ mod tests {
             .enter("ada", "s1", devices, "mac", "fwd-1", &host)
             .unwrap();
         assert_eq!(again, port, "one port per forward");
+        // The window page may frame exactly the pool's ports, on the host it came by, and only through the hub's own port.
+        let src = net.frame_src(&host).unwrap();
+        assert!(
+            src.starts_with(&format!("https://localhost:{} ", hub.port() + 1)),
+            "{src}"
+        );
+        assert_eq!(src.split(' ').count(), usize::from(DEFAULT_POOL));
+        assert_eq!(net.frame_src("proxy.example"), None);
+        assert_eq!(net.frame_src("evil;x:1"), None);
         // A forward opened on the node's control socket has no device: nobody enters it.
         net.changed(
             "mac",

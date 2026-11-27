@@ -88,7 +88,12 @@ it would hand the window that trust; that is why those ports are refused even fo
   forward is still the person's and not revoked, so a sign-out, "sign out everywhere", a password change, the person's removal and a
   device's revocation end it, whichever process made the change. A forward that ends and a token past its 8 hours end it too; live
   connections, WebSockets included, are checked at every revocation in the hub and every 30 s.
-- **The window's page** may frame previews: its policy has `frame-src 'self' https://<the host it was reached by>:*`.
+- **Framing.** The window's page may frame the pool's ports on the host it was reached by (`frame-src 'self' https://<host>:<port>
+  …`, only when previews are on and it came through the hub's own port), and every preview's final answer carries a second policy
+  `frame-ancestors 'self' https://<host>:<hub port>`, so no other site and no other forward's page frames it (a second policy only
+  narrows the program's own). Browsers ignore `X-Frame-Options` once a `frame-ancestors` policy is present, so a program that sends only
+  `X-Frame-Options: DENY` or `SAMEORIGIN` can be framed by the hub's window (and by itself): intended, since the pane must show it,
+  and still limited to the window.
 - **Who is told.** `PreviewChanged` goes to the person whose device opened the forward (to the owner for one opened on the node's
   control socket); `PreviewSuggested` to the owner, until a wider rule is decided (point 7 also names the person who started the
   agent; not yet).

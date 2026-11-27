@@ -203,6 +203,24 @@ pub struct Rewritten {
     /// Whether the browser says the request comes from this preview itself, from the window's frame or from the person typing it
     /// ([`fetch_allowed`]); a request another forward's page made is refused before its token is looked at.
     pub fetch_ok: bool,
+    /// The host name the browser reached this preview by (its `Host` without the port), when it is a plain host name; the window's
+    /// origin on the same host frames the preview (see [`rewrite_response`]).
+    pub host_name: Option<String>,
+}
+
+/// A `Host` header's name without its port, when it holds nothing but a host name or an address.
+pub fn host_name_of(host: &str) -> Option<String> {
+    let host = host.trim();
+    let name = match host.rfind(']') {
+        Some(end) => &host[..=end],
+        None => host.rsplit_once(':').map_or(host, |(n, _)| n),
+    };
+    let ok = !name.is_empty()
+        && name.len() <= 253
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'[' | b']' | b':'));
+    ok.then(|| name.to_string())
 }
 
 /// Who made a request, from the headers a browser sets and a page cannot (review of the preview slice 3): cookies ignore ports, so a
@@ -256,6 +274,7 @@ pub fn rewrite_request(raw: &[u8], p: &Partition) -> Result<Rewritten, HeadError
     let target = h.first.split(' ').nth(1).unwrap_or("/").to_string();
     let method = h.first.split(' ').next().unwrap_or("").to_string();
     let fetch_ok = fetch_allowed(&h, &method, p.port);
+    let host_name = h.values("host").next().and_then(host_name_of);
     let upgrade = h.values("connection").any(|v| has_token(v, "upgrade"))
         && h.values("upgrade").next().is_some();
     let ours = p.token_cookie();
@@ -308,6 +327,7 @@ pub fn rewrite_request(raw: &[u8], p: &Partition) -> Result<Rewritten, HeadError
         upgrade,
         target,
         fetch_ok,
+        host_name,
     })
 }
 
@@ -391,6 +411,7 @@ pub fn rewrite_response(
     p: &Partition,
     now_ms: u64,
     ends_ms: u64,
+    framed_by: Option<&str>,
 ) -> Result<(u16, Vec<u8>), HeadError> {
     let (status, mut h) = parse_response(raw)?;
     let prefix = p.prefix();
@@ -421,6 +442,15 @@ pub fn rewrite_response(
         out.push(Header {
             name: "Connection".into(),
             value: "close".into(),
+        });
+        // Only the window frames a preview (no other site, no other forward's page): a second policy only narrows the program's
+        // own, never widens it (review of step 4).
+        out.push(Header {
+            name: "Content-Security-Policy".into(),
+            value: match framed_by {
+                Some(origin) => format!("frame-ancestors 'self' {origin}"),
+                None => "frame-ancestors 'self'".into(),
+            },
         });
     }
     h.headers = out;
@@ -699,7 +729,7 @@ Cookie: p7450-f3a_theme=dark\r\nAccept: text/html\r\n\r\n";
         let raw = b"HTTP/1.1 200 OK\r\nSet-Cookie: session=abc; Path=/; HttpOnly; Domain=example.com\r\n\
 Set-Cookie: long=1; Max-Age=999999\r\nSet-Cookie: short=1; Max-Age=60\r\nSet-Cookie: dated=1; Expires=Sun, 09 Sep 2001 01:56:40 GMT\r\n\
 Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =nameless\r\nContent-Type: text/html\r\n\r\n";
-        let (status, head) = rewrite_response(raw, &p(), now_ms, ends_ms).unwrap();
+        let (status, head) = rewrite_response(raw, &p(), now_ms, ends_ms, None).unwrap();
         assert_eq!(status, 200);
         let head = text(&head);
         assert!(
@@ -722,13 +752,14 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         );
         assert!(!head.contains("nameless"));
         assert!(head.contains("Content-Type: text/html"));
-        assert!(head.ends_with("Connection: close\r\n\r\n"), "{head}");
+        assert!(head.contains("Connection: close\r\n"), "{head}");
         assert_eq!(
             rewrite_response(
                 b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
                 &p(),
                 0,
-                1
+                1,
+                None
             )
             .unwrap()
             .0,
@@ -797,12 +828,12 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
 
     #[test]
     fn a_final_answer_always_closes_the_connection_and_a_101_stays_an_upgrade() {
-        let close = |raw: &[u8]| text(&rewrite_response(raw, &p(), 0, 1).unwrap().1);
+        let close = |raw: &[u8]| text(&rewrite_response(raw, &p(), 0, 1, None).unwrap().1);
         let h = close(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n");
-        assert!(h.ends_with("Connection: close\r\n\r\n"), "added: {h}");
+        assert!(h.contains("\r\nConnection: close\r\n"), "added: {h}");
         let h = close(b"HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\nProxy-Connection: keep-alive\r\n\r\n");
         assert_eq!(
-            h, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+            h, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Security-Policy: frame-ancestors 'self'\r\n\r\n",
             "replaced"
         );
         let h = close(b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
@@ -890,5 +921,39 @@ Set-Cookie: late=1; Expires=Sun, 06 Nov 2094 08:49:37 GMT\r\nSet-Cookie: =namele
         assert!(!post("Origin: https://hub.example:7451\r\n"));
         assert!(!post("Origin: http://hub.example:7450\r\n"));
         assert!(!post("Origin: null\r\n"));
+    }
+
+    #[test]
+    fn only_the_window_frames_a_preview() {
+        let framed = |raw: &[u8]| {
+            text(
+                &rewrite_response(raw, &p(), 0, 1, Some("https://hub.example:7443"))
+                    .unwrap()
+                    .1,
+            )
+        };
+        let h = framed(b"HTTP/1.1 200 OK\r\nContent-Security-Policy: default-src 'self'\r\n\r\n");
+        assert!(
+            h.contains("Content-Security-Policy: default-src 'self'\r\n"),
+            "the program's own stays: {h}"
+        );
+        assert!(
+            h.contains(
+                "Content-Security-Policy: frame-ancestors 'self' https://hub.example:7443\r\n"
+            ),
+            "{h}"
+        );
+        assert!(!framed(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").contains("frame-ancestors"));
+        assert!(!framed(b"HTTP/1.1 100 Continue\r\n\r\n").contains("frame-ancestors"));
+        let alone = text(
+            &rewrite_response(b"HTTP/1.1 200 OK\r\n\r\n", &p(), 0, 1, None)
+                .unwrap()
+                .1,
+        );
+        assert!(alone.contains("frame-ancestors 'self'\r\n"), "{alone}");
+        let r = rewrite_request(b"GET / HTTP/1.1\r\nHost: hub.example:7451\r\n\r\n", &p()).unwrap();
+        assert_eq!(r.host_name.as_deref(), Some("hub.example"));
+        let r = rewrite_request(b"GET / HTTP/1.1\r\nHost: a b\r\n\r\n", &p()).unwrap();
+        assert_eq!(r.host_name, None);
     }
 }
