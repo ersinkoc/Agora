@@ -835,6 +835,374 @@ pub(crate) fn end_with(supervisor: u32) {
         });
 }
 
+// ----- ADR-0136: the machine's CPU, memory and disks -----
+
+/// The host port, asked for once: each `mach_host_self` call adds a user reference to its send right, and a reader that runs every 30 s
+/// for weeks would pile them up.
+#[allow(deprecated)] // `libc` prefers the `mach2` crate; a few stable calls are not worth a new dependency
+fn host_port() -> libc::mach_port_t {
+    static HOST: std::sync::OnceLock<libc::mach_port_t> = std::sync::OnceLock::new();
+    // SAFETY: no arguments; it returns a send right to this host's port, kept for the life of the process.
+    *HOST.get_or_init(|| unsafe { libc::mach_host_self() })
+}
+
+/// A numeric `sysctl` value. A 4-byte one fills the low half of the zeroed `u64` (both macOS targets are little-endian).
+fn sysctl_u64(name: &CStr) -> io::Result<u64> {
+    let mut value: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: a NUL-terminated name, and an out-buffer of `len` bytes that outlives the call; nothing is written.
+    let r = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut value as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len != 4 && len != 8 {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(value)
+}
+
+/// The machine's CPU ticks (user, system, idle, nice; summed over every CPU) as the kernel counts them, in 32 bits.
+#[allow(deprecated)] // see `host_port`
+fn cpu_ticks() -> io::Result<[u32; 4]> {
+    // SAFETY: an all-zero host_cpu_load_info is a valid out-buffer.
+    let mut info: libc::host_cpu_load_info = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_CPU_LOAD_INFO_COUNT;
+    // SAFETY: the buffer is a live host_cpu_load_info, and `count` says how many integers it holds.
+    let r = unsafe {
+        libc::host_statistics(
+            host_port(),
+            libc::HOST_CPU_LOAD_INFO,
+            (&mut info as *mut libc::host_cpu_load_info).cast(),
+            &mut count,
+        )
+    };
+    if r != libc::KERN_SUCCESS {
+        return Err(io::Error::from(io::ErrorKind::Other));
+    }
+    Ok(info.cpu_ticks)
+}
+
+/// `(free, inactive, purgeable)` pages from the kernel's VM statistics.
+#[allow(deprecated)] // see `host_port`
+fn vm_pages() -> io::Result<(u32, u32, u32)> {
+    // SAFETY: an all-zero vm_statistics64 is a valid out-buffer.
+    let mut info: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    // SAFETY: the buffer is a live vm_statistics64, and `count` says how many integers it holds.
+    let r = unsafe {
+        libc::host_statistics64(
+            host_port(),
+            libc::HOST_VM_INFO64,
+            (&mut info as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
+    if r != libc::KERN_SUCCESS {
+        return Err(io::Error::from(io::ErrorKind::Other));
+    }
+    Ok((info.free_count, info.inactive_count, info.purgeable_count))
+}
+
+/// The kernel's tick counters are 32 bits and wrap (summed over 10 CPUs at 100 Hz, after about 50 days), while [`crate::MachineStats`]
+/// promises counters since boot that two readings subtract. `last` holds the previous raw reading and the running sums; each new
+/// reading adds the wrapping difference from the last one, so the sums never go back as long as readings are less than a wrap apart.
+fn carry(last: &mut Option<([u32; 4], [u64; 4])>, raw: [u32; 4]) -> [u64; 4] {
+    let (prev, mut sums) = last.unwrap_or(([0; 4], [0; 4]));
+    for ((sum, now), before) in sums.iter_mut().zip(raw).zip(prev) {
+        *sum = sum.saturating_add(u64::from(now.wrapping_sub(before)));
+    }
+    *last = Some((raw, sums));
+    sums
+}
+
+/// `(busy, total)` ticks from the four counters in the kernel's order (user, system, idle, nice).
+fn busy_and_total(t: [u64; 4]) -> (u64, u64) {
+    let [user, system, idle, nice] = t;
+    let busy = user.saturating_add(system).saturating_add(nice);
+    (busy, busy.saturating_add(idle))
+}
+
+/// What the system can give without swapping: free (which counts speculative pages), inactive and purgeable pages, never more
+/// than the memory there is.
+fn available_bytes(free: u32, inactive: u32, purgeable: u32, page: u64, total: u64) -> u64 {
+    (u64::from(free) + u64::from(inactive) + u64::from(purgeable))
+        .saturating_mul(page)
+        .min(total)
+}
+
+/// See [`crate::machine_stats`]: `host_statistics(HOST_CPU_LOAD_INFO)` ticks, `hw.logicalcpu`, `hw.memsize` and
+/// `host_statistics64(HOST_VM_INFO64)` pages.
+pub(crate) fn machine_stats() -> io::Result<crate::MachineStats> {
+    static LAST: std::sync::Mutex<Option<([u32; 4], [u64; 4])>> = std::sync::Mutex::new(None);
+    let raw = cpu_ticks()?;
+    let ticks = {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        carry(&mut last, raw)
+    };
+    let (cpu_busy_ticks, cpu_total_ticks) = busy_and_total(ticks);
+    let cpu_count = u32::try_from(sysctl_u64(c"hw.logicalcpu")?)
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let memory_total_bytes = sysctl_u64(c"hw.memsize")?;
+    // SAFETY: plain call.
+    let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    let (free, inactive, purgeable) = vm_pages()?;
+    Ok(crate::MachineStats {
+        cpu_count,
+        cpu_busy_ticks,
+        cpu_total_ticks,
+        memory_total_bytes,
+        memory_available_bytes: available_bytes(
+            free,
+            inactive,
+            purgeable,
+            page,
+            memory_total_bytes,
+        ),
+    })
+}
+
+/// One mounted file system as `getfsstat` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Mount {
+    mount: String,
+    fstype: String,
+    flags: u32,
+    fsid: [i32; 2],
+}
+
+/// The file system id of a `statfs` (the libc type keeps its two numbers private).
+fn fsid_of(st: &libc::statfs) -> [i32; 2] {
+    // SAFETY: `fsid_t` is a `repr(C)` struct of exactly two `i32`s.
+    unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(st.f_fsid) }
+}
+
+fn c_text(chars: &[libc::c_char]) -> String {
+    let bytes: Vec<u8> = chars
+        .iter()
+        .take_while(|c| **c != 0)
+        .map(|c| *c as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Every mounted file system, from `getfsstat` into a buffer of our own (`getmntinfo` hands back a static one).
+fn mounts() -> io::Result<Vec<Mount>> {
+    // SAFETY: a null buffer asks for the count only.
+    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    let n = usize::try_from(n).map_err(|_| io::Error::last_os_error())?;
+    // Room for a few mounts that appear between the two calls.
+    let room = n + 4;
+    // SAFETY: an all-zero statfs is a valid out-buffer entry.
+    let mut buf: Vec<libc::statfs> = vec![unsafe { std::mem::zeroed() }; room];
+    let bytes = libc::c_int::try_from(room * std::mem::size_of::<libc::statfs>())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    // SAFETY: `buf` holds `bytes` bytes of statfs entries and outlives the call.
+    let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    let got = usize::try_from(got).map_err(|_| io::Error::last_os_error())?;
+    buf.truncate(got.min(room));
+    Ok(buf
+        .iter()
+        .map(|st| Mount {
+            mount: c_text(&st.f_mntonname),
+            fstype: c_text(&st.f_fstypename),
+            flags: st.f_flags,
+            fsid: fsid_of(st),
+        })
+        .collect())
+}
+
+/// The mount where the user's files are: hidden from the Finder like the system's own volumes, but it is the one that fills.
+const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+/// Whether a mount holds data that can run out: local; not a pseudo or automount file system; not read-only (a disk image or the
+/// recovery volume never fills, and a full one would only raise a false alarm); not hidden from the Finder (`nobrowse`: the
+/// system's VM, Preboot, Update... volumes); and not a snapshot. `/` (the sealed system snapshot, read-only) and [`DATA_VOLUME`]
+/// are kept: they share the disk the user fills.
+fn holds_data(m: &Mount) -> bool {
+    let flag = |f: libc::c_int| m.flags & (f as u32) != 0;
+    if m.mount == "/" || m.mount == DATA_VOLUME {
+        return flag(libc::MNT_LOCAL);
+    }
+    flag(libc::MNT_LOCAL)
+        && !matches!(m.fstype.as_str(), "devfs" | "autofs" | "nullfs")
+        && !flag(libc::MNT_RDONLY)
+        && !flag(libc::MNT_DONTBROWSE)
+        && !flag(libc::MNT_SNAPSHOT)
+}
+
+/// The data mounts, one per file system id, each with the indexes of the marks whose file system id it has, ordered as
+/// [`crate::disks`] says: `/` first, then those holding a mark, then by mount point; at most 8.
+fn pick_mounts(all: &[Mount], mark_ids: &[Option<[i32; 2]>]) -> Vec<(String, Vec<usize>)> {
+    let mut picked: Vec<(&Mount, Vec<usize>)> = Vec::new();
+    for m in all.iter().filter(|m| holds_data(m)) {
+        if !picked.iter().any(|(p, _)| p.fsid == m.fsid) {
+            picked.push((m, Vec::new()));
+        }
+    }
+    for (k, id) in mark_ids.iter().enumerate() {
+        if let Some((_, holds)) = id.and_then(|id| picked.iter_mut().find(|(p, _)| p.fsid == id)) {
+            holds.push(k);
+        }
+    }
+    picked.sort_by(|a, b| {
+        let rank = |g: &(&Mount, Vec<usize>)| (g.0.mount != "/", g.1.is_empty());
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| a.0.mount.cmp(&b.0.mount))
+    });
+    picked
+        .into_iter()
+        .take(8)
+        .map(|(m, holds)| (m.mount.clone(), holds))
+        .collect()
+}
+
+/// `statfs` of `path`.
+fn stat_fs(path: &std::path::Path) -> io::Result<libc::statfs> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: an all-zero statfs is a valid out-buffer.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and a struct that outlive the call.
+    crate::unix::cvt(unsafe { libc::statfs(c.as_ptr(), &mut st) })?;
+    Ok(st)
+}
+
+/// See [`crate::disks`]: `getfsstat`, the mounts [`holds_data`] keeps, one per file system id. A mark lies on the file system whose id
+/// its own `statfs` gives, so a folder under `/Users` counts on [`DATA_VOLUME`], where it really is (a firmlink makes it look under
+/// `/`). The figures are a fresh reading of each mount, as on Linux.
+pub(crate) fn disks(marks: &[&std::path::Path]) -> io::Result<Vec<crate::DiskSpace>> {
+    let all = mounts()?;
+    let mark_ids: Vec<Option<[i32; 2]>> = marks
+        .iter()
+        .map(|m| stat_fs(m).ok().map(|st| fsid_of(&st)))
+        .collect();
+    Ok(pick_mounts(&all, &mark_ids)
+        .into_iter()
+        .filter_map(|(mount, holds)| {
+            let (total_bytes, free_bytes) =
+                crate::unix::disk_space(std::path::Path::new(&mount)).ok()?;
+            (total_bytes > 0).then_some(crate::DiskSpace {
+                mount,
+                total_bytes,
+                free_bytes,
+                holds,
+            })
+        })
+        .collect())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod machine_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_counters_go_on_past_a_32_bit_wrap_and_memory_counts_what_can_be_given() {
+        let mut last = None;
+        assert_eq!(carry(&mut last, [100, 50, 800, 0]), [100, 50, 800, 0]);
+        // The idle counter passes the top of 32 bits and reads 20 again: it goes on from 2^32.
+        let near = u32::MAX - 9;
+        assert_eq!(carry(&mut last, [110, 60, near, 0])[2], u64::from(near));
+        let after = carry(&mut last, [120, 70, 20, 5]);
+        assert_eq!(after, [120, 70, (1u64 << 32) + 20, 5]);
+        assert_eq!(busy_and_total([100, 50, 800, 10]), (160, 960));
+        let page = 16_384;
+        assert_eq!(available_bytes(10, 20, 5, page, 1 << 40), 35 * page);
+        assert_eq!(
+            available_bytes(u32::MAX, u32::MAX, 0, page, 1 << 30),
+            1 << 30
+        );
+    }
+
+    fn mount(at: &str, fstype: &str, flags: libc::c_int, id: i32) -> Mount {
+        Mount {
+            mount: at.to_string(),
+            fstype: fstype.to_string(),
+            flags: flags as u32,
+            fsid: [id, 26],
+        }
+    }
+
+    #[test]
+    fn only_the_disks_that_fill_count_once_each_with_their_marks() {
+        use libc::{MNT_DONTBROWSE as HIDDEN, MNT_LOCAL as LOCAL, MNT_RDONLY as RO};
+        // As `mount` lists them on an Apple silicon Mac with a disk image and an external drive.
+        let all = [
+            mount("/", "apfs", LOCAL | RO | libc::MNT_ROOTFS, 1),
+            mount("/dev", "devfs", LOCAL | HIDDEN, 2),
+            mount("/System/Volumes/VM", "apfs", LOCAL | HIDDEN, 3),
+            mount("/System/Volumes/Preboot", "apfs", LOCAL | HIDDEN, 4),
+            mount("/System/Volumes/Update", "apfs", LOCAL | HIDDEN, 5),
+            mount("/System/Volumes/xarts", "apfs", LOCAL | HIDDEN, 6),
+            mount("/System/Volumes/iSCPreboot", "apfs", LOCAL | HIDDEN, 7),
+            mount("/System/Volumes/Hardware", "apfs", LOCAL | HIDDEN, 8),
+            mount(DATA_VOLUME, "apfs", LOCAL | HIDDEN, 9),
+            mount("/System/Volumes/Data/home", "autofs", HIDDEN, 10),
+            mount("/Volumes/Recovery", "apfs", LOCAL | HIDDEN, 11),
+            mount("/Volumes/An App", "hfs", LOCAL | RO, 12),
+            mount("/Volumes/Backup", "apfs", LOCAL, 13),
+            mount("/Volumes/Server", "smbfs", 0, 14),
+            // The same file system seen twice counts once.
+            mount("/Volumes/Backup again", "apfs", LOCAL, 13),
+        ];
+        // A mark on the data volume, one on nothing listed, one on the external drive.
+        let marks = [Some([9, 26]), None, Some([13, 26])];
+        assert_eq!(
+            pick_mounts(&all, &marks),
+            [
+                ("/".to_string(), vec![]),
+                ("/System/Volumes/Data".to_string(), vec![0]),
+                ("/Volumes/Backup".to_string(), vec![2]),
+            ]
+        );
+        // With no marks: the root first, then by mount point.
+        assert_eq!(
+            pick_mounts(&all, &[])
+                .into_iter()
+                .map(|(m, _)| m)
+                .collect::<Vec<_>>(),
+            ["/", "/System/Volumes/Data", "/Volumes/Backup"]
+        );
+    }
+
+    #[test]
+    fn this_machine_reports_its_figures() {
+        let a = machine_stats().unwrap();
+        assert!(
+            a.cpu_count >= 1
+                && a.cpu_total_ticks >= a.cpu_busy_ticks
+                && a.memory_total_bytes > 0
+                && a.memory_available_bytes <= a.memory_total_bytes,
+            "{a:?}"
+        );
+        let b = machine_stats().unwrap();
+        assert!(b.cpu_total_ticks >= a.cpu_total_ticks, "{a:?} {b:?}");
+        let here = std::env::temp_dir();
+        let d = disks(&[here.as_path()]).unwrap();
+        assert!(
+            !d.is_empty()
+                && d[0].mount == "/"
+                && d.iter().all(|x| x.total_bytes >= x.free_bytes)
+                && d.iter().any(|x| x.holds == [0]),
+            "{d:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod sandbox_tests {

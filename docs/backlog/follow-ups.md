@@ -8,8 +8,9 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **Machine figures, the rest** (ADR-0136): the macOS reader (`macos.rs`: `host_statistics64`, `hw.memsize`, `getmntinfo`; the mac
-  session), the phone's view of a machine's figures and of disks running low, and ADR-0064's clean-up buttons in the window.
+- **Machine figures, the rest** (ADR-0136): the phone's view of a machine's figures and of disks running low, and ADR-0064's clean-up
+  buttons in the window. On a Mac, `/` and `/System/Volumes/Data` share one APFS container and report the same free space, so one disk
+  running low shows twice; decide whether the card or Needs you folds them.
 - **Shared MCP servers at a URL whose headers need a secret** (ADR-0122 Amendment A point 4): still refused (`secret_needs_launcher`);
   the launcher could become a small stdio-to-HTTP bridge that adds the headers. Also a `share.launch` audit row on the node.
 - **Shared items after a crash restart** (review of 553cd461): items revoked between an agent's crash and its restart are still given

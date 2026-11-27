@@ -329,17 +329,21 @@ pub struct MachineStats {
     pub memory_available_bytes: u64,
 }
 
-/// ADR-0136: the machine's CPU counters and memory. `Unsupported` where this platform has no reader yet (macOS for now).
+/// ADR-0136: the machine's CPU counters and memory. `Unsupported` where this platform has no reader.
 pub fn machine_stats() -> io::Result<MachineStats> {
     #[cfg(target_os = "linux")]
     {
         linux::machine_stats()
     }
+    #[cfg(target_os = "macos")]
+    {
+        macos::machine_stats()
+    }
     #[cfg(windows)]
     {
         windows::machine_stats()
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
@@ -365,11 +369,15 @@ pub fn disks(marks: &[&std::path::Path]) -> io::Result<Vec<DiskSpace>> {
     {
         linux::disks(marks)
     }
+    #[cfg(target_os = "macos")]
+    {
+        macos::disks(marks)
+    }
     #[cfg(windows)]
     {
         windows::disks(marks)
     }
-    #[cfg(not(any(target_os = "linux", windows)))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = marks;
         Err(io::Error::from(io::ErrorKind::Unsupported))
