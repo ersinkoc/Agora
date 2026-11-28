@@ -172,5 +172,10 @@ that have the project and the kinds seen in it (the saved ones always offered), 
 on an open card "Offer to an idle agent" / "Stop offering", which only says the mark without a live link. `net/view.ts` folds
 `TaskPickupEligible` and `TaskPickedUp` (the hub's only; kept through a task's moves; from the snapshot or after it), and a card says
 an idle agent took it only while its claim (or the claim it was finished under) is the pickup's: a pickup released and claimed
-again by hand says nothing (agora-ac's read of ffd6e244). Only the owner's window gets the controls. Tests: `net/pickup.test.tsx`. Left: an end-to-end run with two fake
-agents on a real hub (ADR's Verification), and a node-side reattachment test with a real supervisor.
+again by hand says nothing (agora-ac's read of ffd6e244). Only the owner's window gets the controls. Tests: `net/pickup.test.tsx`. The end-to-end run (2026-11-28,
+`crates/agora/tests/hub_dial.rs`, `two_idle_agents_on_two_machines_race_for_one_marked_task_and_one_takes_it`): two machines allowed by
+policy and one not, a real hub, two agents racing for one marked task (one `claimed`, one `empty`), the pickup and outcome row the
+winner's, `existing` on asking again, the third machine never listing it. It found two faults the unit tests could not: the hub did not
+announce `board.take_next.v1` (now in `hubcli`'s list), and a recovery (sequence 0) followed by the node's request in the same second
+was refused by the per-run limit (a recovery now counts only toward the node's). Left: a lost reply after commit across a hub restart
+and a reattachment with a real supervisor, end to end (each covered by unit tests today).

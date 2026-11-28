@@ -78,6 +78,8 @@ const HUB_CAPABILITIES: &[&str] = &[
     // owner turned it on (`agora hub fleet on`). A node offers it unless its policy says `mesh.fleet = false`.
     agora_protocol::handshake::FLEET_STATUS_V1,
     agora_protocol::handshake::BOARD_SUBTASKS_V1,
+    // ADR-0131: answers an idle agent's `task_take_next` with the node's run and sequence (a node offers it only with `mesh.take_next`).
+    agora_protocol::handshake::BOARD_TAKE_NEXT_V1,
     // ADR-0119: the hub carries helper starts between machines that both agreed on it (a node offers it once its side is built).
     agora_protocol::handshake::MESH_SPAWN_REMOTE,
     // ADR-0122: keeps the owner's shared skills and MCP servers and hands a node the newest signed word (a node offers it once its

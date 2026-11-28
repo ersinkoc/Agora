@@ -74,6 +74,7 @@ fn hubside(node_id: &str) -> Hubside {
                 "agent.forget.local".into(),
                 // ADR-0112: only a node whose link carries its mesh (and whose policy allows it) offers it too.
                 agora_protocol::handshake::FLEET_STATUS_V1.into(),
+                agora_protocol::handshake::BOARD_TAKE_NEXT_V1.into(),
                 agora_protocol::handshake::MESH_SPAWN_REMOTE.into(),
                 // ADR-0122: the hub keeps shared items; a node whose policy gives them offers it too.
                 agora_protocol::handshake::SHARE_ITEMS.into(),
@@ -1716,6 +1717,220 @@ fn a_message_between_machines_is_recorded_by_both_and_one_to_a_stopped_machine_f
 }
 
 /// ADR-0039: two nodes share a project, so tasks, leases and handoffs are decided on the hub's board.
+/// ADR-0131 end to end: two machines whose policy allows `mesh.take_next` and a third whose does not, a real hub with the owner's
+/// settings and a marked task. Only the allowed machines list the tool; two idle agents race for the one marked task and exactly one
+/// gets it (the other is told none is waiting), the hub records the pickup with the winner's run, the winner asking again gets its claim
+/// back, and the outcome row is the winner's run's on its own node.
+#[test]
+fn two_idle_agents_on_two_machines_race_for_one_marked_task_and_one_takes_it() {
+    if !agora_platform::LOCAL_SOCKETS_SUPPORTED || !agora_platform::PTY_SUPPORTED {
+        return;
+    }
+    use agora_mesh::broker::AgentInfo;
+    use agora_node::uplink_client::MeshOut;
+    use agora_protocol::v1;
+    use serde_json::{json, Value};
+    struct Run([u8; 16]);
+    impl agora_node::mesh_server::TakeNextGate for Run {
+        fn run(&self, _: &AgentId) -> Result<[u8; 16], &'static str> {
+            Ok(self.0)
+        }
+    }
+    let hub = hubside("alpha");
+    let addr = hub.listen("127.0.0.1:0");
+    let start = |name: &str, agent: &str, run: u8, allowed: bool, cert: String, key: String| {
+        let dir = tmp(&format!("pickup-{name}"));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        if allowed {
+            std::fs::write(
+                dir.join("data").join(agora_node::daemon::POLICY_FILE),
+                "mesh.take_next = true\n",
+            )
+            .unwrap();
+        }
+        let cfg = agora_node::daemon::NodeConfig {
+            resume_all: false,
+            node_id: name.into(),
+            socket: dir.join("c.sock"),
+            data_dir: dir.join("data"),
+            worktree_root: dir.join("wt"),
+            manifests_dir: dir.join("manifests"),
+            projects: vec![],
+            limits: Default::default(),
+        };
+        let node = agora_node::daemon::Node::start(&cfg).unwrap();
+        // The agents here are announced, not supervised: the test names their runs as the supervisor would.
+        node.mesh.set_take_next_gate(Arc::new(Run([run; 16])));
+        let out = MeshOut::new();
+        node.mesh.set_remote(out.clone());
+        let mut link = hub.link(addr);
+        (link.cert_pem, link.key_pem) = (cert, key);
+        link.commands = Some(cfg.socket.clone());
+        link.mesh_out = Some(out);
+        // As the daemon wires it: the link says to the mesh what the hub agreed on, and offers what the node's policy allows.
+        link.mesh = Some(Arc::clone(&node.mesh));
+        let up = spawn(Arc::clone(&node.events), link).unwrap();
+        node.events
+            .checkout_discovered(name, "p", Path::new("/work/p"));
+        let id = AgentId::new(agent);
+        node.events.agent_launched_with(
+            &id,
+            "p",
+            name,
+            Path::new("/work/p"),
+            Path::new("/work/wt"),
+            "agent/x",
+            "shell",
+            true,
+            &Default::default(),
+            Some([run; 16]),
+        );
+        let socket = node
+            .mesh
+            .register(AgentInfo {
+                id: id.clone(),
+                kind: "shell".into(),
+                node: name.into(),
+                project: "p".into(),
+                label: String::new(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut conn = agora_platform::local_connect(&socket).unwrap();
+        mcp(
+            &mut conn,
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-03-26"}),
+        );
+        (node, up, conn)
+    };
+    let (ca, cb, cc) = (hub.enroll("alpha"), hub.enroll("beta"), hub.enroll("gamma"));
+    let (_a, _ua, mut ac) = start("alpha", "a1", 1, true, ca.0, ca.1);
+    let (_b, _ub, mut bc) = start("beta", "b1", 2, true, cb.0, cb.1);
+    let (_c, _uc, mut cc) = start("gamma", "c1", 3, false, cc.0, cc.1);
+    for agent in ["alpha/a1", "beta/b1", "gamma/c1"] {
+        wait(&format!("{agent} to reach the hub"), || {
+            hub.state.hub.view().0.agents.contains_key(agent)
+        });
+    }
+    let names = |c: &mut agora_platform::LocalStream| -> Vec<String> {
+        mcp(c, 2, "tools/list", json!({}))["tools"]
+            .as_array()
+            .map(|ts| {
+                ts.iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let listed =
+        |c: &mut agora_platform::LocalStream| names(c).iter().any(|n| n == "task_take_next");
+    wait("the allowed machines list task_take_next", || {
+        listed(&mut ac) && listed(&mut bc)
+    });
+    assert!(
+        !listed(&mut cc),
+        "a machine whose policy does not allow it never lists it"
+    );
+
+    let call = |c: &mut agora_platform::LocalStream, name: &str, args: Value| -> Value {
+        let r = mcp(c, 9, "tools/call", json!({"name": name, "arguments": args}));
+        serde_json::from_str(r["content"][0]["text"].as_str().unwrap_or("null"))
+            .unwrap_or(Value::Null)
+    };
+    hub.state.hub.store().enable_task_review("p").unwrap();
+    wait("shared-board Review is enabled", || {
+        let (view, pos) = hub.state.hub.view();
+        server::snapshot_of(&view, pos)
+            .review_enabled_project_ids
+            .contains(&"p".to_string())
+    });
+    hub.state
+        .hub
+        .task_pickup_set(&v1::TaskPickupSettingsSet {
+            project_id: "p".into(),
+            enabled: true,
+            node_ids: vec!["alpha".into(), "beta".into(), "gamma".into()],
+            agent_kinds: vec!["shell".into()],
+        })
+        .unwrap();
+    let off = call(&mut ac, "task_take_next", json!({}));
+    assert_eq!(off["outcome"], "empty", "nothing marked yet: {off}");
+    let created = call(&mut ac, "task_create", json!({"title": "take me"}));
+    let task = created["task_id"].as_str().unwrap().to_string();
+    hub.state
+        .hub
+        .task_pickup_eligible_set(
+            &v1::TaskPickupEligibleSet {
+                project_id: "p".into(),
+                task_id: task.clone(),
+                eligible: true,
+            },
+            server::now_ms(),
+        )
+        .unwrap();
+    // Wait a second so neither run's per-second limit holds from the ask above.
+    std::thread::sleep(Duration::from_millis(1100));
+    let (ra, rb) = std::thread::scope(|s| {
+        let a = s.spawn(|| call(&mut ac, "task_take_next", json!({})));
+        let b = s.spawn(|| call(&mut bc, "task_take_next", json!({})));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let outcomes = [
+        ra["outcome"].as_str().unwrap_or("?"),
+        rb["outcome"].as_str().unwrap_or("?"),
+    ];
+    let mut sorted = outcomes;
+    sorted.sort_unstable();
+    assert_eq!(sorted, ["claimed", "empty"], "{ra} {rb}");
+    let (winner, run, conn) = if outcomes[0] == "claimed" {
+        ("alpha", 1u8, &mut ac)
+    } else {
+        ("beta", 2u8, &mut bc)
+    };
+    let won = if outcomes[0] == "claimed" { &ra } else { &rb };
+    assert_eq!(won["task"]["task_id"].as_str(), Some(task.as_str()));
+    assert_eq!(
+        won["task"]["owner"].as_str(),
+        Some(format!("{winner}/{}", if winner == "alpha" { "a1" } else { "b1" }).as_str())
+    );
+    let picked = hub.state.hub.view().0.tasks[&format!("p/{task}")].clone();
+    assert_eq!(
+        picked.owner,
+        format!("{winner}/{}", if winner == "alpha" { "a1" } else { "b1" })
+    );
+    let row = agora_hub::task_pickup::outcome(
+        hub.state.hub.store(),
+        &agora_hub::task_pickup::outcome_key("p", winner, &[run; 16]),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(row.result["outcome"], "claimed");
+    std::thread::sleep(Duration::from_millis(1100));
+    let again = call(conn, "task_take_next", json!({}));
+    assert_eq!(
+        (again["outcome"].as_str(), again["task"]["task_id"].as_str()),
+        (Some("existing"), Some(task.as_str())),
+        "{again}"
+    );
+    // gamma's agent cannot use it even by name.
+    let refused = mcp(
+        &mut cc,
+        10,
+        "tools/call",
+        json!({"name": "task_take_next", "arguments": {}}),
+    );
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("node_policy"),
+        "{refused}"
+    );
+}
+
 #[test]
 fn agents_on_two_nodes_share_a_board_claims_leases_and_handoffs_and_it_fails_closed_without_the_hub(
 ) {

@@ -1341,11 +1341,14 @@ impl Hub {
             return off("unknown_run");
         };
         let (kind, skips) = (agent.kind.clone(), agent.skips_permissions);
-        if let Err(limit) = g
-            .pickup_rate
-            .admit_run(now_ms, project, node, &tp_hex(&run))
-        {
-            return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
+        // A recovery (sequence 0) claims nothing and is followed at once by the node's real request, so only the node's limit counts it.
+        if call.request_seq != 0 {
+            if let Err(limit) = g
+                .pickup_rate
+                .admit_run(now_ms, project, node, &tp_hex(&run))
+            {
+                return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
+            }
         }
         let Ok(settings) = tp::settings(self.store(), project) else {
             return internal();
@@ -2222,7 +2225,7 @@ impl Hub {
 
     /// ADR-0131: the owner saves a project's automatic-pickup settings. A list that is too long or holds an entry that is not a node id
     /// or kind is refused (`protocol.invalid_message`, field `node_ids` or `agent_kinds`).
-    pub(crate) fn task_pickup_set(
+    pub fn task_pickup_set(
         &self,
         set: &agora_protocol::v1::TaskPickupSettingsSet,
     ) -> Result<(), agora_protocol::Error> {
@@ -2241,7 +2244,7 @@ impl Hub {
     }
 
     /// ADR-0131: a project's automatic-pickup settings, and whether pickups happen now (`review_off`, `not_shared`).
-    pub(crate) fn task_pickup_get(
+    pub fn task_pickup_get(
         &self,
         project_id: &str,
     ) -> Result<agora_protocol::v1::TaskPickupSettings, agora_protocol::Error> {
@@ -2267,7 +2270,7 @@ impl Hub {
 
     /// ADR-0131: the owner marks an open task of a Review-enabled project as one the rule may take, or clears the mark (any task the
     /// board holds). The mark is the hub's fact `TaskPickupEligible`; asking for what is already so records nothing.
-    pub(crate) fn task_pickup_eligible_set(
+    pub fn task_pickup_eligible_set(
         &self,
         req: &agora_protocol::v1::TaskPickupEligibleSet,
         now_ms: u64,
