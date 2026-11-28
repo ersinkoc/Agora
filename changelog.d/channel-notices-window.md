@@ -1,0 +1,1 @@
+- The owner can choose, on a Review-enabled project's board card, a channel where accepted tasks are posted, and those notices show as rows in Team chat (ADR-0130).

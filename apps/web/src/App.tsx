@@ -20,7 +20,7 @@ import { useGrantFlow } from './net/useGrantFlow';
 import type { TerminalSource } from './terminal/source';
 import { signDirectory, type DirectoryInfo, type DirectoryListing } from './net/directory';
 import { StartAgent, type KindChoice } from './components/StartAgent';
-import { quotaObs, approvalList, boards, costByProject, projectChoices, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
+import { quotaObs, approvalList, boards, costByProject, projectChoices, projectChannels, recentMessages, machines, machinesOnline, shown, tiles, type ApprovalModel, type View } from './net/view';
 import { approvalFailureKey, indexedDbStore, remoteStartFailureKey, NO_REMOTE_GRANT, signApproval, signRemoteStart, signStart, thisDevice, type Device, type RemoteGrantChoice } from './net/approval';
 import { answerFields, answerPlan } from './net/always';
 import type { StartChoice } from './components/StartApproval';
@@ -52,6 +52,9 @@ import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
 import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
+import { noticeRows, readNoticeSettings, saveNoticeChannel, useProjectNotices } from './net/notices';
+import { BoardNoticesContext, type BoardNoticesApi } from './components/BoardNotices';
+import { ChannelNotices } from './components/TeamChat';
 import { catalogAskFor, setCatalogSource } from './themes/catalog';
 import { sharedSourceFor } from './net/share';
 import { askEntry, forwardOf, signPreviewOpen, type Forward } from './net/preview';
@@ -554,6 +557,17 @@ export function App() {
   // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
   // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
   const boardList = useMemo(() => (live ? boards(live) : []), [live]);
+  // ADR-0130 Amendment A: the accepted-task notices of each Review-enabled project, read by the owner's window alone (net/notices.ts), shown
+  // as rows in Team chat; the owner chooses each project's channel on its board card.
+  const noticesOwner = !!api && role === 'owner';
+  const noticeList = useProjectNotices(noticesOwner ? api?.command : undefined, live, noticesOwner, link === 'live');
+  const noticeRowList = useMemo(() => noticeRows(noticeList, boardList), [noticeList, boardList]);
+  const readNotices = useMemo(() => (api && noticesOwner ? (projectId: string) => readNoticeSettings(api.command, projectId) : undefined), [api, noticesOwner, link === 'live']); // eslint-disable-line react-hooks/exhaustive-deps
+  const boardNotices = useMemo<BoardNoticesApi | undefined>(() => (api && readNotices ? {
+    channels: (projectId) => (live ? projectChannels(live, projectId) : []),
+    read: readNotices,
+    save: link === 'live' ? (projectId, read, channel) => saveNoticeChannel(api.command, projectId, read, channel) : undefined,
+  } : undefined), [api, readNotices, live, link]);
   const giveApi = useMemo<GiveApi | undefined>(() => {
     if (!hub || !api || !live || !changes) return undefined;
     const list = machines(live);
@@ -828,6 +842,8 @@ export function App() {
       } : undefined,
     } : undefined}>
     <ShowAcceptedTasks.Provider value={role === 'owner'}>
+    <BoardNoticesContext.Provider value={boardNotices}>
+    <ChannelNotices.Provider value={noticeRowList}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
       {hash === '#/gallery' ? <Gallery /> : catalogTab ? <CatalogGallery tab={catalogTab} onTab={(k) => go(k === 'plugins' ? '#/catalog/plugins' : '#/catalog')} onBack={() => go('#/')} /> : settingsDemo ? <SettingsDemo section={hash.split('/')[3] || undefined} onBack={() => go('#/gallery')} /> : isMachinesHash(hash) ? <MachinesPage focus={machineOfHash(hash)} machines={live ? machines(live) : hub ? [] : demoMachines} agents={agents} onBack={() => go('#/')} onForget={hub && ownsMachines(role) ? forgetMachines : undefined} heldGrants={hub && api ? heldGrants : undefined} revokeHeld={hub && changes ? revokeHeld : undefined}
@@ -869,6 +885,8 @@ export function App() {
         onApprove={(nodes) => approveDevice(waiting[0]!, nodes)}
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </GiveContext.Provider>
+    </ChannelNotices.Provider>
+    </BoardNoticesContext.Provider>
     </ShowAcceptedTasks.Provider>
     </BoardReviewContext.Provider>
     </AcknowledgeHandoffContext.Provider>

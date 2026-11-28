@@ -95,6 +95,14 @@ and the page (oldest first after the cursor, at most 50, expired ones left out).
 rows, so a project whose id starts with another's never sees its notices (agora-ac's review of e0300a93); a project no longer shared
 writes none (`not_shared`). The three commands are the unscoped owner's in this
 step (`dispatch.rs`), and the hint reaches unscoped windows only. Tests: `project_notice.rs`'s own,
-`an_accepted_report_leaves_one_channel_notice_and_a_hint`, `channel_notice_commands_are_the_owners_at_the_hub`. Left: the window (the
-settings form offering the project's channels, notices as rows in Team chat), members' and agents' reads with access checked per page,
-and the dispatcher half (decisions 2 and 3).
+`an_accepted_report_leaves_one_channel_notice_and_a_hint`, `channel_notice_commands_are_the_owners_at_the_hub`. 
+
+Step 2, the owner's window: built (2026-11-28). `apps/web/src/net/notices.ts` reads every Review-enabled project's notices on each
+connection and re-reads a project from the start after its `ProjectNoticesChanged` (folded into `View.noticeHints`, the hub's only), one
+project at a time, an older answer never replacing a newer one, and stops asking after a refusal until the next connection; nothing is
+sent from a member's or viewer's window. The rows sit among the messages in Team chat (`TeamChat.tsx`: the channel, "task accepted", the
+board's task title as plain text, the project; no dispatcher or reviewer, nothing to open, nothing that wakes anyone). The board card of a
+Review-enabled project offers the channel (`BoardNotices.tsx`): Nowhere, or a `#name` the project's own agents wrote to in the window's
+recent messages (`projectChannels`; a copy only a third machine vouches for does not count), the saved channel always kept, `dispatcher`
+sent back as read, changes only while the link is live, and why notices are paused. Tests: `net/notices.test.tsx`. Left: members' and
+agents' reads with access checked per page, and the dispatcher half (decisions 2 and 3).

@@ -223,6 +223,9 @@ export interface View {
   // The forwards this window was told ended (`node/forward`), so a list asked before cannot bring one back.
   forwardsEnded?: Set<string>;
   previewSuggestions?: PreviewSuggestion[];
+  // ADR-0130: project -> the log position of the hub's last `ProjectNoticesChanged` for it (a content-free hint; the notices themselves
+  // are read with `ProjectNoticesPage`, net/notices.ts).
+  noticeHints?: Map<string, number>;
 }
 export interface QuotaV { nodeId: string; tool: string; window: string; usedPercent: number; resetsAtMs: number; observedAtMs: number }
 const MAX_QUOTA = 64; // per machine, as the hub
@@ -445,6 +448,12 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'checkoutDiscovered': {
       const b = e.checkoutDiscovered;
       v.checkouts.set(q(b.checkoutId), { nodeId: b.nodeId ?? '', projectId: b.projectId ?? '', path: b.path ?? '' });
+      break;
+    }
+    case 'projectNoticesChanged': {
+      // ADR-0130: only the hub's word; it says nothing but which project's notices to read again.
+      const project = e.projectNoticesChanged.projectId;
+      if (producer === 'hub' && project) (v.noticeHints ??= new Map()).set(project, pos);
       break;
     }
     case 'nodeCapabilitiesChanged': {
@@ -990,6 +999,21 @@ export function recentMessages(v: View, limit = 5): MessageModel[] {
       ...(m.via ? { via: m.via } : {}),
     };
   });
+}
+
+// ADR-0130 Amendment A: a project's existing channels, the `#name`s its agents wrote to in the messages this window holds (at most
+// `MAX_MESSAGES`), newest first. A copy only a third machine vouches for (`via`) does not count, nor a sender this window cannot place
+// in the project.
+const CHANNEL = /^#[a-z0-9_-]{1,32}$/;
+export function projectChannels(v: View, projectId: string): string[] {
+  const byId = new Map(tiles(v).map((t) => [t.id, t]));
+  const seen: string[] = [];
+  for (let i = v.messages.length - 1; i >= 0; i--) {
+    const m = v.messages[i]!;
+    if (m.via || !CHANNEL.test(m.to) || seen.includes(m.to)) continue;
+    if (byId.get(m.from)?.projectId === projectId) seen.push(m.to);
+  }
+  return seen;
 }
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.

@@ -9,6 +9,11 @@ import { GiveContext, type GiveApi } from './GiveTask';
 import { PromptBox } from './PromptBox';
 import { QuotaProvider } from './Quota';
 import { UsagePanel } from './UsagePanel';
+import { BoardNoticesContext, type BoardNoticesApi } from './BoardNotices';
+import { ProjectBoard } from './ProjectBoard';
+import { TeamChat } from './TeamChat';
+import type { NoticeRowModel } from '../net/notices';
+import type { MessageModel } from '../net/view';
 
 // Redesign PR 12 in the gallery: a chat agent idle, needing you and acting freely; the board view's columns; the Usage panel with a plan
 // limit at 82 %. Fixed times and a fixed clock, so a capture is the same every time (the visual comparison and docs/ux/screens/polish-redesign-*).
@@ -55,6 +60,20 @@ const quota: QuotaObs[] = [
   { machineId: 'laptop', tool: 'codex', window: 'seven_day', usedPercent: 41, resetsAtMs: AT + 3 * 86_400_000, observedAtMs: AT - 4 * 60_000 },
 ];
 
+// ADR-0130: the owner's channel choice on a Review-enabled board card (paused: the project is on one machine), and accepted-task notices
+// among the messages in Team chat.
+const noticesApi: BoardNoticesApi = {
+  channels: () => ['#ops', '#release'],
+  read: async () => ({ dispatcher: false, channel: '#ops', active: false, inactiveReason: 'not_shared' }),
+  save: async (_p, r, channel) => ({ ...r, channel }),
+};
+const noticeBoard: BoardModel = { ...board, reviewEnabled: true, tasks: board.tasks.slice(0, 2) };
+const chatNotices: NoticeRowModel[] = [
+  { id: 'n2', channel: '#ops', title: 'Ship the settings form', project: board.project, atMs: AT - 60_000 },
+  { id: 'n1', channel: '#ops', project: board.project, atMs: AT - 40 * 60_000 },
+];
+const chatMessages: MessageModel[] = [{ from: 'codex', to: '#ops', body: 'The release notes are ready for a look.', atMs: AT - 5 * 60_000, crossMachine: false }];
+
 export function PolishGallery() {
   return (
     <div data-polish className="grid grid-cols-1 gap-4">
@@ -71,6 +90,10 @@ export function PolishGallery() {
       <div data-polish-chat="acts-freely" className="h-[24rem] max-w-2xl"><PromptBox agent={chatAgent({ id: 'polish/free', session: session('bypassPermissions') })} source={free} send={async () => true} choose={async () => true} /></div>
       <div data-polish-board className="flex h-[26rem] max-w-4xl flex-col overflow-hidden rounded-l border border-line" aria-label={t('board-view-title', { name: board.project })}>
         <GiveContext.Provider value={give}><BoardColumns board={board} /></GiveContext.Provider>
+      </div>
+      <div data-polish-notices className="grid max-w-3xl grid-cols-1 gap-4 md:grid-cols-2">
+        <BoardNoticesContext.Provider value={noticesApi}><ProjectBoard board={noticeBoard} onOpen={() => {}} /></BoardNoticesContext.Provider>
+        <div className="rounded-l border border-line bg-surface-1 p-2"><TeamChat messages={chatMessages} notices={chatNotices} now={AT} /></div>
       </div>
       <div data-polish-usage className="max-w-sm rounded-l border border-line bg-surface-1 p-4">
         <QuotaProvider obs={quota} machines={new Map([['laptop', 'laptop'], ['build', 'build']])} fixedNow={AT}><UsagePanel fleet={usageFleet} now={AT} /></QuotaProvider>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useContext, useEffect, useRef, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { needsPanel } from '../net/needsPanel';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
@@ -14,7 +14,7 @@ import { EmptyState } from './EmptyState';
 import { Icon } from './Icon';
 import { SharedBoards } from './SharedBoards';
 import { StateBadge } from './StateBadge';
-import { TeamChat } from './TeamChat';
+import { ChannelNotices, TeamChat } from './TeamChat';
 
 import { PairCards, type PairingUi } from './Pairing';
 import { pathParts } from '../net/paneTools';
@@ -144,6 +144,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
   const needs = attention.length + approvals.filter((x) => !attention.some((a) => a.id === x.agentId)).length + (pairing?.cards.length ?? 0);
   // While this list is on screen the attention toast is hidden: it would be a third copy of what is here.
   useEffect(() => (tab === 'needs' ? needsPanel.show() : undefined), [tab]);
+  const notices = useContext(ChannelNotices);
   // An agent is listed once: by its request's card when it has one (the card opens the agent: a start's and a switch's too, redesign PR 5),
   // else by its row (it waits in its terminal). A switch's card of a shape this window does not understand can be dismissed here, so its
   // agent keeps its row.
@@ -172,7 +173,7 @@ export function Details({ tab, fleet = [], now = Date.now(), attention, approval
         </li>)}
       </ul>)}
     {tab === 'board' && boards.length > 0 && <SharedBoards boards={boards} />}
-    {tab === 'messages' && (messages.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <TeamChat messages={messages} fleet={fleet} now={now} />)}
+    {tab === 'messages' && (messages.length === 0 && notices.length === 0 ? <EmptyState icon="chat" title={t('empty-messages-title')} hint={t('empty-messages-hint')} /> : <TeamChat messages={messages} notices={notices} fleet={fleet} now={now} />)}
     {tab === 'usage' && <UsagePanel fleet={fleet} now={now} />}
     {tab === 'board' && boards.length === 0 && <EmptyState icon="board" title={t('empty-board-title')} hint={t('empty-board-hint')} />}
   </>;

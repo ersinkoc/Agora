@@ -354,7 +354,8 @@
   /* A team chat row: the sender's avatar, one line with who wrote to whom and when, the text cut to two lines. The whole row opens the
      reading view. Agent text is drawn as text only. */
   .team-msg { @apply grid w-full min-w-0 items-start gap-x-2.5 gap-y-0.5 rounded-s px-2 py-2 text-start text-ink transition-colors duration-150 hover:bg-surface-2; grid-template-columns: auto minmax(0, 1fr); }
-  .team-msg > .kit-avatar { grid-row: span 3; }
+  .team-msg > .kit-avatar, .team-msg > .team-msg__mark { grid-row: span 3; }
+  .team-msg--notice { @apply hover:bg-transparent; }
   .team-msg__line { @apply flex min-w-0 items-baseline gap-1.5 text-muted; font-size: var(--text-caption); }
   /* Under the text: "Show all" when the two lines cut it, and the machine tags (a long machine name ends in an ellipsis). */
   .team-msg__foot { @apply col-start-2 flex min-w-0 items-center gap-1.5; font-size: var(--text-caption); }

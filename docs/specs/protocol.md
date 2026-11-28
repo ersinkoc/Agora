@@ -202,7 +202,10 @@ accepted on a project whose channel is set and Review is on, the hub keeps a `Pr
 revision and channel; no dispatcher or reviewer) in the acceptance's own transaction and records the content-free `ProjectNoticesChanged
 { project_id }` (event arm 98, hub only); `ProjectNoticesPage` (136) reads them oldest first after a cursor, at most 50 a page, `more`
 when others follow. Notices are rows, not events: kept 30 days, 50 per project channel, 10,000 on the hub. In this step the three
-commands are the unscoped owner's and the hint reaches unscoped windows only.
+commands are the unscoped owner's and the hint reaches unscoped windows only. The owner's web window reads each Review-enabled project's
+notices when it connects and again from the start after each hint (at most four pages), shows the newest as rows in Team chat, and offers
+the channel on the project's board card from the `#name`s that project's agents wrote to in its recent messages (the saved one always
+kept); a refusal stops its reads until the next connection.
 
 Published capabilities (ADR-0132): right after a link's `NodeLink { up }` the hub records `NodeCapabilitiesChanged { node_id, generation,
 capabilities }` (event arm 97, producer `hub` only; a node that sends one is refused, field `node_capabilities_changed`): the

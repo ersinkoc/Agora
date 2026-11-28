@@ -1,10 +1,12 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { createContext, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { t } from '../i18n';
 import type { AgentTileModel } from '../model';
 import { visible } from '../net/hidden';
 import { ago } from '../net/time';
+import type { NoticeRowModel } from '../net/notices';
 import type { MessageModel } from '../net/view';
+import { OWNER_MAX, plain, TITLE_MAX } from './boardColumns';
 import { Icon } from './Icon';
 import { AgentAvatar, Tag } from './kit';
 
@@ -12,7 +14,10 @@ import { AgentAvatar, Tag } from './kit';
 // whom, how long ago, and the text cut to two lines; the row opens the whole text in a reading view (Esc closes it). Agent text is untrusted
 // data (threat model): it is drawn only as text, never as HTML or markdown, a link in it is not made clickable, and control and bidirectional
 // characters are removed from it and from the names (as on the board).
-export function TeamChat({ messages, fleet = [], now }: { messages: readonly MessageModel[]; fleet?: readonly AgentTileModel[]; now: number }) {
+// ADR-0130: `notices` are the hub's own rows in a project's channel, one per accepted task (the task's title from the board, the project,
+// the time; never who gave or accepted it). They sit among the messages by time and open nothing; they wake nobody (nothing that watches
+// new messages sees them).
+export function TeamChat({ messages, notices = [], fleet = [], now }: { messages: readonly MessageModel[]; notices?: readonly NoticeRowModel[]; fleet?: readonly AgentTileModel[]; now: number }) {
   const [reading, setReading] = useState<MessageModel>();
   // The row the view was opened from gets focus back when it closes (a dialog with no Radix trigger would otherwise drop it on the page);
   // if newer messages replaced that row meanwhile, the newest row does.
@@ -20,10 +25,43 @@ export function TeamChat({ messages, fleet = [], now }: { messages: readonly Mes
   const sender = (m: MessageModel) => (m.fromId === undefined ? undefined : fleet.find((a) => a.id === m.fromId));
   return <>
     <ul className="m-0 grid list-none gap-0.5 p-0" aria-label={t('ide-tab-messages')}>
-      {messages.map((m, i) => <li key={`${m.atMs}-${i}`}><MessageRow m={m} agent={sender(m)} now={now} onOpen={(row) => { opener.current = row; setReading(m); }} /></li>)}
+      {merged(messages, notices).map((r, i) => r.notice
+        ? <li key={`notice-${r.notice.id}`}><NoticeRow n={r.notice} now={now} /></li>
+        : <li key={`${r.m.atMs}-${i}`}><MessageRow m={r.m} agent={sender(r.m)} now={now} onOpen={(row) => { opener.current = row; setReading(r.m); }} /></li>)}
     </ul>
     {reading && <MessageReader m={reading} agent={sender(reading)} now={now} onClose={() => setReading(undefined)} returnTo={opener} />}
   </>;
+}
+
+/** The owner's channel notices (ADR-0130), given by the window to every Team chat it draws (the side panel, a layout panel, the phone). */
+export const ChannelNotices = createContext<readonly NoticeRowModel[]>([]);
+
+type Row = { notice: NoticeRowModel; m?: undefined } | { notice?: undefined; m: MessageModel };
+
+/** Both lists newest first, as one: a notice goes before a message of the same time. */
+export function merged(messages: readonly MessageModel[], notices: readonly NoticeRowModel[]): Row[] {
+  const out: Row[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < messages.length || j < notices.length) {
+    const m = messages[i];
+    const n = notices[j];
+    if (n && (!m || n.atMs >= m.atMs)) { out.push({ notice: n }); j++; } else if (m) { out.push({ m }); i++; }
+  }
+  return out;
+}
+
+function NoticeRow({ n, now }: { n: NoticeRowModel; now: number }) {
+  return <div className="team-msg team-msg--notice" data-notice-id={n.id}>
+    <span aria-hidden className="kit-chip kit-tone-finished team-msg__mark"><Icon name="check" className="size-3.5" /></span>
+    <span className="team-msg__line">
+      <span className="team-msg__from">{visible(n.channel)}</span>
+      <span className="team-msg__to">{t('team-chat-notice-accepted')}</span>
+      <When atMs={n.atMs} now={now} style="short" />
+    </span>
+    <span dir="auto" className="team-msg__body">{n.title !== undefined ? plain(n.title, TITLE_MAX) || t('board-task-untitled') : t('team-chat-notice-unseen')}</span>
+    <span className="team-msg__foot"><span className="team-msg__tag" title={visible(n.project)}><Tag>{plain(n.project, OWNER_MAX)}</Tag></span></span>
+  </div>;
 }
 
 // A sender this window does not list (another machine's agent, one already cleared) gets a neutral avatar with the first letter of its name.
