@@ -278,7 +278,8 @@ The maintainer resolved these questions on 2026-11-27.
    one needs `min_engine = 8`, and a hold at or above any `blocked` rule's priority refuses it; not allowed in `[[ready]]`/`[[typed]]`).
    `Detector::detect` stops at a matching hold and answers "no opinion", which is what all three call sites already do for it: the
    paced check keeps the state and drops a pending change (the gate's `no_opinion`), and `terminal_readiness` and the typing check see
-   `unknown` and not ready. `Explanation.held` and `RuleCheck.hold` let `agora agent explain` print "held by rule X"; the shipped-fixture
+   `unknown` and not ready; a kind with a hold rule counts as detecting rest (`detects_rest`), so a dispatch never takes its held screen for
+   "no detection" and pastes into it (agora-ac's read of 0b2eb1f5). `Explanation.held` and `RuleCheck.hold` let `agora agent explain` print "held by rule X"; the shipped-fixture
    test reads `hold <rule id>`. Test: `crates/agora-adapters/tests/rules.rs` `a_hold_rule_stops_detection_below_every_blocked_rule`.
    Detection benchmark: tick p50 915 µs, one terminal p50 19.9 µs (baseline 886 µs and 19.6 µs). Left: captured `transcript.screen` and
    `model_picker.screen` for Claude Code (and Codex's equivalents) with their hold rules.

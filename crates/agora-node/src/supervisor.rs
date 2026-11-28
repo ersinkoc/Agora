@@ -5292,15 +5292,11 @@ impl Supervisor {
     /// reaches a state the node pastes in, so `unknown` is all it can say). `None` for an agent that is not a running terminal agent.
     pub fn terminal_detects(&self, id: &AgentId) -> Option<bool> {
         let e = self.agents.get(id).filter(|e| e.terminal.is_some())?;
-        Some(self.kinds.get(&e.agent.kind).is_some_and(|k| {
-            k.manifest.rules.iter().any(|r| {
-                matches!(
-                    r.state,
-                    agora_adapters::manifest::RuleState::Idle
-                        | agora_adapters::manifest::RuleState::Done
-                )
-            })
-        }))
+        Some(
+            self.kinds
+                .get(&e.agent.kind)
+                .is_some_and(|k| detects_rest(&k.manifest)),
+        )
     }
 
     /// ADR-0095: a fresh look at a running terminal agent's screen, for a dispatch: its rules run now on the live bottom of the buffer
@@ -6423,6 +6419,19 @@ fn held_state_reported(state: AgentState) -> bool {
 }
 
 /// [`apply_state`] for a terminal agent.
+/// ADR-0095: whether a kind's screen rules can say the agent is between turns: a rule that says idle or done, or (ADR-0117) a hold
+/// rule, whose screen must never be taken for "no detection at all" (a held prompt would then be pasted into the view it holds).
+fn detects_rest(manifest: &Manifest) -> bool {
+    manifest.rules.iter().any(|r| {
+        matches!(
+            r.state,
+            agora_adapters::manifest::RuleState::Idle
+                | agora_adapters::manifest::RuleState::Done
+                | agora_adapters::manifest::RuleState::Hold
+        )
+    })
+}
+
 fn set_state(
     entry: &mut Entry,
     state: AgentState,
@@ -6586,6 +6595,32 @@ fn session_report(agent: &Agent) -> Option<SupervisorEvent> {
             agent: agent.id.clone(),
             session: session.clone(),
         })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod hold_rest_tests {
+    use super::*;
+
+    /// ADR-0117 (agora-ac's read of 0b2eb1f5): a kind whose only rest-like rule is a hold still "detects", so a dispatch waiting for it
+    /// is never pasted into the view the hold keeps (`between_turns(Unknown, true)` holds it).
+    #[test]
+    fn a_kind_with_a_hold_rule_detects_rest() {
+        let manifest = |rules: &str| {
+            Manifest::parse(&format!(
+                "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = 8\n[process]\nlaunch = [\"k\"]\n{rules}"
+            ))
+            .unwrap()
+        };
+        let working = "[[rules]]\nid = \"w\"\nstate = \"working\"\npriority = 800\nregion = \"bottom_lines(3)\"\ncontains = \"busy\"\n";
+        let hold = "[[rules]]\nid = \"pager\"\nstate = \"hold\"\npriority = 850\nregion = \"bottom_lines(3)\"\ncontains = \"(END)\"\n";
+        assert!(!detects_rest(&manifest(working)));
+        assert!(detects_rest(&manifest(&format!("{working}{hold}"))));
+        assert!(!crate::task_dispatch::between_turns(
+            AgentState::Unknown,
+            true
+        ));
+    }
 }
 
 #[cfg(test)]
