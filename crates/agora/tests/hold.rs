@@ -1,8 +1,10 @@
-//! ADR-0079 W2 step 1 (Unix): the terminal holder, `agora hold`, with `agora-fake-agent` and never a real agent.
+//! ADR-0079 W2 step 1 (Unix) and M2.6 (Windows): the terminal holder, `agora hold`, with `agora-fake-agent` and never a real agent.
 //!
 //! The "node" is either this test process or a copy of this test binary started as a helper (`AGORA_HOLD_HELPER`), so that one node can be
 //! killed and another attach. The role lock (`run/node.lock`) names whichever process is the node, as the front door's lock does.
-#![cfg(unix)]
+//!
+//! On Windows a terminal is a pseudo-console: what it hands on is the console's rendering (with its own control sequences, and no echo of
+//! what is typed unless the program reads it), so output is compared as the text it shows ([`shown`]).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{BufRead, Read, Write};
@@ -116,32 +118,104 @@ fn tail(path: &Path, lines: usize) -> String {
     }
 }
 
+/// The holder, started as a careless starter would: with extra descriptors that are not close-on-exec (7 and 8 are files, 9 is a pipe:
+/// the holder's stdin) and a variable of its own that no agent may see.
+#[cfg(unix)]
+fn start_holder(home: &Path, log: std::fs::File) -> Child {
+    let extra = home.join("extra");
+    std::fs::write(&extra, b"x").expect("extra file");
+    Command::new("sh")
+        .args([
+            "-c",
+            "exec \"$0\" hold --home \"$1\" 7<\"$2\" 8>>\"$2\" 9<&0",
+        ])
+        .arg(AGORA)
+        .arg(home)
+        .arg(&extra)
+        .env("AGORA_HOLD_TEST_SECRET", "leaked")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .expect("start agora hold")
+}
+
+/// The holder, with a variable of its own that no agent may see (a Windows process inherits only the handles it is given).
+#[cfg(windows)]
+fn start_holder(home: &Path, log: std::fs::File) -> Child {
+    Command::new(AGORA)
+        .args(["hold", "--home"])
+        .arg(home)
+        .env("AGORA_HOLD_TEST_SECRET", "leaked")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(log)
+        .spawn()
+        .expect("start agora hold")
+}
+
+/// Whether the holder of `home` listens: its socket file (Unix); on Windows its pipe is no file, and `run/hold.pid` is written once it
+/// listens.
+fn listening(home: &Path) -> bool {
+    if cfg!(windows) {
+        home.join("run/hold.pid").exists()
+    } else {
+        socket_path(home).exists()
+    }
+}
+
+/// Whether no holder serves `home`'s endpoint any more.
+fn endpoint_gone(home: &Path) -> bool {
+    if cfg!(windows) {
+        agora_platform::local_connect(&socket_path(home)).is_err()
+    } else {
+        !socket_path(home).exists()
+    }
+}
+
+/// The text a terminal's output shows: as it is on Unix; on Windows without the pseudo-console's control sequences (CSI, OSC and
+/// two-byte escapes) and line ends, which it adds as it renders.
+fn shown(raw: &str) -> String {
+    if !cfg!(windows) {
+        return raw.to_string();
+    }
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                Some('[') => {
+                    for d in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    while let Some(d) = chars.next() {
+                        if d == '\u{7}' || (d == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' | '\n' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Rig {
     fn new(tag: &str) -> Rig {
         let home = temp_home(tag);
         agora_platform::ensure_private_dir(&home.join("run")).expect("run folder");
-        // Started as a careless starter would: with extra descriptors that are not close-on-exec (7 and 8 are files, 9 is a pipe: the
-        // holder's stdin) and a variable of its own that no agent may see.
-        let extra = home.join("extra");
-        std::fs::write(&extra, b"x").expect("extra file");
         let log = std::fs::File::create(holder_log(&home)).expect("holder log");
-        let holder = Command::new("sh")
-            .args([
-                "-c",
-                "exec \"$0\" hold --home \"$1\" 7<\"$2\" 8>>\"$2\" 9<&0",
-            ])
-            .arg(AGORA)
-            .arg(&home)
-            .arg(&extra)
-            .env("AGORA_HOLD_TEST_SECRET", "leaked")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .expect("start agora hold");
+        let holder = start_holder(&home, log);
         let rig = Rig { home, holder };
         let end = Instant::now() + Duration::from_secs(15);
-        while !socket_path(&rig.home).exists() {
+        while !listening(&rig.home) {
             assert!(Instant::now() < end, "the holder never listened");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -239,7 +313,8 @@ fn collect_until(
     wait: Duration,
 ) -> String {
     let end = Instant::now() + wait;
-    while !String::from_utf8_lossy(&seen).contains(until) {
+    // In the text shown: on Windows the pseudo-console's own sequences (its window title is the program's path) may hold `until` too.
+    while !shown(&String::from_utf8_lossy(&seen)).contains(until) {
         let left = end.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok(more) => seen.extend(more),
@@ -393,23 +468,27 @@ fn the_agent_outlives_its_node_and_a_new_node_gets_its_terminal_and_the_output_w
     let h = held.remove(0);
     assert_eq!(h.info.info.pid, pid, "the same process, not a new one");
     let master = h.terminal.expect("the terminal").into_file().expect("file");
-    let mut typed = master.try_clone().expect("clone");
+    // The terminal answers: the line discipline echoes what is typed (Unix, where the master is one file, read and written; on Windows
+    // the file is the output end only, and a pseudo-console echoes only for a program that reads).
+    if cfg!(unix) {
+        let mut typed = master.try_clone().expect("clone");
+        typed.write_all(b"ping\n").expect("type");
+    }
     let rx = read_in_background(master);
-
-    // The terminal answers: the line discipline echoes what is typed.
-    typed.write_all(b"ping\n").expect("type");
 
     // What was written while no node was attached (the buffer) and what comes after (the terminal) are the whole output, once each.
     let all = collect_until(h.info.buffer, &rx, "third", Duration::from_secs(20));
     assert_eq!(
-        all.replacen("ping\r\n", "", 1),
+        shown(&all.replacen("ping\r\n", "", 1)),
         "firstsecondthird",
         "got {all:?}"
     );
-    assert!(
-        all.contains("ping\r\n"),
-        "the terminal did not answer: {all:?}"
-    );
+    if cfg!(unix) {
+        assert!(
+            all.contains("ping\r\n"),
+            "the terminal did not answer: {all:?}"
+        );
+    }
     assert_eq!(agora_platform::process_start_time(pid), Some(started_at));
 }
 
@@ -432,7 +511,7 @@ fn the_holders_own_read_ends_before_the_handover() {
     let rx = read_in_background(h.terminal.expect("terminal").into_file().expect("file"));
     // Written 4 s after the start: it reaches the node's terminal, not the holder's buffer.
     let all = collect_until(h.info.buffer, &rx, "post", Duration::from_secs(20));
-    assert_eq!(all, "prepost");
+    assert_eq!(shown(&all), "prepost", "got {all:?}");
     assert!(rig.holder_running());
 }
 
@@ -478,12 +557,13 @@ fn an_agent_that_ends_while_no_node_is_attached_keeps_its_status_and_output_unti
         held[0].terminal.is_none(),
         "an ended agent has no terminal to take"
     );
-    assert_eq!(held[0].info.buffer, b"bye");
+    let text = |b: &[u8]| shown(&String::from_utf8_lossy(b));
+    assert_eq!(text(&held[0].info.buffer), "bye");
     // Not collected yet: a node that took it and died finds it again.
     drop(b);
     let mut b = rig.connect();
     let again = b.attach().expect("attach again");
-    assert_eq!(again[0].info.buffer, b"bye");
+    assert_eq!(text(&again[0].info.buffer), "bye");
     assert!(
         rig.holder_running(),
         "the holder ends only after a node took everything"
@@ -498,7 +578,7 @@ fn an_agent_that_ends_while_no_node_is_attached_keeps_its_status_and_output_unti
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    assert!(!socket_path(&rig.home).exists(), "the endpoint is removed");
+    assert!(endpoint_gone(&rig.home), "the endpoint is removed");
 }
 
 #[test]
@@ -523,7 +603,15 @@ fn a_peer_that_is_not_the_node_holding_the_lock_cannot_use_the_endpoint() {
     assert!(Client::connect(&rig.socket()).is_err());
 
     // The lock names another live process: this one is not the node.
-    let mut other = Command::new("sleep").arg("60").spawn().expect("sleep");
+    let mut other = if cfg!(windows) {
+        Command::new("ping")
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("ping")
+    } else {
+        Command::new("sleep").arg("60").spawn().expect("sleep")
+    };
     rig.lock_for(other.id());
     assert!(
         matches!(
@@ -646,7 +734,7 @@ fn a_node_that_keeps_its_terminal_and_drops_only_the_link_reattaches_at_once_and
     assert!(held[0].terminal.is_some());
     // Everything the agent wrote reached the node's own read once.
     let all = collect_until(Vec::new(), &rx, "b", Duration::from_secs(20));
-    assert_eq!(all, "ab");
+    assert_eq!(shown(&all), "ab", "got {all:?}");
 }
 
 #[test]
@@ -701,10 +789,22 @@ fn a_buffer_is_not_lost_when_the_link_breaks_during_attach() {
     let mut b = rig.connect();
     let held = b.attach().expect("attach");
     assert_eq!(held.len(), 1);
-    assert_eq!(held[0].info.buffer.len(), 600_003);
-    assert!(held[0].info.buffer.ends_with(b"END"));
+    let buffer = shown(&String::from_utf8_lossy(&held[0].info.buffer));
+    assert!(
+        buffer.ends_with("END"),
+        "{:?}",
+        &buffer[buffer.len().saturating_sub(200)..]
+    );
+    if cfg!(windows) {
+        // A pseudo-console's rendering is not the bytes written (it repeats a character where it wraps a line): none of the text lost
+        // is what it can show.
+        assert!(buffer.matches('x').count() >= 600_000, "{}", buffer.len());
+    } else {
+        assert_eq!(buffer.len(), 600_003);
+    }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_agent_inherits_no_descriptor_of_the_holder() {
     let rig = Rig::new("cloexec");
@@ -781,6 +881,7 @@ fn the_holder_closes_what_its_starter_handed_it() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_holder_that_leads_a_process_group_refuses_to_start() {
     use std::os::unix::process::CommandExt;
@@ -861,7 +962,18 @@ fn the_buffer_keeps_exactly_the_last_mebibyte_and_says_it_dropped() {
     let buffer = &held[0].info.buffer;
     assert_eq!(buffer.len(), 1 << 20);
     assert!(held[0].info.buffer_dropped);
-    assert_eq!(buffer.as_slice(), &text.as_bytes()[total - (1 << 20)..]);
+    if cfg!(windows) {
+        // A pseudo-console's rendering is not the bytes written (it repeats a character where it wraps a line): the bound and the drop
+        // are the check, and what it shows is the text's own letters.
+        let seen = shown(&String::from_utf8_lossy(buffer));
+        assert!(
+            seen.len() > 900_000 && seen.chars().all(|c| c.is_ascii_lowercase() || c == ' '),
+            "{:?}",
+            &seen[seen.len().saturating_sub(200)..]
+        );
+    } else {
+        assert_eq!(buffer.as_slice(), &text.as_bytes()[total - (1 << 20)..]);
+    }
 }
 
 /// #929: an agent id is at most `MAX_AGENT_ID` bytes. A longer one (here one byte longer, and one of 3 MiB, which still fits a `Start`
