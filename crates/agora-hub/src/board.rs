@@ -66,7 +66,7 @@ pub struct Answer {
     pub notices: Vec<Notice>,
 }
 
-fn answer(verdict: Verdict) -> Answer {
+pub(crate) fn answer(verdict: Verdict) -> Answer {
     Answer {
         verdict,
         events: Vec::new(),
@@ -192,7 +192,7 @@ pub struct Boards {
     restarted: Mutex<BTreeSet<String>>,
 }
 
-fn tool_error(code: ErrorCode, key: &str, value: &str) -> Value {
+pub(crate) fn tool_error(code: ErrorCode, key: &str, value: &str) -> Value {
     json!({
         "content": [{"type": "text", "text": json!({"error": {"code": code.as_str(), "params": {key: value}}}).to_string()}],
         "isError": true,
@@ -1566,7 +1566,7 @@ impl Boards {
         }
     }
 
-    fn joining(&self, project: &str, now_ms: u64) -> bool {
+    pub(crate) fn joining(&self, project: &str, now_ms: u64) -> bool {
         let mut j = self.joins.lock().unwrap_or_else(|e| e.into_inner());
         if j.pending
             .get(project)

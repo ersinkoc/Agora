@@ -143,5 +143,16 @@ marked; a mark stays through a claim until cleared), kept by the view and carrie
 snapshot; `TaskPickedUp` is folded the same way (no rule writes one yet). The three commands are the unscoped owner's (`dispatch.rs`);
 the facts are owner-only (`scope.rs`) and a node's are refused (`projection.rs`). Tests: `task_pickup.rs`'s own,
 `the_owner_marks_an_open_task_for_pickup_and_the_settings_say_why_it_is_off`, `channel_notice_commands_are_the_owners_at_the_hub`.
-Left: the hub's `task_take_next` (the run bound to the link's node, the outcome row in the claim's transaction, the limits), the node's
-side (`[mesh] take_next`, run, mode, sequence, no local fallback) and the window (settings form, the mark on a card, the pickup's source).
+
+
+Step 2, the hub's `task_take_next`: built (2026-11-28). `Hub::take_next` (`hub.rs`) under the hub's lock, in the order
+`docs/specs/mesh-tools.md` ("Taking the next task") gives: capability, limits (`task_pickup::Rate`), the run bound to the link's node
+and the project (`unknown_run` otherwise, also for another node naming it), the owner's settings checked at each take (`active`, not only
+`enabled`), the allow-lists with the hub's recorded kind, `skips_permissions` from the hub's record too, the board's join; then the
+sequence (`task_pickup::Outcome` rows keyed by the project, the link's node and the run; dropped once the run is not running), a claim
+the run holds, and the first marked open task in creation order the board lets it claim. The claim, every event the board calls made,
+`TaskPickedUp` and the outcome row are stored in one transaction; on a failure the board is put back. Tests: `task_pickup.rs`'s
+(`requests_are_limited_per_run_node_and_project_each_second`, `outcome_rows_are_the_runs_own_and_go_with_the_run`) and
+`an_idle_run_takes_the_next_marked_task_once_and_only_for_itself`. No node offers the capability yet, so no agent reaches it. Left: the
+node's side (`[mesh] take_next`, run, mode, sequence, no local fallback, the tool listed to agents) and the window (settings form, the
+mark on a card, the pickup's source).

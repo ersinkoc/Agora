@@ -107,6 +107,8 @@ struct Inner {
     /// hub-wide view. Kept when the link ends (an offline machine is decided by its last link), memory only: after a hub restart a
     /// machine is left out until it connects again.
     fleet_agreed: std::collections::BTreeSet<String>,
+    /// ADR-0131: `task_take_next` requests of the current second (memory only).
+    pickup_rate: crate::task_pickup::Rate,
 }
 
 /// #1150: board notices for agents whose machine was not connected when they were made (a merge of an older hub's boards runs at
@@ -115,6 +117,11 @@ struct Inner {
 /// hub that restarts before the machine is back still has them. Given and removed when it connects ([`Hub::take_owed_notices`]);
 /// dropped when the machine is forgotten.
 const OWED_NOTICES_KEY: &str = "board-notices.";
+
+/// A run id as hex (the limits' key).
+fn tp_hex(run: &[u8; 16]) -> String {
+    run.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// The most board notices kept for one machine that is not connected (see [`OWED_NOTICES_KEY`]).
 const OWED_NOTICES: usize = 1024;
@@ -344,6 +351,7 @@ impl Hub {
                 unrecorded: std::collections::VecDeque::new(),
                 left: std::collections::BTreeSet::new(),
                 fleet_agreed: std::collections::BTreeSet::new(),
+                pickup_rate: crate::task_pickup::Rate::default(),
             }),
         };
         {
@@ -1182,6 +1190,12 @@ impl Hub {
             answer.notices = notices;
             return answer;
         }
+        // ADR-0131: an idle agent's automatic pickup, answered by the hub alone (never by a node's own board).
+        if call.tool == crate::task_pickup::TOOL {
+            let mut a = self.take_next(&mut g, node, call, project, &key, now_ms);
+            a.notices.extend(notices);
+            return a;
+        }
         // A change is answered as done only once it is stored, and the board with its audit events is stored in one transaction:
         // all of it or none (#517 review: a partly written change published one grant of a refused lease batch, and a failed undo
         // brought a refused claim back after a restart). Until then the board as it was is kept aside, to be put back.
@@ -1268,6 +1282,215 @@ impl Hub {
                 let mut r = refused();
                 r.notices = a.notices;
                 r
+            }
+        }
+    }
+
+    /// ADR-0131 Amendment A: `task_take_next` for the run `call.from_run_id` of agent `call.from_agent` of `node`, under the hub's
+    /// lock (the board, the view's marks and the outcome rows cannot move meanwhile). In order: the link's capability, the limits, the
+    /// run (running on this node, in this project), the owner's settings and allow-lists, the board's join; then the run's sequence
+    /// (0 recovers, an older one is stale, the same one is answered again); then a claim the run already holds; then the first marked
+    /// open task in the board's creation order (ties by id) the board lets it claim. A claim, its `TaskPickedUp` and the outcome row
+    /// are stored in one transaction.
+    fn take_next(
+        &self,
+        g: &mut Inner,
+        node: &str,
+        call: &agora_protocol::v1::BoardCall,
+        project: &str,
+        key: &str,
+        now_ms: u64,
+    ) -> crate::board::Answer {
+        use crate::board::{answer, tool_error, Verdict};
+        use crate::task_pickup as tp;
+        use agora_protocol::ErrorCode;
+        use serde_json::json;
+        let fail = |code: ErrorCode, k: &str, v: &str| {
+            answer(Verdict::Done {
+                result: tool_error(code, k, v),
+                is_error: true,
+            })
+        };
+        let off = |reason: &str| fail(ErrorCode::TaskPickupOff, "reason", reason);
+        let internal = || fail(ErrorCode::Internal, "incident_id", "task_pickup.take");
+        let ok = |v: &serde_json::Value| {
+            answer(Verdict::Done {
+                result: json!({"content": [{"type": "text", "text": v.to_string()}], "isError": false}),
+                is_error: false,
+            })
+        };
+        let cap = agora_protocol::handshake::BOARD_TAKE_NEXT_V1;
+        if !self.router.has_capability(node, cap) {
+            return fail(ErrorCode::ProtocolCapabilityMissing, "capability", cap);
+        }
+        let Ok(run) = <[u8; 16]>::try_from(call.from_run_id.as_slice()) else {
+            return off("unknown_run");
+        };
+        if let Err(limit) = g.pickup_rate.admit(now_ms, project, node, &tp_hex(&run)) {
+            return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
+        }
+        let caller = crate::projection::qualified(node, &call.from_agent);
+        let Some(agent) = g.view.agents.get(&caller).filter(|a| {
+            a.running
+                && !a.forgotten
+                && !a.awaiting_restart_start
+                && a.node_id == node
+                && a.run_id == Some(run)
+                && agora_core::fold_project_id(&a.project_id) == project
+        }) else {
+            return off("unknown_run");
+        };
+        let (kind, skips) = (agent.kind.clone(), agent.skips_permissions);
+        let Ok(settings) = tp::settings(self.store(), project) else {
+            return internal();
+        };
+        if !settings.enabled {
+            return off("owner_off");
+        }
+        if !g.view.review_projects.contains(project) {
+            return off("review_off");
+        }
+        if crate::board::nodes_with(&g.view, project).len() < 2 {
+            return off("not_shared");
+        }
+        if !settings.node_ids.iter().any(|n| n == node) {
+            return off("node");
+        }
+        if !settings.agent_kinds.contains(&kind) {
+            return off("kind");
+        }
+        // The node says this before it asks; the hub, which recorded the run's start, says it too.
+        if skips {
+            return off("skips_permissions");
+        }
+        if self.boards.joining(project, now_ms) {
+            return fail(ErrorCode::BoardUnavailable, "project_id", project);
+        }
+        // Rows of runs that ended go first, so the rows are bounded by the running runs.
+        let view = &g.view;
+        if tp::prune(self.store(), project, |n, a, r| {
+            view.agents
+                .get(&crate::projection::qualified(n, a))
+                .is_some_and(|x| x.running && x.node_id == n && x.run_id == Some(*r))
+        })
+        .is_err()
+        {
+            return internal();
+        }
+        let row_key = tp::outcome_key(project, node, &run);
+        let Ok(stored) = tp::outcome(self.store(), &row_key) else {
+            return internal();
+        };
+        let seq = call.request_seq;
+        match &stored {
+            _ if seq == 0 => {
+                return ok(&stored.map_or_else(
+                    || json!({"outcome": "empty", "request_seq": 0}),
+                    |o| o.result,
+                ));
+            }
+            Some(o) if seq < o.seq => {
+                return fail(
+                    ErrorCode::TaskPickupStale,
+                    "committed_seq",
+                    &o.seq.to_string(),
+                );
+            }
+            Some(o) if seq == o.seq => return ok(&o.result),
+            _ => {}
+        }
+        let row = |result: serde_json::Value| tp::Outcome {
+            node: node.to_string(),
+            agent: call.from_agent.clone(),
+            run,
+            seq,
+            result,
+        };
+        // Every board call's own events (a released orphan's claim, say) are kept and stored with the answer, as for any board call.
+        let mut kept: Vec<Body> = Vec::new();
+        let mut board = |tool: &str, args: serde_json::Value| {
+            let a = self.boards.call(
+                &g.view,
+                node,
+                &call.from_agent,
+                project,
+                tool,
+                &args.to_string(),
+                now_ms,
+            );
+            kept.extend(a.events);
+            match a.verdict {
+                Verdict::Done {
+                    result,
+                    is_error: false,
+                } => Some(agora_mesh::mcp::tool_result_value(&result)),
+                _ => None,
+            }
+        };
+        let before = self.boards.checkpoint(project);
+        // A claim the run already holds is answered as it is; nothing new is claimed. A task in Review holds no slot.
+        let Some(Some(claimed)) = board("task_list", json!({"status": "claimed"})) else {
+            self.boards.restore(project, before);
+            return internal();
+        };
+        let mut result = None;
+        let mut picked = None;
+        if let Some(task) = claimed.as_array().and_then(|ts| {
+            ts.iter()
+                .find(|t| t["owner"].as_str() == Some(caller.as_str()))
+        }) {
+            result = Some(json!({"outcome": "existing", "request_seq": seq, "task": task}));
+        } else {
+            let mut candidates: Vec<(u64, String)> = g
+                .view
+                .tasks
+                .iter()
+                .filter(|(_, t)| {
+                    t.project_id == project && t.pickup_eligible && !t.done && t.owner.is_empty()
+                })
+                .filter_map(|(k, t)| {
+                    k.strip_prefix(&format!("{project}/"))
+                        .map(|id| (t.board_position, id.to_string()))
+                })
+                .collect();
+            candidates.sort();
+            for (_, task_id) in candidates {
+                if board("task_claim", json!({"task_id": task_id})).is_none() {
+                    continue;
+                }
+                let task = board("task_list", json!({"task_id": task_id}))
+                    .flatten()
+                    .and_then(|v| v.as_array().and_then(|ts| ts.first().cloned()))
+                    .unwrap_or_else(|| json!({"task_id": task_id}));
+                result = Some(json!({"outcome": "claimed", "request_seq": seq, "task": task}));
+                picked = Some(task_id);
+                break;
+            }
+        }
+        let result = result.unwrap_or_else(|| json!({"outcome": "empty", "request_seq": seq}));
+        let mut bodies = kept;
+        if let Some(task_id) = picked {
+            bodies.push(Body::TaskPickedUp(agora_protocol::v1::TaskPickedUp {
+                project_id: project.to_string(),
+                task_id,
+                node_id: node.to_string(),
+                agent_id: caller.clone(),
+                run_id: run.to_vec(),
+                at_ms: now_ms,
+                rule: tp::RULE.into(),
+            }));
+        }
+        let settings = [(row_key, row(result.clone()).encode())];
+        let stored = if bodies.is_empty() {
+            self.store().set_setting(&settings[0].0, &settings[0].1)
+        } else {
+            self.store_board(g, project, key, bodies, (&settings, None), now_ms)
+        };
+        match stored {
+            Ok(()) => ok(&result),
+            Err(_) => {
+                self.boards.restore(project, before);
+                internal()
             }
         }
     }
@@ -4821,6 +5044,212 @@ mod tests {
             "the view after a restart is the log's"
         );
         assert_eq!(marks(&reopened), 2);
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ADR-0131 step 2: `task_take_next` at the hub. The run is the calling node's own (another node naming it is `unknown_run`), the
+    /// owner's settings decide, the first marked open task in creation order is claimed with a `TaskPickedUp` and an outcome row in one
+    /// transaction, a retry of the same sequence gets the same answer, an older one is stale, 0 recovers, a run that holds a claim gets
+    /// it back, and the limits and the capability are kept.
+    #[test]
+    fn an_idle_run_takes_the_next_marked_task_once_and_only_for_itself() {
+        use agora_protocol::handshake::BOARD_TAKE_NEXT_V1;
+        use serde_json::json;
+        use v1::{TaskPickupEligibleSet, TaskPickupSettingsSet};
+        let (hub, path) = hub_on_file("take-next");
+        let (_held, _links) = stage_handoff(&hub, vec![BOARD_TAKE_NEXT_V1.into()]);
+        let mut at = crate::server::now_ms() / 1000 * 1000 + 10_000;
+        let mut take = |node: &str, run: u8, seq: u64| {
+            // A new second each time, so only the limits test meets the limits.
+            at += 1000;
+            hub.board_call(
+                node,
+                &v1::BoardCall {
+                    from_agent: "a".into(),
+                    project_id: "p".into(),
+                    tool: "task_take_next".into(),
+                    arguments_json: "{}".into(),
+                    from_run_id: vec![run; 16],
+                    request_seq: seq,
+                    ..Default::default()
+                },
+                at,
+            )
+        };
+        let error = |a: crate::board::Answer| -> (String, serde_json::Value) {
+            let crate::board::Verdict::Done {
+                result,
+                is_error: true,
+            } = a.verdict
+            else {
+                panic!("expected a refusal: {:?}", a.verdict);
+            };
+            let v: serde_json::Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            (
+                v["error"]["code"].as_str().unwrap().to_string(),
+                v["error"]["params"].clone(),
+            )
+        };
+        // receiver/a runs as [2; 16]; giver/a as [1; 16] and holds the staged task.
+        assert_eq!(
+            error(take("receiver", 2, 1)),
+            ("task.pickup_off".into(), json!({"reason": "owner_off"}))
+        );
+        hub.task_pickup_set(&TaskPickupSettingsSet {
+            project_id: "p".into(),
+            enabled: true,
+            node_ids: vec!["receiver".into()],
+            agent_kinds: vec!["shell".into()],
+        })
+        .unwrap();
+        assert_eq!(
+            error(take("receiver", 2, 1)).1,
+            json!({"reason": "review_off"})
+        );
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(20).unwrap();
+        let create = |title: &str| {
+            board_result(call_task_board(
+                &hub,
+                "giver",
+                "task_create",
+                json!({"title": title}),
+            ))["task_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let first = create("first");
+        let unmarked = create("unmarked");
+        let second = create("second");
+        for t in [&second, &first] {
+            hub.task_pickup_eligible_set(
+                &TaskPickupEligibleSet {
+                    project_id: "p".into(),
+                    task_id: t.clone(),
+                    eligible: true,
+                },
+                21,
+            )
+            .unwrap();
+        }
+        // Another node cannot speak for this run, nor a run that is not the agent's current one, nor a run of no agent.
+        assert_eq!(
+            error(take("giver", 2, 1)).1,
+            json!({"reason": "unknown_run"})
+        );
+        assert_eq!(
+            error(take("receiver", 9, 1)).1,
+            json!({"reason": "unknown_run"})
+        );
+        // The giver's run is real but its node is not on the allow-list.
+        assert_eq!(error(take("giver", 1, 1)).1, json!({"reason": "node"}));
+        assert_eq!(
+            board_result(take("receiver", 2, 0)),
+            json!({"outcome": "empty", "request_seq": 0}),
+            "nothing committed yet"
+        );
+
+        let got = board_result(take("receiver", 2, 1));
+        assert_eq!(
+            (got["outcome"].as_str(), got["request_seq"].as_u64()),
+            (Some("claimed"), Some(1))
+        );
+        assert_eq!(
+            got["task"]["task_id"].as_str(),
+            Some(first.as_str()),
+            "the first marked task in creation order"
+        );
+        assert_eq!(got["task"]["owner"].as_str(), Some("receiver/a"));
+        let picked = hub.view().0.tasks[&format!("p/{first}")]
+            .picked_up
+            .clone()
+            .unwrap();
+        assert_eq!(
+            (
+                picked.node_id.as_str(),
+                picked.agent_id.as_str(),
+                picked.run_id.as_slice(),
+                picked.rule.as_str()
+            ),
+            ("receiver", "receiver/a", &[2u8; 16][..], "take_next")
+        );
+        assert!(hub.view().0.tasks[&format!("p/{unmarked}")]
+            .owner
+            .is_empty());
+        // The same sequence again is the same answer; an older one is stale; 0 recovers it.
+        assert_eq!(board_result(take("receiver", 2, 1)), got);
+        assert_eq!(board_result(take("receiver", 2, 0)), got);
+        // A newer request while the run holds the claim gets the claim back, and nothing new is claimed.
+        let again = board_result(take("receiver", 2, 2));
+        assert_eq!(
+            (again["outcome"].as_str(), again["task"]["task_id"].as_str()),
+            (Some("existing"), Some(first.as_str()))
+        );
+        assert_eq!(
+            error(take("receiver", 2, 1)),
+            ("task.pickup_stale".into(), json!({"committed_seq": "2"}))
+        );
+        assert!(hub.view().0.tasks[&format!("p/{second}")].owner.is_empty());
+        let pickups = |hub: &Hub| {
+            hub.store()
+                .events_after(0, 100_000)
+                .unwrap()
+                .into_iter()
+                .filter_map(|stored| Event::decode(stored.payload.as_slice()).ok())
+                .filter(|e| matches!(&e.body, Some(Body::TaskPickedUp(_))))
+                .count()
+        };
+        assert_eq!(pickups(&hub), 1);
+        // The limits: a second request of the run in the same second is refused, and does not count.
+        let same = at + 1000;
+        let call = |seq: u64| v1::BoardCall {
+            from_agent: "a".into(),
+            project_id: "p".into(),
+            tool: "task_take_next".into(),
+            arguments_json: "{}".into(),
+            from_run_id: vec![2; 16],
+            request_seq: seq,
+            ..Default::default()
+        };
+        board_result(hub.board_call("receiver", &call(3), same));
+        assert_eq!(
+            error(hub.board_call("receiver", &call(4), same + 10)),
+            ("rate.limited".into(), json!({"limit": "1"}))
+        );
+        // The settings decide at each take: the owner turns it off.
+        hub.task_pickup_set(&TaskPickupSettingsSet {
+            project_id: "p".into(),
+            enabled: false,
+            node_ids: vec![],
+            agent_kinds: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            error(hub.board_call("receiver", &call(4), same + 2000)).1,
+            json!({"reason": "owner_off"})
+        );
+        // A link without the capability is told so.
+        drop(_links);
+        let (_r, _, _) = hub.node_link_opened("receiver", Vec::new(), 30).unwrap();
+        assert_eq!(
+            error(hub.board_call("receiver", &call(5), same + 4000)).0,
+            "protocol.capability_missing"
+        );
+        // The outcome row survives a restart.
+        drop(_r);
+        drop(hub);
+        let reopened = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        let row = crate::task_pickup::outcome(
+            reopened.store(),
+            &crate::task_pickup::outcome_key("p", "receiver", &[2; 16]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.seq, 3);
+        assert_eq!(pickups(&reopened), 1);
         drop(reopened);
         let _ = std::fs::remove_file(&path);
     }
