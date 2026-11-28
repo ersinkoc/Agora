@@ -16,7 +16,9 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE,
     ERROR_OPERATION_ABORTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
-use windows_sys::Win32::Storage::FileSystem::{GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE};
+use windows_sys::Win32::Storage::FileSystem::{
+    GetFileType, ReadFile, WriteFile, FILE_READ_DATA, FILE_TYPE_PIPE, FILE_WRITE_DATA,
+};
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, SetConsoleCtrlHandler, COORD,
     HPCON,
@@ -27,7 +29,7 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     JOB_OBJECT_LIMIT_PROCESS_TIME,
 };
-use windows_sys::Win32::System::Pipes::{CreatePipe, GetNamedPipeInfo, PeekNamedPipe};
+use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
     CreateProcessAsUserW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, TerminateProcess,
@@ -207,11 +209,17 @@ fn batch_command_line(script: &std::path::Path, args: &[String]) -> io::Result<S
     Ok(line)
 }
 
+/// The environment block for a new process: this process's own (less `remove`) with `extra` over it, or, with `clear_env` (the holder,
+/// whose own environment is a stale snapshot of whoever started it and is never passed on), exactly `extra`. A default `TERM` either way.
 /// `vars_os`, not `vars`: Windows allows variables that are not valid Unicode, and `vars` panics on them.
-fn environment(extra: &[(String, String)], remove: &[String]) -> Vec<u16> {
-    let mut vars: Vec<(OsString, OsString)> = std::env::vars_os()
-        .filter(|(k, _)| !crate::env_removed(k, remove))
-        .collect();
+fn environment(extra: &[(String, String)], remove: &[String], clear_env: bool) -> Vec<u16> {
+    let mut vars: Vec<(OsString, OsString)> = if clear_env {
+        Vec::new()
+    } else {
+        std::env::vars_os()
+            .filter(|(k, _)| !crate::env_removed(k, remove))
+            .collect()
+    };
     let mut set = |k: &str, v: &str| {
         vars.retain(|(have, _)| !have.eq_ignore_ascii_case(k));
         vars.push((k.into(), v.into()));
@@ -345,7 +353,7 @@ struct ConPty {
 }
 
 pub(crate) fn spawn(config: &PtyConfig) -> io::Result<Box<dyn Pty>> {
-    let (inner, out_read) = start_terminal(config)?;
+    let (inner, out_read) = start_terminal(config, false)?;
     let (tx, output) = sync_channel::<Vec<u8>>(QUEUE);
     let read_handle = out_read;
     std::thread::Builder::new()
@@ -388,7 +396,8 @@ fn let_ctrl_c_reach_agents() {
     unsafe { SetConsoleCtrlHandler(None, 0) };
 }
 
-fn start_terminal(config: &PtyConfig) -> io::Result<(Arc<Inner>, Handle)> {
+/// Starts `config` on a new pseudo-console; `clear_env`: the program gets exactly `config.env` (see [`environment`]).
+fn start_terminal(config: &PtyConfig, clear_env: bool) -> io::Result<(Arc<Inner>, Handle)> {
     let_ctrl_c_reach_agents();
     let (in_read, in_write) = pipe()?;
     let (out_read, out_write) = pipe()?;
@@ -406,7 +415,7 @@ fn start_terminal(config: &PtyConfig) -> io::Result<(Arc<Inner>, Handle)> {
     drop(in_read);
     drop(out_write);
 
-    let result = start_process(config, hpc);
+    let result = start_process(config, hpc, clear_env);
     let (process, pid, confinement) = match result {
         Ok(p) => p,
         Err(e) => {
@@ -529,15 +538,20 @@ impl TerminalHandle {
         };
         let (input, output) = (value(1)?, value(9)?);
         // SAFETY: GetFileType only reads the handle's type; a value that is no handle of this process gives FILE_TYPE_UNKNOWN.
-        let pipe = |h: HANDLE| {
-            // SAFETY: both only read; a value that is no pipe of this process fails GetNamedPipeInfo (a socket also says PIPE to
-            // GetFileType).
-            unsafe {
-                GetFileType(h) == FILE_TYPE_PIPE
-                    && GetNamedPipeInfo(h, null_mut(), null_mut(), null_mut(), null_mut()) != 0
-            }
+        // Each is a pipe end of one way only, the way it is used: the input may be written and not read, the output read and not written.
+        // A socket (which GetFileType calls a pipe too), a two-way pipe (the holder link, a mesh endpoint) or the ends the wrong way round
+        // are refused. Both checks read only the handle table: a question asked of the pipe itself (GetNamedPipeInfo, PeekNamedPipe,
+        // getsockopt) waits behind a read pending on the same pipe, and a node whose link only dropped still reads its own copy of this
+        // terminal, so such a check would hold its attach until the agent next wrote.
+        let one_way = |h: HANDLE, may: u32, may_not: u32| {
+            // SAFETY: GetFileType only reads the handle's type (it answers from the handle's device, never waiting on the pipe).
+            let pipe = unsafe { GetFileType(h) == FILE_TYPE_PIPE };
+            pipe && granted_access(h).is_some_and(|a| a & may != 0 && a & may_not == 0)
         };
-        if input == output || !pipe(input) || !pipe(output) {
+        if input == output
+            || !one_way(input, FILE_WRITE_DATA, FILE_READ_DATA)
+            || !one_way(output, FILE_READ_DATA, FILE_WRITE_DATA)
+        {
             return Err(invalid());
         }
         Ok(TerminalHandle {
@@ -555,6 +569,26 @@ impl TerminalHandle {
     pub(crate) fn output_raw(&self) -> HANDLE {
         self.output.0
     }
+}
+
+/// The access a handle of this process was granted, from the handle table (never asking the object, so never waiting on it); `None`
+/// for a value that is no handle here.
+fn granted_access(h: HANDLE) -> Option<u32> {
+    use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectBasicInformation};
+    // PUBLIC_OBJECT_BASIC_INFORMATION: Attributes, GrantedAccess, HandleCount, PointerCount, then ten reserved u32s.
+    let mut info = [0u32; 14];
+    let mut got = 0u32;
+    // SAFETY: `info` is the 56 bytes the class fills, aligned for it; `got` is an out value.
+    let status = unsafe {
+        NtQueryObject(
+            h,
+            ObjectBasicInformation,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of_val(&info) as u32,
+            &mut got,
+        )
+    };
+    (status == 0).then_some(info[1])
 }
 
 /// The version byte of a terminal reference (M2.6), and its whole length: the version, then the input's and the output's handle values
@@ -603,9 +637,11 @@ pub struct HeldTerminal {
 }
 
 impl HeldTerminal {
-    /// Starts the program of `config` on a new pseudo-console, in a kill-on-close job with the request's limits.
+    /// Starts the program of `config` on a new pseudo-console, in a kill-on-close job with the request's limits, with exactly
+    /// `config.env` (plus a default `TERM`) and nothing of this process's own environment, as on Unix: the node sends the agent's whole
+    /// environment.
     pub fn start(config: &PtyConfig) -> io::Result<Self> {
-        let (inner, output) = start_terminal(config)?;
+        let (inner, output) = start_terminal(config, true)?;
         watch_exit(&inner)?;
         Ok(Self {
             inner,
@@ -841,7 +877,11 @@ impl Drop for TerminalReader {
     }
 }
 
-fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Option<Confinement>)> {
+fn start_process(
+    config: &PtyConfig,
+    hpc: HPCON,
+    clear_env: bool,
+) -> io::Result<(Handle, u32, Option<Confinement>)> {
     // A bare name installed as a `.cmd` shim (`npx`) becomes its full path; `CreateProcess` alone adds only `.exe`.
     let first = config.argv.first().map(|p| {
         crate::windows::program_path(p, child_path(&config.env))
@@ -868,9 +908,9 @@ fn start_process(config: &PtyConfig, hpc: HPCON) -> io::Result<(Handle, u32, Opt
         Some(file) => {
             let mut extra = config.env.clone();
             extra.extend(crate::git_config_env(file));
-            environment(&extra, &config.env_remove)
+            environment(&extra, &config.env_remove, clear_env)
         }
-        None => environment(&config.env, &config.env_remove),
+        None => environment(&config.env, &config.env_remove, clear_env),
     };
     // Not lossily: a folder name need not be valid Unicode.
     let cwd: Option<Vec<u16>> = config.cwd.as_ref().map(|c| {
@@ -1586,6 +1626,15 @@ mod tests {
 
 /// M2.6: the holder's terminal in the shape the holder uses on every system (`agora hold`): no reading until a reader starts, a reader
 /// whose end leaves nothing in flight, `drain` for an ended agent, the signals, and the passable pipe ends.
+/// For the held-terminal tests: `argv` with this process's environment, which a held agent gets only when given (the node gives an
+/// agent its whole environment).
+#[cfg(test)]
+pub(crate) fn held_config(argv: Vec<String>) -> PtyConfig {
+    let mut c = PtyConfig::new(argv);
+    c.env = std::env::vars().collect();
+    c
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod held_tests {
@@ -1594,7 +1643,7 @@ mod held_tests {
     use std::time::{Duration, Instant};
 
     fn config(argv: &[&str]) -> PtyConfig {
-        PtyConfig::new(argv.iter().map(|a| (*a).to_string()).collect())
+        held_config(argv.iter().map(|a| (*a).to_string()).collect())
     }
 
     /// Waits up to 20 s for the agent's end.
@@ -1627,6 +1676,42 @@ mod held_tests {
             seen.push_str(&String::from_utf8_lossy(&c.buffer.into_vec()));
         }
         assert!(seen.contains("one-Windows_NT"), "{seen:?}");
+    }
+
+    /// The holder's own environment (a stale snapshot of whoever started it) never reaches an agent: only what the node sent, and a
+    /// default `TERM`.
+    #[test]
+    fn a_held_agent_gets_exactly_the_environment_given() {
+        std::env::set_var("AGORA_HELD_TERMINAL_LEAK", "from-the-holder");
+        let mut c = PtyConfig::new(
+            [
+                "cmd.exe",
+                "/d",
+                "/c",
+                "echo [%FOO%][%AGORA_HELD_TERMINAL_LEAK%][%TERM%]",
+            ]
+            .iter()
+            .map(|a| (*a).to_string())
+            .collect(),
+        );
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+        c.env = vec![
+            ("SystemRoot".into(), root.clone()),
+            ("PATH".into(), format!(r"{root}\System32")),
+            ("FOO".into(), "bar".into()),
+        ];
+        let mut term = HeldTerminal::start(&c).unwrap();
+        let reader = term.start_reader().unwrap();
+        assert!(ended(&mut term).is_some());
+        let end = Instant::now() + Duration::from_secs(20);
+        while !reader.ended() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = String::from_utf8_lossy(&reader.end().buffer.into_vec()).into_owned();
+        assert!(
+            text.contains("[bar][%AGORA_HELD_TERMINAL_LEAK%][xterm-256color]"),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -1782,7 +1867,7 @@ mod reference_tests {
     #[test]
     fn a_reference_imports_as_the_same_terminal() {
         let peer = me();
-        let mut term = HeldTerminal::start(&PtyConfig::new(vec![
+        let mut term = HeldTerminal::start(&held_config(vec![
             "cmd.exe".into(),
             "/c".into(),
             "echo ref-%OS%".into(),
@@ -1807,7 +1892,7 @@ mod reference_tests {
     #[test]
     fn an_export_that_was_not_delivered_closes_its_duplicates_in_the_node() {
         let peer = me();
-        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
         let handle = term.handle().unwrap();
         let export = handle.export_to(&peer).unwrap();
         let [input, output] = values(export.bytes());
@@ -1822,7 +1907,7 @@ mod reference_tests {
     #[test]
     fn a_delivered_export_leaves_the_duplicates_to_the_node() {
         let peer = me();
-        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
         let handle = term.handle().unwrap();
         let export = handle.export_to(&peer).unwrap();
         let bytes = export.bytes().to_vec();
@@ -1835,6 +1920,34 @@ mod reference_tests {
         assert!(!same_object(input, handle.input_raw()));
     }
 
+    /// A node whose link only dropped still reads its copy of the terminal; the terminal it gets again on attaching is the same pipe.
+    /// Importing it must not wait behind that pending read (it did, until the agent next wrote: GetNamedPipeInfo waits for it).
+    #[test]
+    fn an_import_does_not_wait_behind_a_read_pending_on_the_same_pipe() {
+        let peer = me();
+        let term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
+        let mut reading = term.handle().unwrap().into_file().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while reading.read(&mut buf).is_ok_and(|n| n > 0) {}
+        });
+        // cmd.exe has written its prompt and waits for input: the read above is pending, and stays so.
+        std::thread::sleep(Duration::from_millis(1500));
+        let handle = term.handle().unwrap();
+        let export = handle.export_to(&peer).unwrap();
+        let bytes = export.bytes().to_vec();
+        export.delivered();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(TerminalHandle::import(&bytes).map(drop).is_ok());
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).ok(),
+            Some(true),
+            "the import waited behind the pending read"
+        );
+    }
+
     #[test]
     fn a_bad_reference_is_refused_and_closes_nothing() {
         let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
@@ -1842,7 +1955,12 @@ mod reference_tests {
             use std::os::windows::io::AsRawHandle;
             file.as_raw_handle() as usize as u64
         };
-        let term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket_value = {
+            use std::os::windows::io::AsRawSocket;
+            socket.as_raw_socket()
+        };
+        let term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
         let handle = term.handle().unwrap();
         let pipe_value = handle.output_raw() as usize as u64;
         let reference = |version: u8, a: u64, b: u64| {
@@ -1871,8 +1989,20 @@ mod reference_tests {
         // The same handle twice, and a handle that is no pipe (a file this test holds open).
         refused(&reference(1, pipe_value, pipe_value));
         refused(&reference(1, file_value, pipe_value));
-        // Nothing of a refused reference was closed: the file and the pipe end still work.
+        // A socket, which GetFileType also calls a pipe, and the two ends the wrong way round.
+        refused(&reference(
+            1,
+            handle.input_raw() as usize as u64,
+            socket_value,
+        ));
+        refused(&reference(
+            1,
+            pipe_value,
+            handle.input_raw() as usize as u64,
+        ));
+        // Nothing of a refused reference was closed: the file, the socket and the pipe end still work.
         assert!(file.metadata().is_ok());
+        assert!(socket.local_addr().is_ok());
         // SAFETY: only reads the type of a handle this test owns.
         assert_eq!(unsafe { GetFileType(handle.output_raw()) }, FILE_TYPE_PIPE);
     }
@@ -1921,7 +2051,7 @@ mod held_pty_tests {
 
     #[test]
     fn the_node_reads_and_types_through_its_copy_and_asks_the_holder_for_the_rest() {
-        let mut term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let mut term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
         let recorder = Arc::new(Recorder::default());
         let mut pty = held_pty(term.handle().unwrap(), term.pid(), recorder.clone()).unwrap();
         pty.write_input(b"echo pty-%OS%\r\n").unwrap();
@@ -1950,7 +2080,7 @@ mod held_pty_tests {
 
     #[test]
     fn a_node_that_lets_go_stops_reading_and_ends_nothing() {
-        let mut term = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let mut term = HeldTerminal::start(&held_config(vec!["cmd.exe".into()])).unwrap();
         let recorder = Arc::new(Recorder::default());
         let mut pty = held_pty(term.handle().unwrap(), term.pid(), recorder.clone()).unwrap();
         pty.write_input(b"echo before-%OS%\r\n").unwrap();

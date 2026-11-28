@@ -181,7 +181,6 @@ mod tests {
 
     use super::*;
     use crate::conpty::HeldTerminal;
-    use crate::PtyConfig;
 
     const ROLE: &str = "AGORA_W1_TEST_ROLE";
 
@@ -348,7 +347,8 @@ mod tests {
     /// reads again and sees what comes next. `%OS%` is expanded by `cmd`, so the answer is told from the echo of the typed line.
     #[test]
     fn a_terminal_is_handed_to_another_process_and_back_without_losing_output() {
-        let mut held = HeldTerminal::start(&PtyConfig::new(vec!["cmd.exe".into()])).unwrap();
+        let mut held =
+            HeldTerminal::start(&crate::conpty::held_config(vec!["cmd.exe".into()])).unwrap();
         held.write_input(b"echo before-%OS%\r\n").unwrap();
         let before = held_until(&held, "before-Windows_NT");
         assert!(before.contains("before-Windows_NT"), "{before:?}");

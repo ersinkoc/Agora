@@ -93,8 +93,8 @@ next frame's.
   a frame and is not paged. Before, nothing bounded the count: a holder holding more could not send `List` (`write_frame` refuses a
   frame larger than `MAX_FRAME`) and dropped the node on every try. The bound is far past what a machine runs (every terminal agent
   is a PTY, every pipe agent two threads of the holder).
-- A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list; the
-  holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
+- A holder agent starts with **exactly** the environment in `Start` (the holder runs it with an empty environment plus that list, and a
+  default `TERM`, on Unix and on Windows; the holder's own environment is a stale snapshot of whoever started it and is never passed on). `env_remove` is therefore redundant for
   the holder and kept only for the format.
 - The terminal master, the listener, the wake pipe, the lock files and the pidfd are all close-on-exec; an agent sees none of them
   (tested with an agent that lists its own descriptors). Neither does it see what the **holder was handed at its start** (a pipe of its
@@ -423,7 +423,12 @@ Holder to node: `StartedRef`(73: agent, pid, `terminal: bytes`) and `TerminalRef
   (decision 5; `TerminalHandle::export_to`). If the frame does not go out (a send fails, the link drops first), it closes both duplicates
   in the node again (`DUPLICATE_CLOSE_SOURCE`), so nothing of an undelivered frame stays there. Once the frame went out, they are the node's.
 - **The node** imports a reference only after checking it: the exact length and version, two nonzero and different values, both of them
-  pipes the named-pipe calls accept (`GetFileType` and `GetNamedPipeInfo`; `TerminalHandle::import`). A reference that fails is `Malformed` and closes the link. Nothing of it is closed, since its values
+  pipe ends of one way, as they are used: the input may be written and not read, the output read and not written (`GetFileType` and the
+  handle's granted access; `TerminalHandle::import`). That refuses a socket (which `GetFileType` also calls a pipe), a two-way pipe and
+  the ends the wrong way round. Both checks read only the handle table: a question asked of the pipe itself (`GetNamedPipeInfo`,
+  `PeekNamedPipe`, `getsockopt`) waits behind a read pending on the same pipe, and a node whose link only dropped still reads its own copy
+  of the terminal it is handed again, so such a check would hold its attach until the agent next wrote. A reference that fails is
+  `Malformed` and closes the link. Nothing of it is closed, since its values
   may name handles the node holds for something else; a wrong reference is a holder fault, and the holder was admitted by pid and start
   time.
 - **What can still be lost:** a frame that went out but that the node never reads, from a node that keeps running (it closed the link
