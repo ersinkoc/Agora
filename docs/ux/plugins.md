@@ -384,7 +384,9 @@ system, which belongs in `agora-platform`, and Wayland does not tell an app with
 soon as they click or move the focus anywhere else in the window; focus that reaches a frame not in use is sent back to the window.
 `inert` does not stop a frame's own `window.focus()` from taking the keyboard, and sending it back is a race a frame asking every few
 milliseconds wins, so a frame that takes the keyboard while not in use 3 times within 10 seconds is stopped: its pane says it "kept
-taking the keyboard" and offers to start it again (a plugin that focuses its own text box once after it loads takes it once). So a
+taking the keyboard" and offers to start it again (a plugin that focuses its own text box once after it loads takes it once). This is
+Chromium's case; WebKit keeps an inert frame from taking the keyboard at all, so there such a frame keeps running and the key reaches
+the window anyway. So a
 plugin can never take the keyboard by itself or keep it: while the person is using the frame, a key goes to the frame (as any key does
 in a frame), and one click outside it hands the keyboard, and the safe-mode key, back to the window. The first click into a frame gives
 it the keyboard at once.

@@ -429,10 +429,16 @@ for (const [name, code, budget] of stopCases) {
   await f1.page.waitForSelector('[data-plugin-stopped]', { timeout: 10000 }).catch(() => {});
   const stoppedText = (await f1.page.locator('[data-plugin-stopped]').textContent().catch(() => '')) ?? '';
   const framesLeft = await f1.page.locator('iframe[data-plugin-frame]').count();
+  const stealing = f1.page.frames().find((f) => f !== f1.page.mainFrame());
+  const stolenBefore = framesLeft ? await stealing?.evaluate(() => window.__keys).catch(() => '?') : 'none: stopped';
   await f1.page.keyboard.press('Control+Alt+Shift+KeyS');
   await f1.page.waitForURL(/\?safe/, { timeout: 10000 }).catch(() => {});
-  check(stoppedText.includes('kept taking the keyboard') && framesLeft === 0 && f1.page.url().includes('?safe'),
-    `a plugin taking the focus while not in use is stopped, and the key then opens safe mode (stopped: ${JSON.stringify(stoppedText)}; frames left ${framesLeft}; at ${f1.page.url().replace(HUB, '')})`);
+  // Chromium lets an inert frame's own window.focus() take the keyboard, so there the stealer must be stopped. WebKit does not (CI's
+  // webkit job, 2026-11-28: the stealer kept running and the key reached the window), so there nothing has to be stopped; on both the
+  // key must reach the window.
+  const stopped = stoppedText.includes('kept taking the keyboard') && framesLeft === 0;
+  check((stopped || engine !== 'chromium') && f1.page.url().includes('?safe'),
+    `a plugin taking the focus while not in use cannot keep it (stopped where the engine lets it take the keyboard), and the key then opens safe mode (stopped: ${JSON.stringify(stoppedText)}; frames left ${framesLeft}; keys in the frame before the key ${JSON.stringify(stolenBefore)}; at ${f1.page.url().replace(HUB, '')})`);
   await f1.ctx.close();
   const f2 = await open(qt);
   await f2.page.waitForSelector('iframe[data-plugin-frame]');
