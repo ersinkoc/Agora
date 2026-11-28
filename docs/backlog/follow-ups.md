@@ -72,6 +72,13 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
   Node.js release carrying the fix is verified confined on Windows (ADR-0105 decision 4); until then the docs say Node-based agents do not
   work confined on Windows.
 - **Holder link G2:** widen `holder_link_write_bound`'s window if it ever flakes (none seen).
+- **M2.6 holder, found by `hold_node.rs` on Windows:**
+  - `agora down --agents` ends the holder outright (`terminate_process` is `TerminateProcess` there); its agents end with their
+    kill-on-close jobs, with no time to leave by themselves as `SIGTERM` gives them on Unix, and `run/hold.pid` stays behind, stale.
+    **decision:** a stop request the holder can hear (a named event, as the session-end window hears the session's end), or this as a
+    documented limit.
+  - `process_identity` is not read on Windows (ADR-0060), so the ledger records no agent process there and a survivor of a crashed
+    node without a holder is not recognised. Taking an agent up from the holder does not need it.
 - **Shutdown-safe state:** a real log-off / `shutdown /r` run of #1231's session-end window (on hold until the maintainer says go).
 - **Store PowerShell leaves the terminal's job:** `pwsh` installed from the Store (WindowsApps, the default install) started in a terminal,
   and everything it starts, is outside that terminal's job object (WHITE 2026-11-27: `cmd` -> `pwsh` -> `claude`/`codex`, the job lists
