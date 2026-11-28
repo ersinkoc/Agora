@@ -98,7 +98,7 @@ install_main() {
     if [ -z "$dir" ]; then
         # A copy a package manager owns (Homebrew, Nix) stays its own: installing over it would conflict with its next upgrade.
         case "$previous" in */Cellar/*|*/homebrew/*|*/linuxbrew/*|/nix/*) previous_managed=1 ;; *) previous_managed=0 ;; esac
-        if [ -n "$previous" ] && [ "$previous_managed" = 0 ] && [ -w "$(dirname "$previous")" ] && [ -O "$previous" ]; then
+        if [ -n "$previous" ] && [ "$previous_managed" = 0 ] && [ -w "$(dirname "$previous")" ] && owned_by_me "$previous"; then
             dir=$(dirname "$previous")
         else
             dir="$HOME/.local/bin"
@@ -249,6 +249,11 @@ latest_version() {
 # Whether this ssh-keygen checks signatures (`-Y`, OpenSSH 8.1 and newer); an older one says "illegal option -- Y".
 keygen_signs() {
     ! ssh-keygen -Y verify < /dev/null 2>&1 | grep -q 'option -- Y'
+}
+
+# Whether `$1` belongs to this user (POSIX `test` has no `-O`).
+owned_by_me() {
+    [ -n "$(find "$1" -prune -user "$(id -u)" 2>/dev/null)" ]
 }
 
 sha256_of() {

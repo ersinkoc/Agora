@@ -2375,6 +2375,10 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         // ADR-0113 decision 6 (step 4): a person's settings are the hub's; a node never receives them (refused as unsupported).
         Cmd::UserSettingsGet(_) => "user_settings.get",
         Cmd::UserSettingsSet(_) => "user_settings.set",
+        // ADR-0130: a project's notice settings and pages are the hub's; a node never receives them (refused as unsupported).
+        Cmd::ProjectNoticesSettingsSet(_) => "project_notices.settings_set",
+        Cmd::ProjectNoticesSettingsGet(_) => "project_notices.settings_get",
+        Cmd::ProjectNoticesPage(_) => "project_notices.page",
     }
 }
 
