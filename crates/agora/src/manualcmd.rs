@@ -687,6 +687,8 @@ mod tests {
         let mut list = agora_mesh::mcp::tools();
         agora_mesh::mcp::with_fleet(&mut list);
         list.extend(agora_mesh::mcp::spawn_tools());
+        // ADR-0131: listed when the node offers it, as the topic says.
+        list.push(agora_mesh::mcp::take_next_tool());
         list
     }
 

@@ -629,6 +629,15 @@ impl BatchReply {
 /// The tools that read or change a project's shared state (ADR-0039): on a shared project they run on the hub's board.
 pub const SUBTASK_TOOL: &str = "task_create_subtask";
 
+/// The `task_take_next` tool as `tools/list` names it (ADR-0131).
+pub fn take_next_tool() -> Value {
+    json!({
+        "name": TAKE_NEXT_TOOL,
+        "description": "When you are idle, take the next task the owner marked on the project's shared board. Returns the task claimed for you, the task you already hold, or that none is waiting.",
+        "inputSchema": schema(&[], &[]),
+    })
+}
+
 /// ADR-0131: an idle agent asks the hub's board for the next task the owner marked. Not one of [`BOARD_TOOLS`]: only the hub answers
 /// it (no local board ever does), and the node fills the call.
 pub const TAKE_NEXT_TOOL: &str = "task_take_next";
@@ -802,11 +811,7 @@ impl McpConnection {
                     }));
                 }
                 if self.take_next {
-                    list.push(json!({
-                        "name": TAKE_NEXT_TOOL,
-                        "description": "When you are idle, take the next task the owner marked on the project's shared board. Returns the task claimed for you, the task you already hold, or that none is waiting.",
-                        "inputSchema": schema(&[], &[]),
-                    }));
+                    list.push(take_next_tool());
                 }
                 if self.spawn {
                     list.extend(spawn_tools());
