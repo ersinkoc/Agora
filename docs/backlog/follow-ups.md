@@ -78,7 +78,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
     **decision:** a stop request the holder can hear (a named event, as the session-end window hears the session's end), or this as a
     documented limit.
   - `process_identity` is not read on Windows (ADR-0060), so the ledger records no agent process there and a survivor of a crashed
-    node without a holder is not recognised. Taking an agent up from the holder does not need it.
+    node without a holder is not recognised. Taking an agent up from the holder does not need it, but **a held agent's run id does
+    (blocks the flip)**: `process_run_id` derives it from the process identity for a held agent, so on Windows a held agent would have
+    none (`hold_node_pipes.rs`, the usage test: `run_id` empty), and a task handoff to it needs one. **decision:** `process_identity`
+    on Windows (pid, start time, a per-boot value, image name), or a run id from the pid and start time alone where it is not read.
 - **Shutdown-safe state:** a real log-off / `shutdown /r` run of #1231's session-end window (on hold until the maintainer says go).
 - **Store PowerShell leaves the terminal's job:** `pwsh` installed from the Store (WindowsApps, the default install) started in a terminal,
   and everything it starts, is outside that terminal's job object (WHITE 2026-11-27: `cmd` -> `pwsh` -> `claude`/`codex`, the job lists

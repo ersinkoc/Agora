@@ -1,11 +1,10 @@
-//! ADR-0093 (Unix): a structured agent (an adapter on pipes) outlives its node when the holder runs it, and the next node takes it up with
+//! ADR-0093 (Unix, and Windows with M2.6 where the build has the holder): a structured agent (an adapter on pipes) outlives its node when the holder runs it, and the next node takes it up with
 //! what it wrote meanwhile and the request that was waiting for the person. A real node, a real `agora hold` and the fake adapter
 //! (`agora-fake-agent --adapter`); never a real agent.
 //!
 //! The "node" is this test process (the role lock names it, as in `hold_node.rs`). A node that stops is [`Node`] dropped, which lets
 //! a held adapter go and leaves it running: to the holder this is a link that closed, as when a node is killed. Since ADR-0104 O2 the
 //! drop is a clean stop: it records what the node had read and not recorded and writes what it held, before it lets go.
-#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -46,6 +45,23 @@ fn fake_agent() -> String {
         );
     });
     p.to_string_lossy().into_owned()
+}
+
+/// Whether these tests run here: only where the build has the holder (`HOLDER_BUILT`). On Windows this process then joins the
+/// supervisor's kill-on-close job that lets a process leave it, as a node under `agora supervise node` is (see `hold_node.rs`).
+fn holder_here() -> bool {
+    static JOINED: std::sync::Once = std::sync::Once::new();
+    JOINED.call_once(|| {
+        if cfg!(windows) && agora_platform::HOLDER_BUILT {
+            let mut c = Command::new(AGORA);
+            c.arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let mut b = agora_platform::spawn_bound(&mut c).expect("start bound");
+            let _ = b.child.wait();
+        }
+    });
+    agora_platform::HOLDER_BUILT
 }
 
 fn alive(pid: u32) -> bool {
@@ -276,6 +292,9 @@ fn started(rig: &Rig, node: &Node) -> String {
 /// the person's answer reaches the agent, which finishes the turn.
 #[test]
 fn a_structured_agent_mid_turn_outlives_its_node_and_its_waiting_request_is_asked_again() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("ask");
     let node = rig.node();
@@ -327,6 +346,9 @@ fn a_structured_agent_mid_turn_outlives_its_node_and_its_waiting_request_is_aske
 /// The request comes while no node is there at all: the next node finds it among what nobody had read, and asks.
 #[test]
 fn a_request_made_while_no_node_ran_is_waiting_for_the_next_node() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("later");
     let node = rig.node();
@@ -359,6 +381,9 @@ fn a_request_made_while_no_node_ran_is_waiting_for_the_next_node() {
 /// the conversation saying how much was lost.
 #[test]
 fn output_beyond_what_the_holder_keeps_shows_a_notice_with_the_dropped_bytes() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("flood");
     let node = rig.node();
@@ -394,6 +419,9 @@ fn output_beyond_what_the_holder_keeps_shows_a_notice_with_the_dropped_bytes() {
 /// Without a holder the adapter is the node's own, as before: it ends with the node and the person is offered resume (ADR-0060).
 #[test]
 fn without_a_holder_an_adapter_is_the_nodes_own_and_ends_with_it() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("none");
     let node = rig.node_without_holder();
@@ -410,6 +438,9 @@ fn without_a_holder_an_adapter_is_the_nodes_own_and_ends_with_it() {
 /// Stopping a held adapter ends its process in the holder and collects it; the holder ends with its last agent.
 #[test]
 fn stopping_a_held_adapter_ends_its_process_and_the_holder() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("stop");
     let node = rig.node();
@@ -465,6 +496,9 @@ fn mesh_status(socket: &Path) -> Option<serde_json::Value> {
 /// lets the person send it a prompt; the prompt is answered.
 #[test]
 fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node_restarts() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("kept");
     let node = rig.node();
@@ -508,6 +542,9 @@ fn a_kept_structured_agent_is_on_the_mesh_again_and_shown_running_after_its_node
 fn a_kept_structured_agent_is_not_counted_confined_by_a_node_that_now_confines() {
     use agora_node::supervisor::Confinement;
     if !agora_platform::sandbox_supported() {
+        return;
+    }
+    if !holder_here() {
         return;
     }
     let _serial = serial();
@@ -563,6 +600,9 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
 {
     use agora_node::supervisor::Confinement;
     if !agora_platform::sandbox_supported() {
+        return;
+    }
+    if !holder_here() {
         return;
     }
     let _serial = serial();
@@ -657,6 +697,9 @@ fn a_kept_structured_agent_under_a_node_that_now_confines_is_refused_a_mode_that
 #[test]
 fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipping_after_its_node_restarts(
 ) {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::with_args("skipmode", &["--modes"]);
     let node = rig.node();
@@ -784,6 +827,9 @@ fn a_kept_structured_agent_in_a_mode_that_skips_permissions_is_still_shown_skipp
 /// process ends, nothing restarts it, and its conversation says why.
 #[test]
 fn a_kept_agent_in_a_mode_that_skips_is_stopped_by_a_node_whose_policy_now_forbids_it() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::with_args("skipforbid", &["--modes"]);
     let node = rig.node();
@@ -907,6 +953,9 @@ fn reported(sup: &agora_node::supervisor::Supervisor, agent: &AgentId) -> (Strin
 /// event loses it.
 #[test]
 fn reports_a_node_read_and_did_not_record_before_it_stopped_reach_the_next_node() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::with_args("unrecorded", &["--modes"]);
     let node = rig.node();
@@ -981,6 +1030,9 @@ fn reports_a_node_read_and_did_not_record_before_it_stopped_reach_the_next_node(
 /// process's and goes, rather than waiting for an agent that reuses the id.
 #[test]
 fn a_node_without_a_holder_keeps_no_earlier_session() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("nokeep");
     let dir = rig.root.join("data/sessions");
@@ -999,6 +1051,9 @@ fn a_crashed_held_adapter_is_back_after_one_restart_and_a_crash_loop_gives_up_wi
     use agora_node::supervisor::{
         RestartPolicy, StartRequest, Supervisor, SupervisorConfig, SupervisorEvent,
     };
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("crash");
     let mut s = Supervisor::new(SupervisorConfig {
@@ -1133,6 +1188,9 @@ fn logged_usage(node: &Node, id: &str) -> (u64, u64) {
 /// `AgentStarted` started them again from 0.
 #[test]
 fn a_kept_agents_usage_counters_survive_its_node_restarting() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("usage");
     let node = rig.node();
@@ -1258,6 +1316,9 @@ fn chat(node: &Node, id: &str) -> Vec<v1::ChatEntry> {
 /// second) has written both turns before the node stops, so they are in the file as after a kill (a clean stop's flush is tested below).
 #[test]
 fn a_kept_agents_conversation_and_its_ids_survive_its_node_restarting() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("convo");
     let node = rig.node();
@@ -1320,6 +1381,9 @@ fn a_kept_agents_conversation_and_its_ids_survive_its_node_restarting() {
 /// names the tool and its arguments.
 #[test]
 fn a_tool_call_that_finishes_after_its_node_restarts_is_one_entry_updated_in_place() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("tool");
     let node = rig.node();
@@ -1370,6 +1434,9 @@ fn a_tool_call_that_finishes_after_its_node_restarts_is_one_entry_updated_in_pla
 /// write as a full disk does) runs its agents as before, keeps their conversation in memory, and says once in it that it is not saved.
 #[test]
 fn a_node_that_cannot_write_history_runs_its_agent_and_says_so_once() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("nodisk");
     std::fs::write(rig.root.join("data/transcripts"), "not a folder").expect("block");
@@ -1439,6 +1506,9 @@ impl Drop for Paused {
 /// handed all four over, and asks the node to stop before it lets go (the loop then never ticks again).
 #[test]
 fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the_next_node() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("drain");
     let node = rig.node();
@@ -1484,6 +1554,9 @@ fn a_turn_the_node_read_and_had_not_recorded_when_it_stopped_cleanly_reaches_the
 /// after it, and the usage of the turn before, still being gathered, is in the log.
 #[test]
 fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("flush");
     agora_node::credentials::SecretStore::in_data(&rig.root.join("data"))
@@ -1532,6 +1605,9 @@ fn a_clean_stop_writes_the_last_answer_and_the_usage_still_being_gathered() {
 /// is busy, again after the let-go), and no piece of the value is ever on disk, after the stop nor once the next node wrote the rest.
 #[test]
 fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_the_usage() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("busy");
     let value = "SECRETVALUE-ABCDEFGH-XYZ";
@@ -1651,6 +1727,10 @@ fn a_stop_while_a_launch_holds_the_supervisor_still_writes_the_last_answer_and_t
 /// again the next node takes it up.
 #[test]
 fn a_node_stops_in_time_while_its_holder_does_not_answer() {
+    // The holder is paused with `SIGSTOP` (Unix).
+    if !holder_here() || cfg!(windows) {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("hung");
     let node = rig.node();
@@ -1711,6 +1791,9 @@ fn user_entry(node: &Node, id: &str, text: &str) -> Option<v1::ChatEntry> {
 /// agent worked on it).
 #[test]
 fn a_prompt_waiting_for_its_answer_when_the_node_stops_stays_in_the_conversation() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("given-prompt");
     let node = rig.node();
@@ -1743,6 +1826,9 @@ fn a_prompt_waiting_for_its_answer_when_the_node_stops_stays_in_the_conversation
 /// shown as sent, never dropped as if it had not gone out.
 #[test]
 fn a_queued_prompt_being_sent_when_the_node_stops_is_shown_sent() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::with_args("given-queued", &["--turns"]);
     let node = rig.node();
@@ -1796,6 +1882,10 @@ fn a_queued_prompt_being_sent_when_the_node_stops_is_shown_sent() {
 #[test]
 fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
     use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
+    // The adapter is paused with `SIGSTOP` (Unix).
+    if !holder_here() || cfg!(windows) {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("given-decision");
     let rng = ring::rand::SystemRandom::new();
@@ -1909,6 +1999,9 @@ fn a_decision_being_delivered_when_the_node_stops_is_recorded_as_decided() {
 /// second time: every turn is there once after each resume, in the window and on disk.
 #[test]
 fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     // The bridge is this build's `agora` (the test binary is not).
     std::env::set_var("AGORA_ACP_BRIDGE", AGORA);
@@ -1990,6 +2083,9 @@ fn a_resumed_agent_that_replays_its_session_shows_its_conversation_once() {
 /// file when it ends (no stop needed), with the node's value replaced.
 #[test]
 fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("secret");
     let value = "SECRETVALUE-ABCDEFGH-XYZ";
@@ -2036,6 +2132,9 @@ fn a_node_holding_a_secret_writes_an_answer_when_the_turn_ends_without_the_value
 /// the next node writes the rest. No piece of the value of 4 bytes or more is ever on disk.
 #[test]
 fn a_stop_in_the_middle_of_a_secret_value_leaves_no_piece_of_it_on_disk() {
+    if !holder_here() {
+        return;
+    }
     let _serial = serial();
     let rig = Rig::new("secret-stop");
     let value = "SECRETVALUE-ABCDEFGH-XYZ";
