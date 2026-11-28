@@ -23,6 +23,18 @@ pub const MESH_SPAWN_REMOTE: &str = "mesh.spawn.remote";
 /// schema step; no node or hub offers it until the build steps.
 pub const SHARE_ITEMS: &str = "share.items";
 
+/// Every capability named by a constant above, so a check can tell when one is added (`the_hub_agrees_on_every_named_capability` in
+/// the hub's command; `every_named_capability_is_listed` here).
+pub const NAMED: &[&str] = &[
+    TASK_HANDOFF_V1,
+    FLEET_STATUS_V1,
+    BOARD_SUBTASKS_V1,
+    BOARD_TAKE_NEXT_V1,
+    TASK_ACCEPTANCE_NOTICE_V1,
+    MESH_SPAWN_REMOTE,
+    SHARE_ITEMS,
+];
+
 /// What one side supports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Support {
@@ -109,6 +121,20 @@ pub fn resume(request: &Resume, oldest_retained: u64, next_seq: u64) -> ResumeAn
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_named_capability_is_listed() {
+        let source = include_str!("handshake.rs");
+        let declared = source
+            .lines()
+            .filter(|l| l.starts_with("pub const ") && l.contains(": &str = "))
+            .count();
+        assert_eq!(
+            declared,
+            super::NAMED.len(),
+            "a capability constant is missing from NAMED"
+        );
+    }
+
     use super::*;
     use crate::v1::Role;
 

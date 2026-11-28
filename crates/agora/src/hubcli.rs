@@ -3211,6 +3211,19 @@ mod tests {
         }
     }
 
+    /// Every capability the protocol names (`agora_protocol::handshake::NAMED`) is one this hub agrees on, or one held back on purpose:
+    /// a node offers some only under its policy (`board.take_next.v1`), which the check above cannot see (it was missing once, as
+    /// `preview.v1` was; agora-ac's read of 97f5b01b).
+    #[test]
+    fn the_hub_agrees_on_every_named_capability() {
+        for c in agora_protocol::handshake::NAMED {
+            assert!(
+                HUB_CAPABILITIES.contains(c) || NOT_YET_ON_THE_HUB.contains(c),
+                "the hub does not agree on {c}"
+            );
+        }
+    }
+
     /// ADR-0122 step 2: the hub keeps the owner's shared items and hands a node their signed words, so it agrees on `share.items`
     /// before any node offers it (`crates/agora-hub/tests/devices.rs` drives the commands over a real socket).
     #[test]
