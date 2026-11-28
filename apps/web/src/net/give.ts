@@ -41,7 +41,10 @@ let knownLacking = new Set<string>();
  *  a machine without one (not known) is offered as before. */
 export function noteCapabilities(list: readonly { id: string; capabilities?: readonly string[] }[]): void {
   const next = new Set(list.filter((m) => m.capabilities && !m.capabilities.includes('task.dispatch')).map((m) => m.id));
-  if (next.size === knownLacking.size && [...next].every((id) => knownLacking.has(id))) return;
+  // A machine whose current link is known to take tasks is offered again, whatever an older link's refusal taught.
+  let relearned = false;
+  for (const m of list) if (m.capabilities?.includes('task.dispatch') && lacking.delete(m.id)) relearned = true;
+  if (!relearned && next.size === knownLacking.size && [...next].every((id) => knownLacking.has(id))) return;
   knownLacking = next;
   changed();
 }

@@ -61,6 +61,7 @@ the link negotiated right after its `NodeLink { up }` (a store failure leaves it
 `published_capabilities`); a newer link or the link's end clears it, and a hub that starts records every stale link closed, so a
 past link's word is never shown. Window: the view keeps it per machine for the current link; `give.ts` `noteCapabilities` takes a
 machine known not to speak `task.dispatch` out of "Give to an agent" and "Start a new agent for this task", with the existing words
-for an unsupported machine; a machine not known is offered as before and the window still learns from a refusal. Tests:
+for an unsupported machine; a machine not known is offered as before and the window still learns from a refusal. One word is stored per link opening: every opening makes the value unknown, so each word is a change from unknown ("store only changes").
+A machine whose current link is known to take tasks is offered again even if an older link refused (agora-ac's read of 8f213602). Tests:
 `a_nodes_published_capabilities_are_its_current_links_only`, `an_opened_link_publishes_what_it_negotiated_of_the_published_list`,
 `apps/web/src/net/nodeCapabilities.test.ts`.

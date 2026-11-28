@@ -2,7 +2,7 @@
 // speak `task.dispatch` is not offered tasks, while one not known is offered as before.
 import { afterEach, describe, expect, it } from 'vitest';
 import { applyEvent, emptyView, fromSnapshot, machines } from './view';
-import { cannotTakeKey, forgetGiveSupport, noteCapabilities, offersGive } from './give';
+import { cannotTakeKey, forgetGiveSupport, noteCapabilities, noteRefusal, offersGive } from './give';
 
 afterEach(() => forgetGiveSupport());
 
@@ -42,5 +42,10 @@ describe('published node capabilities', () => {
     expect(cannotTakeKey({ id: 'old/a', name: 'a', machineId: 'old' } as never)).toBe('give-machine-unsupported');
     noteCapabilities([{ id: 'old', capabilities: ['task.dispatch'] }]);
     expect(offersGive('old'), 'updated').toBe(true);
+    // A refusal an older link gave is forgotten once the current link is known to take tasks.
+    noteRefusal('upgraded', 'protocol.capability_missing', { capability: 'task.dispatch' });
+    expect(offersGive('upgraded')).toBe(false);
+    noteCapabilities([{ id: 'upgraded', capabilities: ['task.dispatch'] }]);
+    expect(offersGive('upgraded')).toBe(true);
   });
 });
