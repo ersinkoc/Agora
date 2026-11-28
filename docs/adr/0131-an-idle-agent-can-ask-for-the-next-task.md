@@ -64,3 +64,53 @@ the hub and repeat the request. Check that a single claim survives and the exist
 recovered with a different request ID. Exercise dependencies, returned reports, an ineligible task,
 an old hub, an offline node, ended and reattached runs, fabricated project details, policy changes and
 skip-permissions modes. Drive a polling burst without delaying terminal input. Append protocol fixtures.
+
+## Amendment A (proposed 2026-11-28, waiting for the maintainer's schema approval): the exact shape
+
+Decision 6 keeps a separate schema approval. Nothing below is built until it is given. Numbers are the next free ones today.
+
+**Capability.** `board.take_next.v1` on the hub/node link (next to `board.subtasks.v1`). The hub answers `task_take_next` only on a link
+that negotiated it; on another link, and from a node that does not offer it, the answer is `protocol.capability_missing`
+(`capability`). An older hub answers an unknown tool as `protocol.invalid_message` (field `tool`); the node reports both as unsupported.
+
+**The tool** (`docs/specs/mesh-tools.md`): `task_take_next {}`. The agent gives no arguments. The node fills the call, never from the
+agent's arguments, and adds two fields to `BoardCall`: `bytes from_run_id = 6` (the calling run's 16-byte id, ADR-0109) and
+`uint64 request_seq = 7` (the node's sequence for that run, from 1). Every other tool leaves them empty and the hub ignores them.
+Results (JSON, as other board tools):
+- `{"outcome":"claimed","request_seq":N,"task":{...}}`: the task as `task_list` shows it, its text untrusted task data as today.
+- `{"outcome":"existing","request_seq":N,"task":{...}}`: the run already holds a claimed task; nothing new is claimed.
+- `{"outcome":"empty","request_seq":N}`: no eligible task now.
+Tool errors (`{"code":..., "data":...}`), each one distinct:
+- `task.pickup_off` (`reason`), new code: the rule does not apply to this caller now. Reasons: `owner_off` (the project's setting is
+  off), `node_policy` (the node's own opt-in is off), `node` or `kind` (not on the owner's allow-list), `review_off`, `not_shared`,
+  `skips_permissions` (the run's launch mode skips permission prompts), `unknown_run` (the node cannot name the run, project or mode).
+- `task.pickup_stale` (`committed_seq`), new code: an older sequence than the one the hub committed for this run; nothing is tried.
+- `rate.limited` (`limit`): more than 1 request per run per second or 20 per project per second.
+- `board.unavailable` (`project_id`): the board is joining, or the node has no hub link. There is no local fallback: the node never
+  runs this tool on its own broker, also when the hub says the project is not shared (that is `task.pickup_off`, `not_shared`).
+- `protocol.capability_missing` (`capability`): unsupported, as above.
+`request_seq` 0 asks only for the hub's committed sequence and outcome for the run (after a node restart or a reattachment of the same
+run) and claims nothing; the node goes on from the committed value.
+
+**Owner settings** (hub-side, unsigned: they widen nothing on a node, which keeps its own opt-in; the unscoped owner's, as ADR-0130's):
+- command 137 `TaskPickupSettingsSet { string project_id = 1; bool enabled = 2; repeated string node_ids = 3; repeated string
+  agent_kinds = 4; }`: at most 32 of each; the lists are the allow-list (empty means nobody).
+- command 138 `TaskPickupSettingsGet { string project_id = 1; }`, result 49 `TaskPickupSettings { string project_id = 1; bool enabled =
+  2; repeated string node_ids = 3; repeated string agent_kinds = 4; bool active = 5; string inactive_reason = 6; }` (`review_off`,
+  `not_shared`).
+- command 139 `TaskPickupEligibleSet { string project_id = 1; string task_id = 2; bool eligible = 3; }`: the owner marks an open task
+  as one the rule may take; answered `Empty`.
+
+**Events** (hub only; a node's is refused):
+- arm 99 `TaskPickupEligible { string project_id = 1; string task_id = 2; bool eligible = 3; }`.
+- arm 100 `TaskPickedUp { string project_id = 1; string task_id = 2; string node_id = 3; string agent_id = 4; bytes run_id = 5;
+  uint64 at_ms = 6; string rule = 7; }` (`rule` is `take_next`): which rule assigned the task, which run took it and when (decision 5).
+- `TaskSnapshot` gains `bool pickup_eligible = 8` and `TaskPickedUp picked_up = 9`, and both are sent after the snapshot when they did
+  not fit in it, as review and parent links are (`task_metadata_overflow`).
+
+**Node policy** (configuration, not schema): `[mesh] take_next = false` by default; the node checks the run, project and launch mode
+before it asks.
+
+**Not schema, stated for the review:** the outcome row (project, run → committed sequence and result) is written in the claim's own
+board transaction and survives a hub restart; a confirmed run end follows the board's claim release rules; a temporary disconnect
+releases nothing.

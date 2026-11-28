@@ -8,9 +8,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
-- **ADR-0130 channel notices, the rest** (the hub and the owner's window are built): members' and agents' reads with access checked per
-  page (the commands are the unscoped owner's for now, so a member's window shows no notices), a channel offered from older Team chat
-  than the window's last 50 messages, and the dispatcher half (decisions 2 and 3).
+- **ADR-0130 channel notices, the rest** (the hub and the owner's window are built): members' reads with access checked per page wait
+  on members seeing the shared board at all (a scoped view holds no board today: its own decision); agents' reads through the board
+  and the dispatcher half (decisions 2 and 3) need their exact messages approved first; a channel offered from older Team chat than the
+  window's last 50 messages.
 - **Machine figures, the rest** (ADR-0136): the phone's view of a machine's figures and of disks running low, and ADR-0064's clean-up
   buttons in the window. On a Mac, `/` and `/System/Volumes/Data` share one APFS container and report the same free space, so one disk
   running low shows twice; decide whether the card or Needs you folds them.

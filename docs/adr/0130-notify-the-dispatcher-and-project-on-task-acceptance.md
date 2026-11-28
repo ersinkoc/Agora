@@ -105,4 +105,8 @@ board's task title as plain text, the project; no dispatcher or reviewer, nothin
 Review-enabled project offers the channel (`BoardNotices.tsx`): Nowhere, or a `#name` the project's own agents wrote to in the window's
 recent messages (`projectChannels`; a copy only a third machine vouches for does not count), the saved channel always kept, `dispatcher`
 sent back as read, changes only while the link is live, and why notices are paused. Tests: `net/notices.test.tsx`. Left: members' and
-agents' reads with access checked per page, and the dispatcher half (decisions 2 and 3).
+agents' reads with access checked per page, and the dispatcher half (decisions 2 and 3). Members' reads wait on board access: every
+member and viewer is scoped to `node/project` grants, and a scoped person's view holds no shared board today (`Scope::filter_view` keeps
+no tasks or Review state; the board's events are not admitted, "no single grant covers it"), so decision 1's "current board access" is
+the owner's alone until members get the board, which is its own decision. Agents' reads and the dispatcher half need their exact
+messages approved, as Amendment A's were.
