@@ -1,0 +1,12 @@
+{
+  "projectId": "x",
+  "enabled": true,
+  "nodeIds": [
+    "x"
+  ],
+  "agentKinds": [
+    "x"
+  ],
+  "active": true,
+  "inactiveReason": "x"
+}

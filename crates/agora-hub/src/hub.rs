@@ -1974,6 +1974,88 @@ impl Hub {
         Ok(s)
     }
 
+    /// ADR-0131: the owner saves a project's automatic-pickup settings. A list that is too long or holds an entry that is not a node id
+    /// or kind is refused (`protocol.invalid_message`, field `node_ids` or `agent_kinds`).
+    pub(crate) fn task_pickup_set(
+        &self,
+        set: &agora_protocol::v1::TaskPickupSettingsSet,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(&set.project_id).into_owned();
+        if project.is_empty() {
+            return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "project_id"));
+        }
+        match crate::task_pickup::set_settings(self.store(), set, &project) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(field)) => {
+                Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field))
+            }
+            Err(_) => Err(Error::new(ErrorCode::Internal).with("incident_id", "task_pickup.set")),
+        }
+    }
+
+    /// ADR-0131: a project's automatic-pickup settings, and whether pickups happen now (`review_off`, `not_shared`).
+    pub(crate) fn task_pickup_get(
+        &self,
+        project_id: &str,
+    ) -> Result<agora_protocol::v1::TaskPickupSettings, agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(project_id).into_owned();
+        let mut s = crate::task_pickup::settings(self.store(), &project)
+            .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "task_pickup.get"))?;
+        let (review, shared) = {
+            let g = self.lock();
+            (
+                g.view.review_projects.contains(&project),
+                crate::board::nodes_with(&g.view, &project).len() >= 2,
+            )
+        };
+        s.active = review && shared && s.enabled;
+        if !review {
+            s.inactive_reason = "review_off".into();
+        } else if !shared {
+            s.inactive_reason = "not_shared".into();
+        }
+        Ok(s)
+    }
+
+    /// ADR-0131: the owner marks an open task of a Review-enabled project as one the rule may take, or clears the mark (any task the
+    /// board holds). The mark is the hub's fact `TaskPickupEligible`; asking for what is already so records nothing.
+    pub(crate) fn task_pickup_eligible_set(
+        &self,
+        req: &agora_protocol::v1::TaskPickupEligibleSet,
+        now_ms: u64,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(&req.project_id).into_owned();
+        let mut g = self.lock();
+        let key = format!("{project}/{}", req.task_id);
+        let Some(task) = g
+            .view
+            .tasks
+            .get(&key)
+            .filter(|_| g.view.review_projects.contains(&project))
+        else {
+            return Err(Error::new(ErrorCode::TaskNotFound).with("task_id", req.task_id.as_str()));
+        };
+        if task.pickup_eligible == req.eligible {
+            return Ok(());
+        }
+        if req.eligible && (task.done || !task.owner.is_empty()) {
+            return Err(Error::new(ErrorCode::TaskNotOpen).with("task_id", req.task_id.as_str()));
+        }
+        self.emit(
+            &mut g,
+            Body::TaskPickupEligible(agora_protocol::v1::TaskPickupEligible {
+                project_id: project,
+                task_id: req.task_id.clone(),
+                eligible: req.eligible,
+            }),
+            now_ms,
+        )
+        .map_err(|_| Error::new(ErrorCode::Internal).with("incident_id", "task_pickup.mark"))
+    }
+
     /// ADR-0130: one page of a project's channel notices (the owner's, in this step).
     pub(crate) fn project_notices_page(
         &self,
@@ -4603,6 +4685,143 @@ mod tests {
         );
         assert_eq!(hints(&hub), 1);
         drop(hub);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ADR-0131 step 1: the owner's pickup settings say why pickups are off, and the owner's mark on an open task is the hub's fact,
+    /// kept by the view (also after a restart), carried by the snapshot, recorded once, and refused on a task that is not open.
+    #[test]
+    fn the_owner_marks_an_open_task_for_pickup_and_the_settings_say_why_it_is_off() {
+        use agora_protocol::ErrorCode;
+        use serde_json::json;
+        use v1::{TaskPickupEligibleSet, TaskPickupSettingsSet};
+        let (hub, path) = hub_on_file("task-pickup");
+        let (_task, _links) = stage_handoff(&hub, Vec::new());
+        let set = TaskPickupSettingsSet {
+            project_id: "p".into(),
+            enabled: true,
+            node_ids: vec!["receiver".into()],
+            agent_kinds: vec!["fake".into()],
+        };
+        assert_eq!(
+            hub.task_pickup_set(&TaskPickupSettingsSet {
+                node_ids: vec!["a/b".into()],
+                ..set.clone()
+            })
+            .unwrap_err()
+            .code,
+            ErrorCode::ProtocolInvalidMessage
+        );
+        hub.task_pickup_set(&set).unwrap();
+        let off = hub.task_pickup_get("p").unwrap();
+        assert_eq!(
+            (off.enabled, off.active, off.inactive_reason.as_str()),
+            (true, false, "review_off")
+        );
+        let task = board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_create",
+            json!({"title":"take me"}),
+        ))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mark = |eligible: bool, task: &str| TaskPickupEligibleSet {
+            project_id: "p".into(),
+            task_id: task.into(),
+            eligible,
+        };
+        assert_eq!(
+            hub.task_pickup_eligible_set(&mark(true, &task), 30)
+                .unwrap_err()
+                .code,
+            ErrorCode::TaskNotFound,
+            "only on a Review-enabled board"
+        );
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(31).unwrap();
+        let on = hub.task_pickup_get("p").unwrap();
+        assert_eq!((on.active, on.inactive_reason.as_str()), (true, ""));
+        assert_eq!(
+            hub.task_pickup_eligible_set(&mark(true, "nope"), 32)
+                .unwrap_err()
+                .code,
+            ErrorCode::TaskNotFound
+        );
+        hub.task_pickup_eligible_set(&mark(true, &task), 33)
+            .unwrap();
+        hub.task_pickup_eligible_set(&mark(true, &task), 34)
+            .unwrap();
+        let marks = |hub: &Hub| {
+            hub.store()
+                .events_after(0, 100_000)
+                .unwrap()
+                .into_iter()
+                .filter_map(|stored| Event::decode(stored.payload.as_slice()).ok())
+                .filter(
+                    |e| matches!(&e.body, Some(Body::TaskPickupEligible(m)) if m.project_id == "p"),
+                )
+                .count()
+        };
+        assert_eq!(
+            marks(&hub),
+            1,
+            "asking for what is already so records nothing"
+        );
+        let key = format!("p/{task}");
+        let (view, pos) = hub.view();
+        assert!(view.tasks[&key].pickup_eligible);
+        let snap = crate::server::snapshot_of(&view, pos);
+        assert!(snap
+            .tasks
+            .iter()
+            .any(|t| t.task_id == task && t.pickup_eligible));
+        // A claimed task cannot be marked; the mark already made stays until the owner clears it.
+        board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_claim",
+            json!({"task_id": task}),
+        ));
+        let other = board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_create",
+            json!({"title":"claimed"}),
+        ))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_claim",
+            json!({"task_id": other}),
+        ));
+        assert_eq!(
+            hub.task_pickup_eligible_set(&mark(true, &other), 35)
+                .unwrap_err()
+                .code,
+            ErrorCode::TaskNotOpen
+        );
+        assert!(
+            hub.view().0.tasks[&key].pickup_eligible,
+            "a claim keeps the mark"
+        );
+        hub.task_pickup_eligible_set(&mark(false, &task), 36)
+            .unwrap();
+        assert!(!hub.view().0.tasks[&key].pickup_eligible);
+        hub.task_pickup_eligible_set(&mark(true, &other), 37)
+            .unwrap_err();
+        drop(hub);
+        let reopened = Hub::open(SqliteStore::open(&path).unwrap()).unwrap();
+        assert!(
+            !reopened.view().0.tasks[&key].pickup_eligible,
+            "the view after a restart is the log's"
+        );
+        assert_eq!(marks(&reopened), 2);
+        drop(reopened);
         let _ = std::fs::remove_file(&path);
     }
 

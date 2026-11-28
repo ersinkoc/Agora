@@ -150,6 +150,10 @@ message CommandRequest {
     ProjectNoticesSettingsSet project_notices_settings_set = 134;
     ProjectNoticesSettingsGet project_notices_settings_get = 135;
     ProjectNoticesPage project_notices_page = 136;
+    // ADR-0131: an idle agent's automatic pickup. Answered by the hub, naming no node; the unscoped owner's.
+    TaskPickupSettingsSet task_pickup_settings_set = 137;
+    TaskPickupSettingsGet task_pickup_settings_get = 138;
+    TaskPickupEligibleSet task_pickup_eligible_set = 139;
   }
 }
 
@@ -226,6 +230,7 @@ message CommandOk {
     TaskAcceptanceNoticeReceipt task_acceptance_notice_receipt = 46; // ADR-0128.
     ProjectNoticesSettings project_notices_settings = 47; // ADR-0130.
     ProjectNoticesPageResult project_notices_page = 48; // ADR-0130.
+    TaskPickupSettings task_pickup_settings = 49; // ADR-0131.
   }
 }
 
@@ -599,6 +604,11 @@ message BoardCall {
   string origin = 4;
   // The calling agent's id on this node (a node can only vouch for its own agents).
   string from_agent = 5;
+  // ADR-0131, `task_take_next` only (ignored for every other tool): the calling run's 16-byte id and the node's request sequence for
+  // that run (from 1; 0 asks only for the hub's committed sequence and outcome). Set by the node, never from the agent's arguments; the
+  // hub keys both by the node of the link, so a node speaks only for its own runs.
+  bytes from_run_id = 6;
+  uint64 request_seq = 7;
 }
 
 // The hub's answer. `shared` is false when the project is not on two or more online nodes: nothing was done and the node
@@ -1233,4 +1243,34 @@ message ProjectNotice {
 message ProjectNoticesPageResult {
   repeated ProjectNotice notices = 1;
   bool more = 2;
+}
+
+// ADR-0131: the owner's automatic-pickup settings of a Review-enabled shared project. `node_ids` and `agent_kinds` are the allow-list
+// (empty: nobody), at most 32 entries each, every entry at most 64 of `[A-Za-z0-9._-]`. Unsigned: a node keeps its own opt-in.
+message TaskPickupSettingsSet {
+  string project_id = 1;
+  bool enabled = 2;
+  repeated string node_ids = 3;
+  repeated string agent_kinds = 4;
+}
+
+message TaskPickupSettingsGet {
+  string project_id = 1;
+}
+
+// ADR-0131: a project's pickup settings, and whether pickups happen now (`inactive_reason`: `review_off`, `not_shared`).
+message TaskPickupSettings {
+  string project_id = 1;
+  bool enabled = 2;
+  repeated string node_ids = 3;
+  repeated string agent_kinds = 4;
+  bool active = 5;
+  string inactive_reason = 6;
+}
+
+// ADR-0131: the owner marks an open task as one the rule may take (or clears the mark). The mark stays until cleared.
+message TaskPickupEligibleSet {
+  string project_id = 1;
+  string task_id = 2;
+  bool eligible = 3;
 }

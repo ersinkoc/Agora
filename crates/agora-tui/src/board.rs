@@ -903,6 +903,7 @@ mod tests {
             done,
             review: None,
             parent_task_id: None,
+            ..Default::default()
         }
     }
 

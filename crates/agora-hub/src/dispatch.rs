@@ -52,6 +52,9 @@ pub enum Route {
     ProjectNoticesSettingsSet(v1::ProjectNoticesSettingsSet),
     ProjectNoticesSettingsGet(v1::ProjectNoticesSettingsGet),
     ProjectNoticesPage(v1::ProjectNoticesPage),
+    TaskPickupSettingsSet(v1::TaskPickupSettingsSet),
+    TaskPickupSettingsGet(v1::TaskPickupSettingsGet),
+    TaskPickupEligibleSet(v1::TaskPickupEligibleSet),
     /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
     ThemeCatalogList,
     ThemeCatalogGet {
@@ -93,6 +96,11 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
             && (!matches!(
                 c,
                 C::ProjectNoticesSettingsSet(_) | C::ProjectNoticesSettingsGet(_) | C::ProjectNoticesPage(_)
+            ) || (who.role == Role::Owner && who.projects.is_none()))
+            // ADR-0131: the automatic-pickup settings and marks are the unscoped owner's.
+            && (!matches!(
+                c,
+                C::TaskPickupSettingsSet(_) | C::TaskPickupSettingsGet(_) | C::TaskPickupEligibleSet(_)
             ) || (who.role == Role::Owner && who.projects.is_none()))
             // ADR-0122: a shared item reaches every agent on every machine: the owner's alone (a node asks on its own connection).
             && (!matches!(c, C::ShareItemPublish(_) | C::ShareItemRemove(_) | C::ShareItemList(_)) || who.role == Role::Owner)
@@ -137,6 +145,12 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
         Some(C::ProjectNoticesSettingsSet(c)) => Route::ProjectNoticesSettingsSet(c.clone()),
         Some(C::ProjectNoticesSettingsGet(c)) => Route::ProjectNoticesSettingsGet(c.clone()),
         Some(C::ProjectNoticesPage(c)) => Route::ProjectNoticesPage(c.clone()),
+        Some(
+            C::TaskPickupSettingsSet(_) | C::TaskPickupSettingsGet(_) | C::TaskPickupEligibleSet(_),
+        ) if names_a_node => Route::TargetNotAllowed,
+        Some(C::TaskPickupSettingsSet(c)) => Route::TaskPickupSettingsSet(c.clone()),
+        Some(C::TaskPickupSettingsGet(c)) => Route::TaskPickupSettingsGet(c.clone()),
+        Some(C::TaskPickupEligibleSet(c)) => Route::TaskPickupEligibleSet(c.clone()),
         Some(C::TaskReviewDecide(decision)) => Route::TaskReviewDecide(decision.clone()),
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
@@ -376,6 +390,16 @@ mod tests {
                 v1::ProjectNoticesSettingsGet::default(),
             )),
             command(C::ProjectNoticesPage(v1::ProjectNoticesPage::default())),
+            // ADR-0131: the pickup settings and marks are the same.
+            command(C::TaskPickupSettingsSet(
+                v1::TaskPickupSettingsSet::default(),
+            )),
+            command(C::TaskPickupSettingsGet(
+                v1::TaskPickupSettingsGet::default(),
+            )),
+            command(C::TaskPickupEligibleSet(
+                v1::TaskPickupEligibleSet::default(),
+            )),
         ];
         let mut owner = who(Role::Owner);
         owner.projects = None;
@@ -385,6 +409,9 @@ mod tests {
                 Route::ProjectNoticesSettingsSet(_)
                     | Route::ProjectNoticesSettingsGet(_)
                     | Route::ProjectNoticesPage(_)
+                    | Route::TaskPickupSettingsSet(_)
+                    | Route::TaskPickupSettingsGet(_)
+                    | Route::TaskPickupEligibleSet(_)
             ));
             let mut aimed = c.clone();
             aimed.target_node = "n".into();

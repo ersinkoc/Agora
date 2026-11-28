@@ -422,7 +422,10 @@ impl Scope {
             | Body::TaskReviewEnabled(_)
             | Body::TaskParentLinked(_)
             // ADR-0130: the owner's notices for now (a member's read with its access checked per page is a later step).
-            | Body::ProjectNoticesChanged(_) => false,
+            | Body::ProjectNoticesChanged(_)
+            // ADR-0131: the board's pickup facts name a node, an agent and a run; the owner's, as the rest of the board.
+            | Body::TaskPickupEligible(_)
+            | Body::TaskPickedUp(_) => false,
             // ADR-0122: shared items are the owner's (they reach every agent on every machine).
             Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.

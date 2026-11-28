@@ -958,6 +958,8 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 done: t.done,
                 review: None,
                 parent_task_id: None,
+                pickup_eligible: false,
+                picked_up: None,
             })
             .collect(),
         leases: view
@@ -1000,6 +1002,24 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
             if size <= remaining {
                 remaining -= size;
                 task.parent_task_id = Some(parent.clone());
+            }
+        }
+        // ADR-0131: the pickup mark and the last pickup, when they fit (else sent after the snapshot).
+        if let Some(t) = view.tasks.get(&key) {
+            if t.pickup_eligible {
+                // A bool is its key and one byte, as a field with an empty payload is.
+                let size = task_field_size(task, 8, 0);
+                if size <= remaining {
+                    remaining -= size;
+                    task.pickup_eligible = true;
+                }
+            }
+            if let Some(picked) = &t.picked_up {
+                let size = task_field_size(task, 9, picked.encoded_len());
+                if size <= remaining {
+                    remaining -= size;
+                    task.picked_up = Some(picked.clone());
+                }
             }
         }
     }
@@ -1565,6 +1585,29 @@ where
                 Err(e) => refuse(e),
             })
         }
+        crate::dispatch::Route::TaskPickupSettingsSet(req) => {
+            Some(match hub.task_pickup_set(&req) {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::TaskPickupSettingsGet(req) => {
+            Some(match hub.task_pickup_get(&req.project_id) {
+                Ok(settings) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::TaskPickupSettings(settings)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::TaskPickupEligibleSet(req) => {
+            Some(match hub.task_pickup_eligible_set(&req, now_ms()) {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
         crate::dispatch::Route::ShareList { with_content } => Some(
             match crate::shares::Shares::new(hub.store()).list(with_content) {
                 Ok(items) => v1::CommandResponse {
@@ -1836,6 +1879,20 @@ fn task_metadata_overflow(view: &View, snapshot: &v1::Snapshot) -> Vec<v1::event
                     task_id: task.task_id.clone(),
                     review: Some(review.clone()),
                 }));
+            }
+        }
+        if let Some(t) = view.tasks.get(&key) {
+            if t.pickup_eligible && !task.pickup_eligible {
+                omitted.push(Body::TaskPickupEligible(v1::TaskPickupEligible {
+                    project_id: task.project_id.clone(),
+                    task_id: task.task_id.clone(),
+                    eligible: true,
+                }));
+            }
+            if task.picked_up.is_none() {
+                if let Some(picked) = &t.picked_up {
+                    omitted.push(Body::TaskPickedUp(picked.clone()));
+                }
             }
         }
         if task.parent_task_id.is_none() {
@@ -4173,6 +4230,7 @@ mod event_writer_tests {
                 project_id: "p".into(),
                 tool: tool.into(),
                 arguments_json: args.to_string(),
+                ..Default::default()
             };
             match hub.board_call(node, &call, 2000).verdict {
                 crate::board::Verdict::Done { result, is_error } => {
@@ -4212,6 +4270,7 @@ mod event_writer_tests {
                     "refs": []
                 })
                 .to_string(),
+                ..Default::default()
             })),
         };
         alpha

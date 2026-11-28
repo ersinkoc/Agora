@@ -65,9 +65,9 @@ recovered with a different request ID. Exercise dependencies, returned reports, 
 an old hub, an offline node, ended and reattached runs, fabricated project details, policy changes and
 skip-permissions modes. Drive a polling burst without delaying terminal input. Append protocol fixtures.
 
-## Amendment A (proposed 2026-11-28, waiting for the maintainer's schema approval): the exact shape
+## Amendment A (2026-11-28, schema approved by the maintainer in chat): the exact shape
 
-Decision 6 keeps a separate schema approval. Nothing below is built until it is given. Numbers are the next free ones today.
+Decision 6's separate schema approval was given on 2026-11-28 for this shape as it stood at 77625e20.
 
 **Capability.** `board.take_next.v1` on the hub/node link (next to `board.subtasks.v1`). The hub answers `task_take_next` only on a link
 that negotiated it; on another link, and from a node that does not offer it, the answer is `protocol.capability_missing`
@@ -131,3 +131,17 @@ before it asks.
 **Not schema, stated for the review:** the outcome row (project, run → committed sequence and result) is written in the claim's own
 board transaction and survives a hub restart; a confirmed run end follows the board's claim release rules; a temporary disconnect
 releases nothing.
+
+## Status of the build
+
+Step 1, the schema and the owner's part at the hub: built (2026-11-28). Schema (Amendment A's messages and fields, fixtures,
+`agora-protocol/tests/task_pickup.rs`; the capability constant `BOARD_TAKE_NEXT_V1`, offered by nobody yet; error codes
+`task.pickup_off` and `task.pickup_stale`). `crates/agora-hub/src/task_pickup.rs`: the owner's settings (lists checked, sorted, at most
+32 entries of 1 to 64 `[A-Za-z0-9._-]`), read with `active` and `inactive_reason`. `Hub::task_pickup_eligible_set`: the mark on an open
+task of a Review-enabled board as the hub's `TaskPickupEligible` (nothing recorded when already so; a claimed or done task cannot be
+marked; a mark stays through a claim until cleared), kept by the view and carried by `TaskSnapshot.pickup_eligible` or sent after the
+snapshot; `TaskPickedUp` is folded the same way (no rule writes one yet). The three commands are the unscoped owner's (`dispatch.rs`);
+the facts are owner-only (`scope.rs`) and a node's are refused (`projection.rs`). Tests: `task_pickup.rs`'s own,
+`the_owner_marks_an_open_task_for_pickup_and_the_settings_say_why_it_is_off`, `channel_notice_commands_are_the_owners_at_the_hub`.
+Left: the hub's `task_take_next` (the run bound to the link's node, the outcome row in the claim's transaction, the limits), the node's
+side (`[mesh] take_next`, run, mode, sequence, no local fallback) and the window (settings form, the mark on a card, the pickup's source).

@@ -148,4 +148,6 @@ plugin-catalog_off = Bu hub'da topluluk eklenti kataloğu kapalı. Sahibi agora 
 settings-too_large = Temalarınız Agora'nızda saklanamayacak kadar büyük (en fazla { $max } bayt). Bu tarayıcıda kalıyorlar.
 rate-limited = Bir dakikada çok fazla değişiklik (en fazla { $limit }). Hiçbir şey değişmedi; biraz bekleyip yeniden deneyin.
 settings-stale = Temalarınız az önce başka bir cihazda değişti (sürüm { $version }). Birleştirilip yeniden kaydedilecek.
+task-pickup_off = Otomatik görev alma şu an bu ajan için geçerli değil ({ $reason }). Hiçbir görev alınmadı.
+task-pickup_stale = Bu istek, hub'ın bu ajan için tuttuğu son istekten eski (numara { $committed_seq }). Hiçbir şey denenmedi.
 internal = Bir şeyler ters gitti. Olay numarası: { $incident_id }.

@@ -1,0 +1,1 @@
+- The hub keeps the owner's automatic-pickup settings per project and the owner's mark on tasks an idle agent may take, the first step of ADR-0131; agents take tasks in a later step.

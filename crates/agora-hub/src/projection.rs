@@ -247,6 +247,9 @@ pub struct TaskView {
     pub owner: String,
     pub done: bool,
     pub(crate) parent_task_id: Option<String>,
+    /// ADR-0131: the owner marked the task for automatic pickup (kept until cleared), and the last pickup a rule made of it.
+    pub(crate) pickup_eligible: bool,
+    pub(crate) picked_up: Option<agora_protocol::v1::TaskPickedUp>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -546,6 +549,8 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         Body::TaskReviewChanged(_) => return Err("task_review_changed"),
         Body::TaskReviewEnabled(_) => return Err("task_review_enabled"),
         Body::ProjectNoticesChanged(_) => return Err("project_notices_changed"),
+        Body::TaskPickupEligible(_) => return Err("task_pickup_eligible"),
+        Body::TaskPickedUp(_) => return Err("task_picked_up"),
         Body::TaskParentLinked(_) => return Err("task_parent_linked"),
         // ADR-0122: the hub's word on a shared item; a node speaks only for itself when it refuses one.
         Body::ShareItemChanged(_) => return Err("share_item_changed"),
@@ -1454,6 +1459,18 @@ impl View {
                 }
             }
             Body::TaskParentLinked(_) => {}
+            // ADR-0131: the hub's word only.
+            Body::TaskPickupEligible(e) if producer == RESERVED_HUB_ID => {
+                if let Some(task) = self.tasks.get_mut(&format!("{}/{}", e.project_id, e.task_id)) {
+                    task.pickup_eligible = e.eligible;
+                }
+            }
+            Body::TaskPickedUp(e) if producer == RESERVED_HUB_ID => {
+                if let Some(task) = self.tasks.get_mut(&format!("{}/{}", e.project_id, e.task_id)) {
+                    task.picked_up = Some(e.clone());
+                }
+            }
+            Body::TaskPickupEligible(_) | Body::TaskPickedUp(_) => {}
             Body::TaskChanged(t) => {
                 // The hub's own events (the shared board) already carry `<node>/<agent>`; a node's carry its local ids.
                 let owner = match (
@@ -1482,6 +1499,8 @@ impl View {
                         owner,
                         done: t.done,
                         parent_task_id: self.tasks.get(&key).and_then(|task| task.parent_task_id.clone()),
+                        pickup_eligible: self.tasks.get(&key).is_some_and(|task| task.pickup_eligible),
+                        picked_up: self.tasks.get(&key).and_then(|task| task.picked_up.clone()),
                     },
                 );
             }

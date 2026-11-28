@@ -149,4 +149,6 @@ plugin-catalog_off = The community plugin catalog is off on this hub. Its owner 
 settings-too_large = Your themes are too large to keep in your Agora (at most { $max } bytes). They stay in this browser.
 rate-limited = Too many changes in a minute (at most { $limit }). Nothing changed; wait a moment and try again.
 settings-stale = Your themes changed on another device just now (version { $version }). They will be merged and saved again.
+task-pickup_off = Automatic pickup does not apply to this agent now ({ $reason }). Nothing was claimed.
+task-pickup_stale = This request is older than the last one the hub kept for this agent (number { $committed_seq }). Nothing was tried.
 internal = Something went wrong. Reference: { $incident_id }.

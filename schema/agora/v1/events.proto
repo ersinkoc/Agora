@@ -83,6 +83,9 @@ message Event {
     NodeCapabilitiesChanged node_capabilities_changed = 97;
     // ADR-0130, hub only: a project's channel notices changed; a window entitled to the project reads them again (no content here).
     ProjectNoticesChanged project_notices_changed = 98;
+    // ADR-0131, hub only: an open task marked (or no longer marked) for automatic pickup, and a pickup made by the rule.
+    TaskPickupEligible task_pickup_eligible = 99;
+    TaskPickedUp task_picked_up = 100;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -163,6 +166,24 @@ message NodeResources {
   repeated DiskUsage disks = 9;
   // The size of the workspaces the node made (ADR-0064).
   uint64 workspaces_bytes = 10;
+}
+
+// ADR-0131: whether the owner marked a task for automatic pickup.
+message TaskPickupEligible {
+  string project_id = 1;
+  string task_id = 2;
+  bool eligible = 3;
+}
+
+// ADR-0131: which rule assigned a task (`rule`: `take_next`), which run of which agent on which node took it, and when.
+message TaskPickedUp {
+  string project_id = 1;
+  string task_id = 2;
+  string node_id = 3;
+  string agent_id = 4;
+  bytes run_id = 5;
+  uint64 at_ms = 6;
+  string rule = 7;
 }
 
 // ADR-0130: a content-free hint that a project's accepted-task notices changed (`ProjectNoticesPage` reads them).

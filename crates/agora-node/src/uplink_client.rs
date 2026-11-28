@@ -887,6 +887,9 @@ where
                                 arguments_json,
                                 origin: String::new(),
                                 from_agent,
+                                // ADR-0131: only `task_take_next` carries the run and sequence (a later step).
+                                from_run_id: Vec::new(),
+                                request_seq: 0,
                             })
                         }
                         None => command_request::Command::MeshPost(agora_protocol::v1::MeshPost {

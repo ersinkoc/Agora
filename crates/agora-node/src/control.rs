@@ -2379,6 +2379,9 @@ pub(crate) fn command_name(c: &Cmd) -> &'static str {
         Cmd::ProjectNoticesSettingsSet(_) => "project_notices.settings_set",
         Cmd::ProjectNoticesSettingsGet(_) => "project_notices.settings_get",
         Cmd::ProjectNoticesPage(_) => "project_notices.page",
+        Cmd::TaskPickupSettingsSet(_) => "task_pickup.settings_set",
+        Cmd::TaskPickupSettingsGet(_) => "task_pickup.settings_get",
+        Cmd::TaskPickupEligibleSet(_) => "task_pickup.eligible_set",
     }
 }
 

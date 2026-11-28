@@ -150,6 +150,10 @@ pub enum ErrorCode {
     /// ADR-0113 step 4 and ADR-0114: this person made more writes of this kind (their settings value, their plugin grants) than the hub
     /// takes in a minute (`limit`); nothing changed.
     RateLimited,
+    /// ADR-0131: automatic pickup does not apply to this caller now (`reason`: who said it and why).
+    TaskPickupOff,
+    /// ADR-0131: an older request sequence than the one the hub committed for the run (`committed_seq`); nothing was tried.
+    TaskPickupStale,
     Internal,
     /// A code this build does not know (sent by a newer peer).
     Unknown(String),
@@ -274,6 +278,8 @@ impl ErrorCode {
         ErrorCode::SettingsTooLarge,
         ErrorCode::SettingsStale,
         ErrorCode::RateLimited,
+        ErrorCode::TaskPickupOff,
+        ErrorCode::TaskPickupStale,
         ErrorCode::Internal,
     ];
 
@@ -395,6 +401,8 @@ impl ErrorCode {
             ErrorCode::SettingsTooLarge => "settings.too_large",
             ErrorCode::SettingsStale => "settings.stale",
             ErrorCode::RateLimited => "rate.limited",
+            ErrorCode::TaskPickupOff => "task.pickup_off",
+            ErrorCode::TaskPickupStale => "task.pickup_stale",
             ErrorCode::Internal => "internal",
             ErrorCode::Unknown(s) => s,
         }
@@ -526,6 +534,8 @@ impl ErrorCode {
             ErrorCode::SettingsTooLarge => &["max"],
             ErrorCode::SettingsStale => &["version"],
             ErrorCode::RateLimited => &["limit"],
+            ErrorCode::TaskPickupOff => &["reason"],
+            ErrorCode::TaskPickupStale => &["committed_seq"],
             ErrorCode::Internal => &["incident_id"],
             ErrorCode::Unknown(_) => &[],
         }

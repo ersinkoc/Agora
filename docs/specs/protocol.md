@@ -207,6 +207,17 @@ notices when it connects and again from the start after each hint (at most four 
 the channel on the project's board card from the `#name`s that project's agents wrote to in its recent messages (the saved one always
 kept); a refusal stops its reads until the next connection.
 
+Automatic pickup (ADR-0131 Amendment A): `TaskPickupSettingsSet` / `TaskPickupSettingsGet` (commands 137, 138; result 49
+`TaskPickupSettings`) save and read the owner's pickup settings of a project (`enabled`, the allow-lists `node_ids` and `agent_kinds`:
+at most 32 entries each, every entry 1 to 64 of `[A-Za-z0-9._-]`, else `protocol.invalid_message` naming the list); the read says
+`active` and, when not, `inactive_reason` (`review_off`, `not_shared`). `TaskPickupEligibleSet` (139) marks an open task of a
+Review-enabled board for pickup or clears the mark (`task.not_found` for a task the board does not hold or a board without Review,
+`task.not_open` to mark a claimed or done task); the hub records `TaskPickupEligible` (event arm 99, hub only) when the mark changes, and
+`TaskPickedUp` (arm 100, hub only) when a rule takes a task; `TaskSnapshot.pickup_eligible` (8) and `picked_up` (9) carry them, or they
+follow the snapshot as review states do. The three commands are the unscoped owner's and the facts reach unscoped windows only.
+`BoardCall.from_run_id` (6) and `request_seq` (7) and the capability `board.take_next.v1` belong to the `task_take_next` tool, which no
+hub or node offers yet.
+
 Published capabilities (ADR-0132): right after a link's `NodeLink { up }` the hub records `NodeCapabilitiesChanged { node_id, generation,
 capabilities }` (event arm 97, producer `hub` only; a node that sends one is refused, field `node_capabilities_changed`): the
 capabilities that link negotiated, of the hub's published list (`task.dispatch` for now), sorted, at most 16. A reader keeps it only
