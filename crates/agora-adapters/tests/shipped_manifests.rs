@@ -63,12 +63,14 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
             // A screen is replayed on the terminal size it was captured on: `<name>@<cols>x<rows>.screen`, or 120x40 without one.
             let mut term = AlacrittyTerminal::new(screen_size(&f));
             term.feed(&std::fs::read(&f).unwrap());
-            let got = detector.detect(&term).map_or_else(
-                || "none".to_string(),
-                |d| format!("{:?} {}", d.state, d.rule_id),
-            );
-            // `agora agent explain` decides exactly as detection does, and every rule it lists before the decision failed.
+            // `agora agent explain` decides exactly as detection does, and every rule it lists before the decision failed. A screen a
+            // hold rule stops at (ADR-0117) expects `hold <rule id>`.
             let why = detector.explain(&term);
+            let got = match (detector.detect(&term), &why.held) {
+                (Some(d), _) => format!("{:?} {}", d.state, d.rule_id),
+                (None, Some(id)) => format!("hold {id}"),
+                (None, None) => "none".to_string(),
+            };
             assert_eq!(why.decided, detector.detect(&term), "{}", f.display());
             let first = why
                 .checks
@@ -76,7 +78,10 @@ fn every_shipped_manifest_loads_and_its_captured_screens_produce_the_expected_st
                 .position(|c| c.outcome == RuleOutcome::Matched);
             assert_eq!(
                 first.map(|i| why.checks[i].id.clone()),
-                why.decided.as_ref().map(|d| d.rule_id.clone()),
+                why.decided
+                    .as_ref()
+                    .map(|d| d.rule_id.clone())
+                    .or_else(|| why.held.clone()),
                 "{}",
                 f.display()
             );

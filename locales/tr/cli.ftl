@@ -937,6 +937,7 @@ cli-explain-rule-any-missing = hayır   { $id } → { $state } (öncelik { $prio
 cli-explain-rule-not-present = hayır   { $id } → { $state } (öncelik { $priority }, { $region }): not[{ $index }] ekranda var
 cli-explain-decided = Karar: { $state }, { $id } kuralıyla (en yüksek öncelikten başlayarak ilk eşleşen).
 cli-explain-undecided = Karar: yok. Hiçbir kural eşleşmedi; node ajanın önceki durumunu korur.
+cli-explain-held = Karar: { $id } kuralı durumu koruyor. Node ajanın durumunu olduğu gibi bırakır ve bu ekrana bir şey yazmaz.
 cli-explain-note = Bunlar yalnızca ekran kurallarıdır. Ajanın kendisinin bildirdiği durum (kancaları, ACP ya da adaptör üzerinden) bunlardan önce gelir.
 cli-explain-no-rules = { $kind } türünün ekran kuralı yok, bu yüzden ekranından durum okunmaz ve burada açıklanacak bir şey yok. Ajanın bildirdiği durum ya da node'un kendi verdiği durum (çıkınca bitti gibi) bu raporun dışındadır.
 cli-explain-unknown-kind = Burada "{ $kind }" adlı bir ajan türü yok. Çalışan bir node'un sunduğu türleri "agora agent kinds" listeler.

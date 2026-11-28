@@ -165,6 +165,8 @@ impl Matcher {
 struct CompiledRule {
     id: String,
     state: AgentState,
+    /// ADR-0117: a hold rule (its `state` is `Unknown` and never reported).
+    hold: bool,
     priority: i32,
     region: Region,
     own: Option<Matcher>,
@@ -222,6 +224,8 @@ pub enum RuleOutcome {
 pub struct RuleCheck {
     pub id: String,
     pub state: AgentState,
+    /// ADR-0117: a hold rule (`state` is then `Unknown`).
+    pub hold: bool,
     pub priority: i32,
     pub region: Region,
     pub outcome: RuleOutcome,
@@ -235,6 +239,8 @@ pub struct Explanation {
     /// Each region the rules read, once, in the order first read, with its text.
     pub regions: Vec<(Region, String)>,
     pub decided: Option<Detection>,
+    /// ADR-0117: the hold rule detection stopped at (then `decided` is `None` and the state stays as it is).
+    pub held: Option<String>,
 }
 
 fn state_of(s: RuleState) -> AgentState {
@@ -243,6 +249,7 @@ fn state_of(s: RuleState) -> AgentState {
         RuleState::Blocked => AgentState::Blocked,
         RuleState::Idle => AgentState::Idle,
         RuleState::Done => AgentState::Done,
+        RuleState::Hold => AgentState::Unknown,
     }
 }
 
@@ -292,8 +299,9 @@ impl Detector {
             .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
     }
 
-    /// The state the highest-priority matching rule reports, or `None` when no rule matches (the caller keeps
-    /// the previous state or falls back to `Unknown`). Region text is built once per distinct region.
+    /// The state the highest-priority matching rule reports, or `None` when no rule matches or the first match is a hold rule (ADR-0117:
+    /// the caller keeps the previous state, drops a pending change, and treats the screen as not ready for typing). Region text is
+    /// built once per distinct region.
     pub fn detect(&self, term: &dyn Terminal) -> Option<Detection> {
         let mut cache: Vec<(Region, RegionText)> = Vec::new();
         for rule in &self.rules {
@@ -305,6 +313,9 @@ impl Detector {
                 }
             };
             if rule.matches(&cache[idx].1) {
+                if rule.hold {
+                    return None;
+                }
                 return Some(Detection {
                     state: rule.state,
                     rule_id: rule.id.clone(),
@@ -322,6 +333,7 @@ impl Detector {
         let mut regions: Vec<(Region, RegionText)> = Vec::new();
         let mut checks = Vec::with_capacity(self.rules.len());
         let mut decided = None;
+        let mut held = None;
         for rule in &self.rules {
             let idx = match regions.iter().position(|(r, _)| *r == rule.region) {
                 Some(i) => i,
@@ -331,15 +343,20 @@ impl Detector {
                 }
             };
             let outcome = rule.outcome(&regions[idx].1);
-            if outcome == RuleOutcome::Matched && decided.is_none() {
-                decided = Some(Detection {
-                    state: rule.state,
-                    rule_id: rule.id.clone(),
-                });
+            if outcome == RuleOutcome::Matched && decided.is_none() && held.is_none() {
+                if rule.hold {
+                    held = Some(rule.id.clone());
+                } else {
+                    decided = Some(Detection {
+                        state: rule.state,
+                        rule_id: rule.id.clone(),
+                    });
+                }
             }
             checks.push(RuleCheck {
                 id: rule.id.clone(),
                 state: rule.state,
+                hold: rule.hold,
                 priority: rule.priority,
                 region: rule.region,
                 outcome,
@@ -349,6 +366,7 @@ impl Detector {
             checks,
             regions: regions.into_iter().map(|(r, t)| (r, t.raw)).collect(),
             decided,
+            held,
         }
     }
 }
@@ -358,6 +376,7 @@ fn compile_rule(r: &Rule) -> Option<CompiledRule> {
     Some(CompiledRule {
         id: r.id.clone(),
         state: state_of(r.state),
+        hold: r.state == RuleState::Hold,
         priority: r.priority,
         region: Region::parse(&r.region)?,
         own: if r.contains.is_some() || r.regex.is_some() {

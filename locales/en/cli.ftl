@@ -954,6 +954,7 @@ cli-explain-rule-any-missing = no      { $id } → { $state } (priority { $prior
 cli-explain-rule-not-present = no      { $id } → { $state } (priority { $priority }, { $region }): not[{ $index }] is there
 cli-explain-decided = Decision: { $state }, by rule { $id } (the first match, highest priority first).
 cli-explain-undecided = Decision: none. No rule matched, so the node keeps the agent's previous state.
+cli-explain-held = Decision: held by rule { $id }. The node keeps the agent's state as it is and types nothing into this screen.
 cli-explain-note = These are the screen rules only. A state the agent reports itself (through its hooks, ACP or an adapter) wins over them.
 cli-explain-no-rules = { $kind } has no screen rules, so no state is read from its screen and there is nothing to explain here. A state the agent reports, or the node's own (such as done when it exits), is outside this report.
 cli-explain-unknown-kind = There is no agent kind "{ $kind }" here. "agora agent kinds" lists the kinds a running node offers.

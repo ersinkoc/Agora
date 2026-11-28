@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, HashSet};
 use serde::Deserialize;
 
 /// Highest manifest `min_engine` this engine can run. 2: `[[launch.option]]` (ADR-0059). 3: `[[launch.setting]]` (ADR-0066). 4: `[accounts] credential_env` (ADR-0084). 5: `[quota]` (ADR-0091).
-/// 6: `[structured] allow_always` (ADR-0101).
-pub const ENGINE_VERSION: u32 = 7;
+/// 6: `[structured] allow_always` (ADR-0101). 7: `[mcp] shared_flag` (ADR-0122). 8: `state = "hold"` rules (ADR-0117).
+pub const ENGINE_VERSION: u32 = 8;
 
 /// Longest stable agent-kind id. Kinds are ASCII, so this is both bytes and characters.
 pub const MAX_KIND_BYTES: usize = 64;
@@ -54,6 +54,9 @@ pub enum RuleState {
     Blocked,
     Idle,
     Done,
+    /// ADR-0117 decision 2 (engine 8): when this is the highest-priority matching rule, detection stops and the state stays as it is
+    /// (a transcript viewer, a model picker: a full-screen view whose old text lower rules would read).
+    Hold,
 }
 
 /// One condition on a region's text.
@@ -937,6 +940,21 @@ impl Manifest {
                 return Err(invalid("session"));
             }
         }
+        // ADR-0117 decision 2: a hold rule needs engine 8, and never outranks a blocked rule (a permission question drawn over a viewer
+        // must still read as blocked).
+        let lowest_blocked = self
+            .rules
+            .iter()
+            .filter(|r| r.state == RuleState::Blocked)
+            .map(|r| r.priority)
+            .min();
+        for (i, r) in self.rules.iter().enumerate() {
+            if r.state == RuleState::Hold
+                && (self.min_engine < 8 || lowest_blocked.is_some_and(|b| r.priority >= b))
+            {
+                return Err(invalid(format!("rules[{i}].state")));
+            }
+        }
         for (name, list) in [("ready", &self.ready), ("typed", &self.typed)] {
             for (i, r) in list.iter().enumerate() {
                 if r.state != RuleState::Idle {
@@ -1268,13 +1286,14 @@ mod launch_tests {
 
     #[test]
     fn a_manifest_newer_than_this_engine_is_refused() {
-        let src = with(SKIP).replace("min_engine = 2", "min_engine = 8");
+        let newer = ENGINE_VERSION + 1;
+        let src = with(SKIP).replace("min_engine = 2", &format!("min_engine = {newer}"));
         assert!(matches!(
             Manifest::parse(&src),
             Err(ManifestError::EngineTooOld {
-                required: 8,
+                required,
                 supported: ENGINE_VERSION
-            })
+            }) if required == newer
         ));
     }
 

@@ -491,3 +491,50 @@ contains = "ready"
     assert_eq!(why.regions[1].1, "busy done");
     assert_eq!(why.regions[0].0.name(), "bottom_lines(4)");
 }
+
+/// ADR-0117 decision 2: a hold rule that matches first stops detection there (the state stays as it is), even when a lower rule would
+/// match old text; a blocked rule above it still wins; `explain` names it. A manifest needs engine 8 for it, and a hold at or above a
+/// blocked rule is refused.
+#[test]
+fn a_hold_rule_stops_detection_below_every_blocked_rule() {
+    let manifest = |min_engine: u32, hold_priority: i32| {
+        format!(
+            "kind = \"k\"\ndisplay_name = \"K\"\nversion = \"1\"\nmin_engine = {min_engine}\n[process]\nlaunch = [\"k\"]\n\
+             [[rules]]\nid = \"ask\"\nstate = \"blocked\"\npriority = 900\nregion = \"bottom_lines(5)\"\ncontains = \"Allow?\"\n\
+             [[rules]]\nid = \"viewer\"\nstate = \"hold\"\npriority = {hold_priority}\nregion = \"bottom_lines(5)\"\ncontains = \"TRANSCRIPT\"\n\
+             [[rules]]\nid = \"busy\"\nstate = \"working\"\npriority = 800\nregion = \"bottom_lines(5)\"\ncontains = \"esc to interrupt\"\n"
+        )
+    };
+    assert!(
+        Manifest::parse(&manifest(7, 850)).is_err(),
+        "needs engine 8"
+    );
+    assert!(
+        Manifest::parse(&manifest(8, 900)).is_err(),
+        "at a blocked rule's priority"
+    );
+    assert!(
+        Manifest::parse(&manifest(8, 950)).is_err(),
+        "above a blocked rule"
+    );
+    let m = Manifest::parse(&manifest(8, 850)).unwrap();
+    let d = Detector::new(&m);
+    // A transcript viewer showing old "esc to interrupt" text: held, not working.
+    let viewer = term_with(b"TRANSCRIPT\r\nold line: esc to interrupt");
+    assert_eq!(d.detect(&viewer), None);
+    let why = d.explain(&viewer);
+    assert_eq!(
+        (why.decided.clone(), why.held.as_deref()),
+        (None, Some("viewer"))
+    );
+    assert!(why.checks.iter().any(|c| c.id == "viewer" && c.hold));
+    // A permission question drawn over the viewer: blocked.
+    let asked = term_with(b"TRANSCRIPT\r\nAllow? (y/n)");
+    assert_eq!(d.detect(&asked).map(|x| x.state), Some(AgentState::Blocked));
+    // Without the viewer, the working rule reads as before.
+    let busy = term_with(b"working... esc to interrupt");
+    assert_eq!(d.detect(&busy).map(|x| x.state), Some(AgentState::Working));
+    // Hold is not allowed where a prompt is typed.
+    let ready = format!("{}[[ready]]\nid = \"r\"\nstate = \"hold\"\npriority = 1\nregion = \"bottom_lines(1)\"\ncontains = \"> \"\n", manifest(8, 850));
+    assert!(Manifest::parse(&ready).is_err());
+}

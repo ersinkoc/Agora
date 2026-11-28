@@ -208,6 +208,7 @@ Engine details (`agora-adapters`):
   padded phrase, one word included, is still found when it wraps or stands at the start or end of the region.
 - Regexes match per line (`^`/`$` are line anchors), use a linear-time engine (no catastrophic backtracking),
   and are size-limited.
+- `state = "hold"` (ADR-0117 decision 2, `min_engine = 8`): when a hold rule is the highest-priority matching rule, detection stops there and the state stays as it is (the node keeps the state, drops a change the timing gate was confirming, and types nothing into that screen). It is for a full-screen view (a transcript viewer, a picker) whose old text lower rules would read. A hold rule must rank below every `blocked` rule of the manifest (a permission question drawn over the view still reads as blocked), and is not allowed in `[[ready]]` or `[[typed]]`. `agora agent explain` says "held by rule X"; a fixture expecting it says `hold <rule id>`.
 - Ties in priority are broken by file order. No matching rule means "no opinion", not `idle`. A shipped manifest never relies on that order to choose a state: on every captured screen, the matching rules at the highest matching priority say one state (`crates/agora-adapters/tests/shipped_manifests.rs`, ADR-0117 decision 5).
 - Sections the engine does not interpret yet are ignored, so newer manifests still load; unknown keys inside
   `[[rules]]` are an error. `min_engine` above the engine's version is rejected.

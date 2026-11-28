@@ -274,3 +274,11 @@ The maintainer resolved these questions on 2026-11-27.
    300 and 800 ms in their manifests (the maintainer's starting values, to be confirmed by the captures). **Engine note:** the engine
    was already at 7 (ADR-0122's `shared_flag`); `[detection]` needs no `min_engine` (an older engine ignores it), and hold rules
    (step 3) will raise `ENGINE_VERSION` to 8 and need `min_engine = 8`.
+3. Step 3: hold rules are built (2026-11-28), not yet used by a shipped manifest. `RuleState::Hold` (`ENGINE_VERSION` 8; a manifest with
+   one needs `min_engine = 8`, and a hold at or above any `blocked` rule's priority refuses it; not allowed in `[[ready]]`/`[[typed]]`).
+   `Detector::detect` stops at a matching hold and answers "no opinion", which is what all three call sites already do for it: the
+   paced check keeps the state and drops a pending change (the gate's `no_opinion`), and `terminal_readiness` and the typing check see
+   `unknown` and not ready. `Explanation.held` and `RuleCheck.hold` let `agora agent explain` print "held by rule X"; the shipped-fixture
+   test reads `hold <rule id>`. Test: `crates/agora-adapters/tests/rules.rs` `a_hold_rule_stops_detection_below_every_blocked_rule`.
+   Detection benchmark: tick p50 915 µs, one terminal p50 19.9 µs (baseline 886 µs and 19.6 µs). Left: captured `transcript.screen` and
+   `model_picker.screen` for Claude Code (and Codex's equivalents) with their hold rules.

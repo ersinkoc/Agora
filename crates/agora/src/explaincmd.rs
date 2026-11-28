@@ -176,7 +176,10 @@ pub(crate) fn render(
         };
         let mut args = vec![
             ("id", diagnostic_inline(&c.id).into()),
-            ("state", state_name(c.state).into()),
+            (
+                "state",
+                if c.hold { "hold" } else { state_name(c.state) }.into(),
+            ),
             ("priority", i64::from(c.priority).into()),
             ("region", c.region.name().into()),
         ];
@@ -185,15 +188,19 @@ pub(crate) fn render(
         }
         out.push(format!("  {}", say.text(id, &args)));
     }
-    out.push(match &why.decided {
-        Some(d) => say.text(
+    out.push(match (&why.decided, &why.held) {
+        (None, Some(id)) => say.text(
+            key!("cli-explain-held"),
+            &[("id", diagnostic_inline(id).into())],
+        ),
+        (Some(d), _) => say.text(
             key!("cli-explain-decided"),
             &[
                 ("state", state_name(d.state).into()),
                 ("id", diagnostic_inline(&d.rule_id).into()),
             ],
         ),
-        None => say.text(key!("cli-explain-undecided"), &[]),
+        (None, None) => say.text(key!("cli-explain-undecided"), &[]),
     });
     out.push(say.text(key!("cli-explain-note"), &[]));
     out
@@ -399,6 +406,7 @@ mod tests {
             checks: Vec::new(),
             regions: Vec::new(),
             decided: None,
+            held: None,
         };
         for (source, want) in [
             ("built-in", "yerleşik"),
