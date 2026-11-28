@@ -8,6 +8,10 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Bugs and design gaps
 
+- **Agent names on every device (decision).** A name given from the agent list (`apps/web/src/net/agentNames.ts`) is kept in that
+  browser only. Keeping it the same on the phone and other browsers needs a second `UserSettings` key (the hub's key set is closed to
+  `themes`, `settings.proto`), which is a schema change for the maintainer; showing it in the terminal client and to other agents
+  would need the hub to keep it. The value already carries a time per name so two devices can be merged.
 - **ADR-0130 channel notices, the rest** (the hub and the owner's window are built): members' reads with access checked per page wait
   on members seeing the shared board at all (a scoped view holds no board today: its own decision); agents' reads through the board
   and the dispatcher half (decisions 2 and 3) need their exact messages approved first; a channel offered from older Team chat than the

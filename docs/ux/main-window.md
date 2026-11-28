@@ -51,6 +51,15 @@ An agent whose process is gone moves from its folder to **Closed**, below the ma
 
 **Close agent** ends a running agent of any kind (the same `agent.stop` as `agora agent stop`, no new message): in the **⋯** menu of its row in the agent list (shown on hover or focus, always on a touch screen), in the **⋯** menu of its pane or full-size header, on the phone's agent screen, in the command palette ("Close agent: name", which opens the agent and asks there), and, in a chat agent's message box, by typing `/exit` or `/quit` (never sent as text; if the agent offers a command of that name, that one is sent instead). It asks first, in the kit's dialog (audit B15, #1070): a red icon chip, "Close name?", "Ends this agent. Its conversation stays in the closed list until you remove it.", plus "It is working now: the current turn will be lost." while the agent works or waits for an answer; then **Keep it running** first, with the focus (Enter keeps the agent), and the red **Close agent** last. One click on **Close agent** is enough for an idle agent; **Keep it running**, Escape and a click outside close the dialog and nothing else (Escape never reaches the pane, list or panel behind it). The target is always the agent of the clicked item, one confirm at a time, and one dialog even when the agent is drawn in two panes. It is built from kit parts (the kit's ConfirmDialog, #1056, has no busy or error state). Screens: `docs/ux/screens/close-agent-{dark,light}.png`, `close-agent-working-{dark,light}.png`. A refusal shows its reason from the error code (not allowed, the machine's policy, a permission that is still needed, offline, ...) and the agent keeps running; after a close the agent is in the closed list with the usual **Remove from this list** and **Remove for everyone**. It is a different control from **Stop turn**, which only ends the turn.
 
+**Rename** gives an agent a name of your own: the pencil beside its row in the agent list (shown on hover or focus, always on a touch
+screen, next to the **⋯**) or **F2** on the row turns the name into a field with the name selected. Enter or leaving the field keeps the
+new name, Escape keeps the old one, and an empty field gives back the automatic name (kind · colour), which stays in the field's
+placeholder and in the row's tooltip ("Backend fixer (claude · amber)"). The name is one line of plain text, at most 40 characters. It is
+shown wherever this window names the agent (the list, tabs, tiles, cards, the team chat, the board, "started by"), and it is this
+browser's: it is kept on this device only (`net/agentNames.ts`), never sent to the hub, a machine or another agent, so the phone, another
+browser and the terminal client keep the automatic name. Screens: `docs/ux/screens/agent-rename-{hover,field}-{dark,light}.png`;
+`scripts/e2e-agent-rename.mjs` checks it in a real browser.
+
 ## My machines
 
 ![My machines](screens/machines-redesign-list-dark.png)

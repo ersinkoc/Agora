@@ -31,6 +31,7 @@ export type UiState = 'working' | 'needs-you' | 'finished' | 'idle' | 'unknown';
 export interface AgentTileModel {
   id: string;
   name: string; // generated short name, e.g. "claude · amber"
+  autoName?: string; // the generated name, when the person gave the agent one of their own (net/agentNames.ts)
   accent: string; // CSS color for this instance
   kind?: string; // what kind of agent it is ("claude", "codex"), as the node reported it
   machine: string;

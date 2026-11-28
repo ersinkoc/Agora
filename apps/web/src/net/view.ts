@@ -5,6 +5,7 @@ import { agora } from '../gen/agora.js';
 import type { QuotaObs } from './quota';
 import { SKIP_ACTION, skipOf, type SkipRequest } from './skipApproval';
 import { AGENT_COLOUR_NAMES } from '../themes/tokens';
+import { agentNameOf } from './agentNames';
 import { detailLaunchOptions, type StartOption } from './approval';
 import { ALWAYS_LIST_MAX, alwaysOffer, type AlwaysOffer } from './always';
 import { type AgentTileModel, type CommandModel, type ConfigCategory, type ConfigOptionModel, type SessionModel, type SessionOptionModel, type UiState, uiState } from '../model';
@@ -794,9 +795,13 @@ export function tiles(v: View, kindName?: (node: string, kind: string) => string
     const inside = a.running ? a.runsInside : undefined;
     const shownKind = inside ?? a.kind;
     const me = modelAndEffort(a);
+    // The name the person gave this agent in this window (net/agentNames.ts), else the one made from its kind and colour.
+    const autoName = `${visible(shownKind)} · ${ACCENT_NAMES[i]}`;
+    const own = agentNameOf(id);
     return {
       id,
-      name: `${visible(shownKind)} · ${ACCENT_NAMES[i]}`,
+      name: own ?? autoName,
+      ...(own ? { autoName } : {}),
       ...(shownKind ? { kind: shownKind } : {}),
       ...(inside && a.kind ? { hostKind: a.kind } : {}),
       accent: ACCENTS[i] as string,

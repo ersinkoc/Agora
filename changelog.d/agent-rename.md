@@ -1,0 +1,1 @@
+- An agent can be given a name of your own from the agent list: the pencil beside its row (or F2) turns the name into a field. The name is kept in this browser.

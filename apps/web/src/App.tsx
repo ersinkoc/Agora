@@ -4,6 +4,7 @@ import { AcknowledgeHandoffContext } from './components/BoardHandoffs';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { approvalName } from './net/approvalText';
 import { CommandPalette, type PaletteItem } from './components/CommandPalette';
+import { useAgentNamesVersion, withOwnNames } from './net/agentNames';
 import { demoAgents, demoApprovals, demoList, demoMachines, demoPreviewActions, demoPreviewState, demoProjects, demoQuota } from './fixtures';
 import { QuotaProvider } from './components/Quota';
 import { demoDiff, demoFiles } from './demoWorkspace';
@@ -546,8 +547,10 @@ export function App() {
   // ADR-0091: plan limits as the machines reported them (the demo data when there is no hub).
   const quotaList = useMemo(() => (hub ? (live ? quotaObs(live) : []) : demoQuota), [hub, live]);
   const quotaMachines = useMemo(() => new Map((live ? machines(live) : hub ? [] : demoMachines).map((m) => [m.id, m.name] as const)), [hub, live]);
+  // The names the person gave agents in this window: a new one rebuilds everything named from `tiles()`.
+  const agentNames = useAgentNamesVersion();
   const agents = useMemo(() => {
-    if (!hub) return demoAgents;
+    if (!hub) return withOwnNames(demoAgents, agentNames);
     if (!live) return [];
     // ADR-0094: a kind's display name as its machine last reported it (Settings → Agents keeps that list), for "Claude Code in Shell".
     const kindOf = (node: string, kind: string) => knownKinds.get(node)?.kinds.find((k) => k.kind === kind);
@@ -555,10 +558,10 @@ export function App() {
       const name = kindOf(node, kind)?.name;
       return name ? plainText(name, 40) : undefined;
     }, (node, kind) => kindOf(node, kind)?.provider);
-  }, [hub, live, knownKinds]);
+  }, [hub, live, knownKinds, agentNames]);
   // ADR-0095 step 2: "Give to an agent" on a Backlog task, from its board card or the command palette (a hub window only).
   // Step 3: "Start a new agent for this task" opens the ordinary start window with the same choices and the same signed command.
-  const boardList = useMemo(() => (live ? boards(live) : []), [live]);
+  const boardList = useMemo(() => { void agentNames; return live ? boards(live) : []; }, [live, agentNames]); // a new name rebuilds the board
   // ADR-0130 Amendment A: the accepted-task notices of each Review-enabled project, read by the owner's window alone (net/notices.ts), shown
   // as rows in Team chat; the owner chooses each project's channel on its board card.
   const noticesOwner = !!api && role === 'owner';

@@ -2062,6 +2062,11 @@ settings-machines-manage = Makineleri yönet
 # Çalışan bir ajanı kapatma (ajan menüsü, komut paleti, sohbet ajanının mesaj kutusunda /exit ve /quit)
 close-agent = Ajanı kapat
 agent-actions = { $name } için işlemler
+# Naming an agent in the agent list (net/agentNames.ts): the pencil on a row, or F2. The name is kept in this browser only.
+agent-rename = { $name } adını değiştir
+agent-rename-short = Adını değiştir
+agent-rename-field = { $name } için ad
+agent-rename-hint = Enter adı kaydeder, Esc vazgeçer. Otomatik ad için boş bırakın. Yalnızca bu tarayıcıda görünür.
 palette-close-agent = Ajanı kapat: { $name }
 palette-give-task = Bir ajana ver: { $title }
 close-title = { $name } kapatılsın mı?

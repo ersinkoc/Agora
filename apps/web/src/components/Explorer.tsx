@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { t } from '../i18n';
 import { NoAskBadge } from './NoAskBadge';
 import { LimitChip } from './Quota';
@@ -15,6 +15,7 @@ import { GroupByControl, groupTitle } from './GroupByControl';
 import { ExplorerRows } from './ExplorerRows';
 import { ProjectChip, ProjectHint } from './ProjectMark';
 import { modelWords } from './ModelChip';
+import { MAX_AGENT_NAME, setAgentName } from '../net/agentNames';
 import { groupFleet, sharedAcross, sortByUrgency, type GroupBy, type ProjectSpread } from '../net/fleet';
 
 const LARGE_FLEET = 120;
@@ -52,6 +53,17 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   const windowed = fleet.length >= LARGE_FLEET && typeof IntersectionObserver === 'function' && typeof ResizeObserver === 'function';
   const rowWindow = { viewport, current, windowed };
   const [folded, setFolded] = useState<ReadonlySet<string>>(new Set());
+  // Naming an agent (net/agentNames.ts): the row being named, kept here by id so a fleet update or a windowed row does not lose it.
+  const [naming, setNaming] = useState<string | undefined>();
+  const namingDone = useRef(false);
+  const startNaming = (id: string) => { namingDone.current = false; setNaming(id); };
+  const endNaming = (a: AgentTileModel, value: string | undefined) => {
+    if (namingDone.current) return; // Enter or Escape already ended it; the blur that follows does nothing
+    namingDone.current = true;
+    if (value !== undefined) setAgentName(a.id, value);
+    setNaming(undefined);
+    requestAnimationFrame(() => [...document.querySelectorAll<HTMLElement>('[data-agent-row]')].find((el) => el.dataset.agentRow === a.id)?.focus());
+  };
   const fold = (key: string) => setFolded(cur => { const next = new Set(cur); if (!next.delete(key)) next.add(key); return next; });
   const tree = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -113,9 +125,23 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
   // tooltip); the name keeps 40 % and "started by …" and the machine truncate; the facts are cut before the bolt and the state.
   // Redesign PR 7: who it is leads (the avatar: its colour and kind), the facts trail (the changed files as a neutral ±N, the bolt bare in
   // red, the state's shape last); the row in front is an accent tint, never a bar on its edge.
+  // Naming: the pencil beside the row (on hover or focus, always on a touch screen) or F2 on the row turns its name into a field. Enter
+  // or leaving the field keeps the name, Escape keeps the old one, an empty field gives back the automatic name.
   const agentRow = (a: AgentTileModel, depth: number, withMachine: boolean) => <li key={a.id} className={depth === 0 ? undefined : depth === 1 ? 'ms-3' : 'ms-6'}>
     <div className="group flex items-center">
-    <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-nowrap overflow-hidden whitespace-nowrap" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} title={`${visible(a.name)} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}${modelWords(a) ? ` · ${modelWords(a)?.full}` : ''}`}>
+    {naming === a.id ? <div className="ide-row flex-1" data-agent-naming={a.id}>
+      <AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" needsYou={a.state === 'needs-you'} />
+      <input type="text" autoFocus defaultValue={a.name} maxLength={MAX_AGENT_NAME * 2} placeholder={visible(a.autoName ?? a.name)}
+        aria-label={t('agent-rename-field', { name: visible(a.autoName ?? a.name) })} title={t('agent-rename-hint')}
+        className="min-w-0 flex-1 rounded-xs px-1 py-0 text-[0.8125rem]"
+        onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); endNaming(a, e.currentTarget.value); }
+          else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); endNaming(a, undefined); }
+        }}
+        onBlur={(e) => endNaming(a, e.currentTarget.value)} />
+    </div>
+    : <button type="button" data-agent-row={a.id} className="ide-row @container flex-1 flex-nowrap overflow-hidden whitespace-nowrap" aria-current={current === a.id ? 'true' : undefined} aria-pressed={open.includes(a.id)} onClick={() => onToggle(a.id)} onKeyDown={(e) => { if (e.key === 'F2') { e.preventDefault(); startNaming(a.id); } }} title={`${visible(a.name)}${a.autoName ? ` (${visible(a.autoName)})` : ''} · ${visible(a.machine)} · ${visible(a.workspace)}${a.branch ? ` · ${visible(a.branch)}` : ''}${a.parentName ? ` · ${t('helper-started-by', { name: visible(a.parentName) })}` : ''}${a.shared ? ` · ${t('ide-shared')}` : ''}${a.skipsPermissions ? ` · ${t('agent-does-not-ask')}` : ''}${modelWords(a) ? ` · ${modelWords(a)?.full}` : ''}`}>
       <AgentAvatar accent={a.accent} kind={agentKind(a)} size="s" needsYou={a.state === 'needs-you'} />
       <span className="flex min-w-[40%] flex-1 items-baseline gap-1.5 overflow-hidden" data-agent-name-cell>
         <span className="max-w-full flex-none truncate" data-agent-name>{visible(a.name)}</span>
@@ -133,9 +159,12 @@ export function Explorer({ by, onBy, spread, fleet, machines, open, current, pro
       <NoAskBadge agent={a} nested bare />
       <FinishedMark agentId={a.id} compact />
       <StatusMark state={a.state} />
-    </button>
-    {/* Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
-    <span className="flex-none opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"><CloseAgentMenu agent={a} where="row" /></span>
+    </button>}
+    {/* Rename and Close agent: the target is this row's agent. Shown on hover or focus; always on a touch screen. */}
+    {naming !== a.id && <span className="flex flex-none items-center opacity-0 focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100">
+      <button type="button" className="ide-iconbtn size-6" data-agent-rename={a.id} onClick={() => startNaming(a.id)} aria-label={t('agent-rename', { name: visible(a.name) })} title={t('agent-rename-short')}><Icon name="pencil" className="size-3.5" /></button>
+      <CloseAgentMenu agent={a} where="row" />
+    </span>}
     </div>
     <CloseConfirm agent={a} where="row" />
   </li>;

@@ -2168,6 +2168,11 @@ settings-machines-manage = Manage machines
 # Closing a running agent (the agent menu, the command palette, /exit and /quit in a chat agent's message box)
 close-agent = Close agent
 agent-actions = Actions for { $name }
+# Naming an agent in the agent list (net/agentNames.ts): the pencil on a row, or F2. The name is kept in this browser only.
+agent-rename = Rename { $name }
+agent-rename-short = Rename
+agent-rename-field = Name for { $name }
+agent-rename-hint = Enter keeps the name, Esc cancels. Leave it empty for the automatic name. Shown in this browser only.
 palette-close-agent = Close agent: { $name }
 palette-give-task = Give to an agent: { $title }
 close-title = Close { $name }?
