@@ -194,6 +194,15 @@ memory, in order, and written before any later hub fact (so a node that dials ag
 connection is refused while the end still cannot be written) and by a retry that waits 100 ms, doubling up to 5 s, until the store works (#996); the
 machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
+Channel notices (ADR-0130 Amendment A): `ProjectNoticesSettingsSet` / `ProjectNoticesSettingsGet` (commands 134, 135) save and read the
+owner's notice settings of a project (`channel` `#` plus 1 to 32 of `[a-z0-9_-]`, empty for off; a channel that is not one is
+`protocol.invalid_message`, field `channel`); the read says `active` and, when not, `inactive_reason` (`review_off`). When a report is
+accepted on a project whose channel is set and Review is on, the hub keeps a `ProjectNotice` (stable `notice_id` from project, task,
+revision and channel; no dispatcher or reviewer) in the acceptance's own transaction and records the content-free `ProjectNoticesChanged
+{ project_id }` (event arm 98, hub only); `ProjectNoticesPage` (136) reads them oldest first after a cursor, at most 50 a page, `more`
+when others follow. Notices are rows, not events: kept 30 days, 50 per project channel, 10,000 on the hub. In this step the three
+commands are the unscoped owner's and the hint reaches unscoped windows only.
+
 Published capabilities (ADR-0132): right after a link's `NodeLink { up }` the hub records `NodeCapabilitiesChanged { node_id, generation,
 capabilities }` (event arm 97, producer `hub` only; a node that sends one is refused, field `node_capabilities_changed`): the
 capabilities that link negotiated, of the hub's published list (`task.dispatch` for now), sorted, at most 16. A reader keeps it only

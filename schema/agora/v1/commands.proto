@@ -146,6 +146,10 @@ message CommandRequest {
     TaskReviewDecide task_review_decide = 132;
     // ADR-0128: the hub queues an accepted report notice to a verified parent run.
     DeliverTaskAcceptanceNotice deliver_task_acceptance_notice = 133;
+    // ADR-0130: accepted-task notices to a project's channel. Answered by the hub, naming no node; the settings are the owner's.
+    ProjectNoticesSettingsSet project_notices_settings_set = 134;
+    ProjectNoticesSettingsGet project_notices_settings_get = 135;
+    ProjectNoticesPage project_notices_page = 136;
   }
 }
 
@@ -220,6 +224,8 @@ message CommandOk {
     ShareItemGetResult share_item_get = 44;
     TaskReviewReport task_review_report = 45; // ADR-0125.
     TaskAcceptanceNoticeReceipt task_acceptance_notice_receipt = 46; // ADR-0128.
+    ProjectNoticesSettings project_notices_settings = 47; // ADR-0130.
+    ProjectNoticesPageResult project_notices_page = 48; // ADR-0130.
   }
 }
 
@@ -1181,4 +1187,50 @@ message DeliverTaskAcceptanceNotice {
 message TaskAcceptanceNoticeReceipt {
   bytes delivery_id = 1;
   bytes receiver_run_id = 2;
+}
+
+// ADR-0130: the owner's notice settings for a Review-enabled shared project. `channel` is `#` plus 1 to 32 of `[a-z0-9_-]`, a channel
+// that has had a message in the project; empty turns channel notices off. `dispatcher` is kept for the later dispatcher notices.
+message ProjectNoticesSettingsSet {
+  string project_id = 1;
+  bool dispatcher = 2;
+  string channel = 3;
+}
+
+message ProjectNoticesSettingsGet {
+  string project_id = 1;
+}
+
+// ADR-0130: a project's notice settings, and whether notices are written now (`inactive_reason`: `review_off`, `not_shared`).
+message ProjectNoticesSettings {
+  string project_id = 1;
+  bool dispatcher = 2;
+  string channel = 3;
+  bool active = 4;
+  string inactive_reason = 5;
+}
+
+// ADR-0130: one page of a project's channel notices, oldest first after the cursor (`after_created_ms`, `after_notice_id`), at most
+// `limit` (1 to 50). Read access to the project is checked for every page.
+message ProjectNoticesPage {
+  string project_id = 1;
+  uint64 after_created_ms = 2;
+  string after_notice_id = 3;
+  uint32 limit = 4;
+}
+
+// ADR-0130: one accepted task, as the project's channel shows it. No dispatcher or reviewer identity.
+message ProjectNotice {
+  string notice_id = 1;
+  string project_id = 2;
+  string task_id = 3;
+  uint64 report_revision = 4;
+  uint64 accepted_ms = 5;
+  string channel = 6;
+  uint64 created_ms = 7;
+}
+
+message ProjectNoticesPageResult {
+  repeated ProjectNotice notices = 1;
+  bool more = 2;
 }

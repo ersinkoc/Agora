@@ -420,7 +420,9 @@ impl Scope {
             | Body::TaskHandoffDeliveryChanged(_)
             | Body::TaskReviewChanged(_)
             | Body::TaskReviewEnabled(_)
-            | Body::TaskParentLinked(_) => false,
+            | Body::TaskParentLinked(_)
+            // ADR-0130: the owner's notices for now (a member's read with its access checked per page is a later step).
+            | Body::ProjectNoticesChanged(_) => false,
             // ADR-0122: shared items are the owner's (they reach every agent on every machine).
             Body::ShareItemChanged(_) | Body::ShareItemRefused(_) => false,
             // ADR-0095: a dispatch is about one agent of the producer; it is theirs when that agent is.

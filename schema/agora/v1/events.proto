@@ -81,6 +81,8 @@ message Event {
     TaskParentLinked task_parent_linked = 96; // ADR-0126, hub only.
     // ADR-0132, hub only: what the node's current link negotiated, of the capabilities the hub publishes.
     NodeCapabilitiesChanged node_capabilities_changed = 97;
+    // ADR-0130, hub only: a project's channel notices changed; a window entitled to the project reads them again (no content here).
+    ProjectNoticesChanged project_notices_changed = 98;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -161,6 +163,11 @@ message NodeResources {
   repeated DiskUsage disks = 9;
   // The size of the workspaces the node made (ADR-0064).
   uint64 workspaces_bytes = 10;
+}
+
+// ADR-0130: a content-free hint that a project's accepted-task notices changed (`ProjectNoticesPage` reads them).
+message ProjectNoticesChanged {
+  string project_id = 1;
 }
 
 // ADR-0132: the capabilities a node's link negotiated, of the few the hub publishes to windows (an allow-list: `task.dispatch` first),

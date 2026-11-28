@@ -1871,9 +1871,33 @@ impl Hub {
             crate::log_line!("task acceptance notice skipped: queue full");
             pending = None;
         }
-        let settings = pending
+        let mut settings: Vec<(String, Vec<u8>)> = pending
             .as_ref()
-            .map(|queued| (queued.key(), queued.encode_to_vec()));
+            .map(|queued| (queued.key(), queued.encode_to_vec()))
+            .into_iter()
+            .collect();
+        // ADR-0130: the channel notice, kept in the acceptance's own transaction with a hint for windows to read again.
+        let mut events = events;
+        let channel = if accept {
+            crate::project_notice::pending(
+                self.store(),
+                &project,
+                &decision.task_id,
+                decision.report_revision,
+                now_ms,
+            )
+            .map_err(|_| internal())?
+        } else {
+            None
+        };
+        if let Some(notice) = channel.clone() {
+            settings.push(notice);
+            events.push(Body::ProjectNoticesChanged(
+                agora_protocol::v1::ProjectNoticesChanged {
+                    project_id: project.to_string(),
+                },
+            ));
+        }
         if self
             .store_board(
                 &mut g,
@@ -1888,11 +1912,69 @@ impl Hub {
             self.boards.restore(&project, before);
             return Err(internal());
         }
+        if channel.is_some() {
+            if let Err(e) = crate::project_notice::prune(self.store(), &project, now_ms) {
+                crate::log_line!("project notices not pruned: {e:?}");
+            }
+        }
         if let Some(pending) = pending {
             g.task_notices
                 .insert(pending.notice.delivery_id.clone(), pending);
         }
         Ok(())
+    }
+
+    /// ADR-0130: the owner saves a project's channel-notice settings. A channel that is not one is refused (`protocol.invalid_message`,
+    /// field `channel`).
+    pub(crate) fn project_notices_set(
+        &self,
+        set: &agora_protocol::v1::ProjectNoticesSettingsSet,
+    ) -> Result<(), agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(&set.project_id).into_owned();
+        if project.is_empty() {
+            return Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", "project_id"));
+        }
+        match crate::project_notice::set_settings(self.store(), set, &project) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(field)) => {
+                Err(Error::new(ErrorCode::ProtocolInvalidMessage).with("field", field))
+            }
+            Err(_) => {
+                Err(Error::new(ErrorCode::Internal).with("incident_id", "project_notices.set"))
+            }
+        }
+    }
+
+    /// ADR-0130: a project's channel-notice settings, and whether notices are written now (`review_off` while Review is off there).
+    pub(crate) fn project_notices_get(
+        &self,
+        project_id: &str,
+    ) -> Result<agora_protocol::v1::ProjectNoticesSettings, agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(project_id).into_owned();
+        let mut s = crate::project_notice::settings(self.store(), &project).map_err(|_| {
+            Error::new(ErrorCode::Internal).with("incident_id", "project_notices.get")
+        })?;
+        let review = self.lock().view.review_projects.contains(&project);
+        s.active = review && !s.channel.is_empty();
+        if !review {
+            s.inactive_reason = "review_off".into();
+        }
+        Ok(s)
+    }
+
+    /// ADR-0130: one page of a project's channel notices (the owner's, in this step).
+    pub(crate) fn project_notices_page(
+        &self,
+        req: &agora_protocol::v1::ProjectNoticesPage,
+        now_ms: u64,
+    ) -> Result<agora_protocol::v1::ProjectNoticesPageResult, agora_protocol::Error> {
+        use agora_protocol::{Error, ErrorCode};
+        let project = agora_core::fold_project_id(&req.project_id).into_owned();
+        crate::project_notice::page(self.store(), &project, req, now_ms).map_err(|_| {
+            Error::new(ErrorCode::Internal).with("incident_id", "project_notices.page")
+        })
     }
 
     fn review_available(
@@ -4397,6 +4479,121 @@ mod tests {
         );
         drop(hub);
         remove_db(&path);
+    }
+
+    /// ADR-0130: an accepted report on a project whose channel notices are on keeps one notice (a retry adds none), records a content-free
+    /// hint, and the owner reads it in a page; a returned report keeps none, and the settings say whether notices are written.
+    #[test]
+    fn an_accepted_report_leaves_one_channel_notice_and_a_hint() {
+        use serde_json::json;
+        use v1::{
+            ProjectNoticesPage, ProjectNoticesSettingsSet, TaskReviewDecide, TaskReviewDecision,
+        };
+        let (hub, path) = hub_on_file("channel-notice");
+        let (_task, _links) = stage_handoff(&hub, Vec::new());
+        let set = ProjectNoticesSettingsSet {
+            project_id: "p".into(),
+            dispatcher: false,
+            channel: "#dev".into(),
+        };
+        assert_eq!(
+            hub.project_notices_set(&ProjectNoticesSettingsSet {
+                channel: "dev".into(),
+                ..set.clone()
+            })
+            .unwrap_err()
+            .code,
+            agora_protocol::ErrorCode::ProtocolInvalidMessage
+        );
+        hub.project_notices_set(&set).unwrap();
+        let before = hub.project_notices_get("p").unwrap();
+        assert_eq!(
+            (
+                before.channel.as_str(),
+                before.active,
+                before.inactive_reason.as_str()
+            ),
+            ("#dev", false, "review_off")
+        );
+        hub.store().enable_task_review("p").unwrap();
+        hub.refresh_task_review_projects(20).unwrap();
+        assert!(hub.project_notices_get("p").unwrap().active);
+        let task = board_result(call_task_board(
+            &hub,
+            "receiver",
+            "task_create",
+            json!({"title":"notice me"}),
+        ))["task_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let submit = || {
+            board_result(call_task_board(
+                &hub,
+                "receiver",
+                "task_claim",
+                json!({"task_id": task}),
+            ));
+            board_result(call_task_board(
+                &hub,
+                "receiver",
+                "task_complete",
+                json!({"task_id": task, "summary": "done"}),
+            ));
+        };
+        let decide = |revision, decision: TaskReviewDecision| TaskReviewDecide {
+            project_id: "p".into(),
+            task_id: task.clone(),
+            report_revision: revision,
+            decision: decision as i32,
+        };
+        let page = |hub: &Hub| {
+            hub.project_notices_page(
+                &ProjectNoticesPage {
+                    project_id: "p".into(),
+                    limit: 50,
+                    ..Default::default()
+                },
+                30,
+            )
+            .unwrap()
+        };
+        let hints = |hub: &Hub| {
+            hub.store()
+                .events_after(0, 100_000)
+                .unwrap()
+                .into_iter()
+                .filter_map(|stored| Event::decode(stored.payload.as_slice()).ok())
+                .filter(|e| matches!(&e.body, Some(Body::ProjectNoticesChanged(c)) if c.project_id == "p"))
+                .count()
+        };
+        submit();
+        hub.task_review_decide("owner", &decide(1, TaskReviewDecision::Return), 21)
+            .unwrap();
+        assert!(
+            page(&hub).notices.is_empty(),
+            "a returned report keeps none"
+        );
+        submit();
+        hub.task_review_decide("owner", &decide(2, TaskReviewDecision::Accept), 22)
+            .unwrap();
+        hub.task_review_decide("owner", &decide(2, TaskReviewDecision::Accept), 23)
+            .unwrap();
+        let got = page(&hub);
+        assert_eq!(got.notices.len(), 1);
+        let n = &got.notices[0];
+        assert_eq!(
+            (
+                n.task_id.as_str(),
+                n.report_revision,
+                n.accepted_ms,
+                n.channel.as_str()
+            ),
+            (task.as_str(), 2, 22, "#dev")
+        );
+        assert_eq!(hints(&hub), 1);
+        drop(hub);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

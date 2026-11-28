@@ -72,3 +72,27 @@ forged dispatcher, a mismatched dispatch result, both report/result orders, a ha
 identical retries and a crash around acceptance. Check that a disconnected dispatcher can recover the
 notice after signing in, that a revoked member loses read access, and that an older node and window
 keep the existing board behavior. Test expiry and all three row limits. Append protocol fixtures.
+
+## Amendment A (2026-11-28, maintainer approval in chat): existing channels and where notices live
+
+- **An existing channel** is a `#name` (`#` plus 1 to 32 of `[a-z0-9_-]`) that has had at least one message in the project; the settings
+  form offers those from the hub's recent Team chat. Channels have no lifecycle today (nothing deletes one), so decision 5's pause when
+  the channel disappears applies once channels get one.
+- **Notices live in a hub table, not the event log** (agora-ac's review of the shape): decision 4's row limits, expiry, eviction and
+  access checked at each read need rows that can really be removed. The event stream carries only a content-free, project-scoped hint,
+  `ProjectNoticesChanged { project_id }` (hub only, arm 98), after which an entitled window reads `ProjectNoticesPage` (commands 134 to
+  136, results 47 and 48). Channel access is project access today.
+- Settings are hub-side state, unsigned (they widen nothing on a node); while Review is off or the project is not shared they are kept
+  and no notice is written, and the settings read says why.
+
+## Status of the build
+
+Step 1, channel notices at the hub: built (2026-11-28). Schema (Amendment A's messages, fixtures). `crates/agora-hub/src/project_notice.rs`:
+the owner's settings (`#` and 1 to 32 of `[a-z0-9_-]`, kept while Review is off, with `active` and `inactive_reason` in the read), the
+notice kept in the acceptance's own transaction (`Hub::task_review_decide`, a settings row keyed by the stable notice id, so a retry
+adds none) with the hint `ProjectNoticesChanged`, pruning after it (30 days, 50 per project channel, 10,000 on the hub; never the board),
+and the page (oldest first after the cursor, at most 50, expired ones left out). The three commands are the unscoped owner's in this
+step (`dispatch.rs`), and the hint reaches unscoped windows only. Tests: `project_notice.rs`'s own,
+`an_accepted_report_leaves_one_channel_notice_and_a_hint`, `channel_notice_commands_are_the_owners_at_the_hub`. Left: the window (the
+settings form offering the project's channels, notices as rows in Team chat), members' and agents' reads with access checked per page,
+and the dispatcher half (decisions 2 and 3).

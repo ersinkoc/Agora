@@ -48,6 +48,10 @@ pub enum Route {
     },
     TaskReviewRead(v1::TaskReviewRead),
     TaskReviewDecide(v1::TaskReviewDecide),
+    /// ADR-0130: the owner's channel-notice settings and the bounded read of the notices; the hub's own.
+    ProjectNoticesSettingsSet(v1::ProjectNoticesSettingsSet),
+    ProjectNoticesSettingsGet(v1::ProjectNoticesSettingsGet),
+    ProjectNoticesPage(v1::ProjectNoticesPage),
     /// ADR-0113 decision 6: the hub answers from the community theme catalog it keeps (any signed-in person).
     ThemeCatalogList,
     ThemeCatalogGet {
@@ -85,6 +89,11 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
             ) || who.role == Role::Owner)
             && (!matches!(c, C::TaskReviewRead(_) | C::TaskReviewDecide(_))
                 || who.projects.is_none())
+            // ADR-0130: the owner's, unscoped, in this step.
+            && (!matches!(
+                c,
+                C::ProjectNoticesSettingsSet(_) | C::ProjectNoticesSettingsGet(_) | C::ProjectNoticesPage(_)
+            ) || (who.role == Role::Owner && who.projects.is_none()))
             // ADR-0122: a shared item reaches every agent on every machine: the owner's alone (a node asks on its own connection).
             && (!matches!(c, C::ShareItemPublish(_) | C::ShareItemRemove(_) | C::ShareItemList(_)) || who.role == Role::Owner)
             && !matches!(c, C::ShareItemGet(_))
@@ -120,6 +129,14 @@ pub fn route(who: &Access, scope: Option<&Scope>, req: &CommandRequest) -> Route
             Route::TargetNotAllowed
         }
         Some(C::TaskReviewRead(read)) => Route::TaskReviewRead(read.clone()),
+        Some(
+            C::ProjectNoticesSettingsSet(_)
+            | C::ProjectNoticesSettingsGet(_)
+            | C::ProjectNoticesPage(_),
+        ) if names_a_node => Route::TargetNotAllowed,
+        Some(C::ProjectNoticesSettingsSet(c)) => Route::ProjectNoticesSettingsSet(c.clone()),
+        Some(C::ProjectNoticesSettingsGet(c)) => Route::ProjectNoticesSettingsGet(c.clone()),
+        Some(C::ProjectNoticesPage(c)) => Route::ProjectNoticesPage(c.clone()),
         Some(C::TaskReviewDecide(decision)) => Route::TaskReviewDecide(decision.clone()),
         Some(C::UsageReport(_)) if names_a_node => Route::TargetNotAllowed,
         Some(C::UsageReport(_)) => Route::UsageReport,
@@ -342,6 +359,47 @@ mod tests {
             route(&who(Role::Owner), None, &get),
             Route::Forbidden { .. }
         ));
+    }
+
+    /// ADR-0130: the channel-notice commands are the hub's, the unscoped owner's alone in this step, and name no node.
+    #[test]
+    fn channel_notice_commands_are_the_owners_at_the_hub() {
+        let command = |command| CommandRequest {
+            command: Some(command),
+            ..Default::default()
+        };
+        let all = [
+            command(C::ProjectNoticesSettingsSet(
+                v1::ProjectNoticesSettingsSet::default(),
+            )),
+            command(C::ProjectNoticesSettingsGet(
+                v1::ProjectNoticesSettingsGet::default(),
+            )),
+            command(C::ProjectNoticesPage(v1::ProjectNoticesPage::default())),
+        ];
+        let mut owner = who(Role::Owner);
+        owner.projects = None;
+        for c in &all {
+            assert!(matches!(
+                route(&owner, None, c),
+                Route::ProjectNoticesSettingsSet(_)
+                    | Route::ProjectNoticesSettingsGet(_)
+                    | Route::ProjectNoticesPage(_)
+            ));
+            let mut aimed = c.clone();
+            aimed.target_node = "n".into();
+            assert!(matches!(
+                route(&owner, None, &aimed),
+                Route::TargetNotAllowed
+            ));
+            for role in [Role::Member, Role::Viewer] {
+                let scoped = Access {
+                    projects: Some(["n/p".to_string()].into()),
+                    ..who(role)
+                };
+                assert!(matches!(route(&scoped, None, c), Route::Forbidden { .. }));
+            }
+        }
     }
 
     #[test]

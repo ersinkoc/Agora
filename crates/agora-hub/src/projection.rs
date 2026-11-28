@@ -545,6 +545,7 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
         Body::TaskReviewChanged(_) => return Err("task_review_changed"),
         Body::TaskReviewEnabled(_) => return Err("task_review_enabled"),
+        Body::ProjectNoticesChanged(_) => return Err("project_notices_changed"),
         Body::TaskParentLinked(_) => return Err("task_parent_linked"),
         // ADR-0122: the hub's word on a shared item; a node speaks only for itself when it refuses one.
         Body::ShareItemChanged(_) => return Err("share_item_changed"),
@@ -1445,6 +1446,8 @@ impl View {
                 }
             }
             Body::TaskReviewEnabled(_) | Body::TaskReviewChanged(_) => {}
+            // ADR-0130: a hint for windows to read the notices again; the view keeps nothing of it.
+            Body::ProjectNoticesChanged(_) => {}
             Body::TaskParentLinked(e) if producer == RESERVED_HUB_ID => {
                 if let Some(child) = self.tasks.get_mut(&format!("{}/{}", e.project_id, e.task_id)) {
                     child.parent_task_id = Some(e.parent_task_id.clone());

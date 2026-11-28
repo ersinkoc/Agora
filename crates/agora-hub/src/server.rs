@@ -1537,6 +1537,34 @@ where
                 Err(e) => refuse(e),
             })
         }
+        crate::dispatch::Route::ProjectNoticesSettingsSet(req) => {
+            Some(match hub.project_notices_set(&req) {
+                Ok(()) => ok_empty(client_request_id.clone()),
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::ProjectNoticesSettingsGet(req) => {
+            Some(match hub.project_notices_get(&req.project_id) {
+                Ok(settings) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ProjectNoticesSettings(settings)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
+        crate::dispatch::Route::ProjectNoticesPage(req) => {
+            Some(match hub.project_notices_page(&req, now_ms()) {
+                Ok(page) => v1::CommandResponse {
+                    request_id: client_request_id.clone(),
+                    result: Some(command_response::Result::Ok(v1::CommandOk {
+                        result: Some(command_ok::Result::ProjectNoticesPage(page)),
+                    })),
+                },
+                Err(e) => refuse(e),
+            })
+        }
         crate::dispatch::Route::ShareList { with_content } => Some(
             match crate::shares::Shares::new(hub.store()).list(with_content) {
                 Ok(items) => v1::CommandResponse {

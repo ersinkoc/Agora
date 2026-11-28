@@ -1,0 +1,1 @@
+- The hub can keep a notice in a project's channel when a report there is accepted (the owner names the channel; 30 days, 50 per channel), the first step of ADR-0130; the window shows them in a later step.

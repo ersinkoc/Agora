@@ -40,6 +40,7 @@ pub mod plugins;
 pub mod preview_gate;
 pub mod preview_net;
 pub mod project_names;
+pub mod project_notice;
 pub mod projection;
 pub mod proxy;
 pub mod router;
