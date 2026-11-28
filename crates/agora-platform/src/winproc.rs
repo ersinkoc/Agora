@@ -90,7 +90,11 @@ pub(crate) fn exists(pid: u32) -> bool {
 
 /// The executable's file name without `.exe` (what the Unix backends call the short name).
 pub(crate) fn name(pid: u32) -> io::Result<String> {
-    let p = Process::open(pid)?;
+    name_of(&Process::open(pid)?)
+}
+
+/// [`name`] of an opened process.
+fn name_of(p: &Process) -> io::Result<String> {
     let mut buf = vec![0u16; 32 * 1024];
     let mut len = buf.len() as u32;
     // SAFETY: `buf` is valid for `len` UTF-16 units; flags 0 asks for the Win32 path.
@@ -173,7 +177,11 @@ pub(crate) fn children(pid: u32) -> io::Result<Vec<u32>> {
 
 /// See [`crate::process_start_time`]: the creation time (100 ns units since 1601) of a process that has not ended.
 pub(crate) fn start_time(pid: u32) -> Option<u64> {
-    let p = Process::open(pid).ok()?;
+    started_of(&Process::open(pid).ok()?)
+}
+
+/// [`start_time`] of an opened process: `None` once it ended.
+fn started_of(p: &Process) -> Option<u64> {
     let mut code = 0u32;
     // SAFETY: a live handle and a valid out pointer.
     if unsafe { GetExitCodeProcess(p.0, &mut code) } == 0 || code != STILL_ACTIVE as u32 {
@@ -187,6 +195,21 @@ pub(crate) fn start_time(pid: u32) -> Option<u64> {
         return None;
     }
     Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+/// See [`crate::process_identity`]: the start time (100 ns units since 1601, wall-clock, so it already tells boots apart and `boot`
+/// stays empty) and the program's name, both read from one handle, so a pid given to another process between two reads cannot mix
+/// them. Windows has no process groups (`group` is 0).
+pub(crate) fn identity(pid: u32) -> io::Result<crate::ProcessIdentity> {
+    let p = Process::open(pid)?;
+    let started = started_of(&p).ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    Ok(crate::ProcessIdentity {
+        pid,
+        group: 0,
+        started,
+        boot: String::new(),
+        name: name_of(&p)?,
+    })
 }
 
 /// See [`crate::terminate_process`].
@@ -739,5 +762,55 @@ mod tests {
         let with = console_window(true);
         let without = console_window(false);
         println!("PROBE with={with} without={without}");
+    }
+}
+
+/// M2.6: a process's identity on Windows, as `unix.rs`'s identity tests check it on Unix.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod identity_tests {
+    use crate::{kill_process_if_same, process_identity, process_still_running};
+
+    #[test]
+    fn a_process_is_known_by_its_start_and_a_reused_pid_is_never_killed() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let id = process_identity(child.id()).unwrap();
+        assert_eq!(id.name.to_ascii_lowercase(), "ping");
+        assert_eq!((id.group, id.boot.as_str()), (0, ""));
+        assert_eq!(Some(id.started), crate::process_start_time(child.id()));
+        assert!(process_still_running(&id));
+        // Another start time, another boot, another program, or no program named: another process, left alone.
+        let others = [
+            crate::ProcessIdentity {
+                started: id.started + 1,
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                boot: "x".into(),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: "victim".into(),
+                ..id.clone()
+            },
+            crate::ProcessIdentity {
+                name: String::new(),
+                ..id.clone()
+            },
+        ];
+        for other in &others {
+            assert!(!process_still_running(other), "{other:?}");
+            assert!(!kill_process_if_same(other).unwrap(), "{other:?}");
+        }
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(kill_process_if_same(&id).unwrap());
+        assert!(!child.wait().unwrap().success());
+        // Ended: nothing to read, and nothing to kill.
+        assert!(process_identity(id.pid).is_err() || !process_still_running(&id));
+        assert!(!kill_process_if_same(&id).unwrap());
     }
 }

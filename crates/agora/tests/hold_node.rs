@@ -281,12 +281,11 @@ fn an_agent_outlives_its_node_and_the_next_node_takes_it_up_with_the_output_writ
     type_into(&node, &id, &format!("one{ENTER}"));
     wait_for("the answer", || screen(&node, &id).contains("got-one"));
     let pid = pid_of(&node, &id);
-    // The ledger records the holder (pid and start time) before the node goes away, and the agent's process where a process's identity
-    // is read (not on Windows yet: `process_identity`, ADR-0060; taking the agent up from the holder does not need it).
+    // The ledger records the holder (pid and start time) before the node goes away.
     wait_for("the holder in the ledger", || {
         node.ledger
             .get(&id)
-            .is_some_and(|e| e.holder_pid != 0 && (cfg!(windows) || e.process().is_some()))
+            .is_some_and(|e| e.holder_pid != 0 && e.process().is_some())
     });
     drop(node);
     // The node is gone; the agent is not.

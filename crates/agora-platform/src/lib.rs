@@ -2211,14 +2211,14 @@ pub struct ProcessIdentity {
     pub name: String,
 }
 
-/// The [`ProcessIdentity`] of a running process. `Unsupported` on Windows, where a node's agents are in a job object that ends them
-/// with the node, so none can outlive it to be found again.
+/// The [`ProcessIdentity`] of a running process. Windows (M2.6): the agents a node runs itself are in a job object that ends them with
+/// the node, so none of them can outlive it to be found again; one the holder keeps is, and a held agent's run id is made from it.
 pub fn process_identity(pid: u32) -> io::Result<ProcessIdentity> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     {
         procinfo::identity(pid)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
         let _ = pid;
         Err(unsupported())
@@ -2260,7 +2260,13 @@ pub fn kill_process_if_same(id: &ProcessIdentity) -> io::Result<bool> {
         }
         Ok(true)
     }
-    #[cfg(not(unix))]
+    // No process groups: the process itself, checked to be the recorded one just above.
+    #[cfg(windows)]
+    {
+        procinfo::terminate(id.pid)?;
+        Ok(true)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Err(unsupported())
     }
