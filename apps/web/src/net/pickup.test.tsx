@@ -30,13 +30,20 @@ describe('marks and pickups on the board', () => {
     expect(card(v)?.pickup).toBe(true);
     applyEvent(v, 4, task(3, 'n2/a'));
     applyEvent(v, 5, hub(4, { body: 'taskPickedUp', taskPickedUp: { projectId: 'p', taskId: 't1', nodeId: 'n2', agentId: 'n2/a', runId: new Uint8Array(16), atMs: 9, rule: 'take_next' } }));
-    expect(card(v)).toMatchObject({ pickup: true, pickedUp: { agent: 'n2/a', atMs: 9 }, status: 'claimed' });
+    expect(card(v)).toMatchObject({ pickup: true, pickedUp: { atMs: 9 }, status: 'claimed' });
+    // Released, then claimed by hand by another agent: not the rule's claim, so no pickup is said.
     applyEvent(v, 6, task(5, ''));
-    expect(card(v)?.pickedUp?.atMs, 'a later move keeps the record').toBe(9);
-    applyEvent(v, 7, hub(6, { body: 'taskPickupEligible', taskPickupEligible: { projectId: 'p', taskId: 't1', eligible: false } }));
+    expect(card(v)?.pickedUp).toBeUndefined();
+    applyEvent(v, 61, task(51, 'n1/b'));
+    expect(card(v)?.pickedUp).toBeUndefined();
+    // The rule's claim finished: said on the done card too.
+    applyEvent(v, 62, task(52, 'n2/a'));
+    applyEvent(v, 63, hub(53, { body: 'taskChanged', taskChanged: { taskId: 't1', projectId: 'p', title: 'Do it', claimedByAgentId: 'n2/a', done: true } }));
+    expect(card(v)).toMatchObject({ status: 'done', pickedUp: { atMs: 9 } });
+    applyEvent(v, 70, hub(60, { body: 'taskPickupEligible', taskPickupEligible: { projectId: 'p', taskId: 't1', eligible: false } }));
     expect(card(v)?.pickup).toBeUndefined();
-    const s = fromSnapshot({ pos: 1, tasks: [{ taskId: 't1', projectId: 'p', title: 'x', pickupEligible: true, pickedUp: { agentId: 'n2/a', atMs: 3 } }] } as never);
-    expect(card(s)).toMatchObject({ pickup: true, pickedUp: { agent: 'n2/a', atMs: 3 } });
+    const s = fromSnapshot({ pos: 1, tasks: [{ taskId: 't1', projectId: 'p', title: 'x', claimedByAgentId: 'n2/a', pickupEligible: true, pickedUp: { agentId: 'n2/a', atMs: 3 } }] } as never);
+    expect(card(s)).toMatchObject({ pickup: true, pickedUp: { atMs: 3 } });
   });
 });
 

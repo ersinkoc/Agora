@@ -82,7 +82,7 @@ const pickupBoard: BoardModel = {
   tasks: [
     { ...board.tasks[0]!, taskId: 't1', pickup: true },
     { ...board.tasks[1]!, taskId: 't2' },
-    { ...board.tasks[2]!, taskId: 't3', pickup: true, pickedUp: { agent: 'codex · teal', atMs: AT - 3 * 60_000 } },
+    { ...board.tasks[2]!, taskId: 't3', pickup: true, pickedUp: { atMs: AT - 3 * 60_000 } },
   ],
 };
 const chatNotices: NoticeRowModel[] = [

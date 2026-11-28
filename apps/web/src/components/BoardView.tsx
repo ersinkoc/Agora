@@ -30,10 +30,8 @@ function Card({ task, projectId, give, review }: { task: BoardTaskModel; project
       {task.subtasks && <span className="text-xs text-muted">
         {t('board-card-subtask-progress', { accepted: task.subtasks.accepted, total: task.subtasks.total })}
       </span>}
-      {/* ADR-0131: taken by the rule, not given by a person; the agent is named only when it is not the one the card already names. */}
-      {task.pickedUp && task.status !== 'open' && <span className="break-words text-xs text-muted">
-        {task.pickedUp.agent === task.owner ? t('board-card-picked-up-short') : t('board-card-picked-up', { name: plain(task.pickedUp.agent, OWNER_MAX) })}
-      </span>}
+      {/* ADR-0131: its current (or finished) claim is the one a rule made, not one a person gave. */}
+      {task.pickedUp && task.status !== 'open' && <span className="break-words text-xs text-muted">{t('board-card-picked-up')}</span>}
       {task.status !== 'open' && task.owner && <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted">
         <span className="min-w-0 break-words">{t('board-card-owner', { name: plain(task.owner, OWNER_MAX) })}</span>
         {task.status === 'claimed' && task.ownerState && <StatusPill state={task.ownerState} />}

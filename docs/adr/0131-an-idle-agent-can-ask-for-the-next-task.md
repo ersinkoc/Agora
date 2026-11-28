@@ -171,5 +171,6 @@ mark) and `components/BoardPickup.tsx`: on a Review-enabled project's board card
 that have the project and the kinds seen in it (the saved ones always offered), each change saved and read back, why it is paused;
 on an open card "Offer to an idle agent" / "Stop offering", which only says the mark without a live link. `net/view.ts` folds
 `TaskPickupEligible` and `TaskPickedUp` (the hub's only; kept through a task's moves; from the snapshot or after it), and a card says
-an idle agent took it. Only the owner's window gets the controls. Tests: `net/pickup.test.tsx`. Left: an end-to-end run with two fake
+an idle agent took it only while its claim (or the claim it was finished under) is the pickup's: a pickup released and claimed
+again by hand says nothing (agora-ac's read of ffd6e244). Only the owner's window gets the controls. Tests: `net/pickup.test.tsx`. Left: an end-to-end run with two fake
 agents on a real hub (ADR's Verification), and a node-side reattachment test with a real supervisor.
