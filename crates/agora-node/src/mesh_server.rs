@@ -161,14 +161,28 @@ pub trait TakeNextGate: Send + Sync {
 
 /// ADR-0131: the node's side of `task_take_next`: its policy (`mesh.take_next`), whether the hub's link agreed on
 /// `board.take_next.v1`, who names the run, and each run's next request sequence (none until the hub's committed one is known: a
-/// run asks with 0 first, after a node restart or a reattachment too). One request at a time on the node.
+/// run asks with 0 first, after a node restart or a reattachment too). One request at a time per agent: another while one is under way
+/// is answered `rate.limited` at once, never queued (agora-ac's read of 933356be).
 #[derive(Default)]
 pub struct TakeNext {
     allowed: AtomicBool,
     agreed: AtomicBool,
     gate: Mutex<Option<Arc<dyn TakeNextGate>>>,
     seqs: Mutex<HashMap<AgentId, ([u8; 16], u64)>>,
-    busy: Mutex<()>,
+    under_way: Mutex<HashSet<AgentId>>,
+}
+
+/// An agent's request under way; it is no longer when this goes.
+struct UnderWay<'a>(&'a TakeNext, AgentId);
+
+impl Drop for UnderWay<'_> {
+    fn drop(&mut self) {
+        self.0
+            .under_way
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.1);
+    }
 }
 
 impl TakeNext {
@@ -1054,7 +1068,17 @@ fn take_next_reply(
     if !tn.agreed.load(Ordering::Acquire) {
         return Some(missing());
     }
-    let _one = tn.busy.lock().unwrap_or_else(|e| e.into_inner());
+    if !tn
+        .under_way
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(agent.clone())
+    {
+        return Some(refuse(
+            Error::new(ErrorCode::RateLimited).with("limit", "1"),
+        ));
+    }
+    let _one = UnderWay(tn, agent.clone());
     let ask = |seq: u64| -> Result<BoardReply, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         link.take_next(

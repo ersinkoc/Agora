@@ -47,7 +47,7 @@ for an agent the supervisor does not know running, `skips_permissions` while its
 `board.unavailable` without a hub link, `protocol.capability_missing` when the link did not agree (or an older hub refuses the call); a
 hub that says the project is not shared is `not_shared`. It keeps each run's next sequence in memory: a run it has no count for asks
 with 0 first (after a node restart or a reattachment too), the count goes on only past an answer the hub committed, and a stale answer
-moves it to the hub's committed one for one more try. One request at a time on the node. Not yet: the window.
+moves it to the hub's committed one for one more try. One request at a time per agent (another under way is `rate.limited`). Not yet: the window.
 
 ## Waiting for messages
 
