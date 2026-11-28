@@ -541,9 +541,13 @@ mod tests {
     fn nothing_is_sent_after_the_end_and_a_seal_waits_for_a_send_under_way() {
         let i = Arc::new(Inbox::new(&small()));
         let sent = Arc::new(Mutex::new(Vec::<u8>::new()));
+        // The send says when it has begun, so the seal below is sure to find it under way (a fixed sleep was not enough on a busy
+        // macOS runner: the thread had not started yet, and the seal had nothing to wait for).
+        let (begun, has_begun) = std::sync::mpsc::sync_channel::<()>(1);
         let slow: Send = {
             let sent = Arc::clone(&sent);
             Arc::new(move |kind, _| {
+                let _ = begun.try_send(());
                 std::thread::sleep(Duration::from_millis(300));
                 sent.lock().unwrap().push(kind);
                 Ok(())
@@ -552,7 +556,10 @@ mod tests {
         let (i2, s2) = (Arc::clone(&i), Arc::clone(&slow));
         let under_way =
             std::thread::spawn(move || i2.send_open(&s2, kinds::PREVIEW_DATA, vec![1], || {}));
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            has_begun.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the send began"
+        );
         let began = Instant::now();
         i.seal();
         assert!(
