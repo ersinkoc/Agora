@@ -25,9 +25,9 @@ export function TeamChat({ messages, notices = [], fleet = [], now }: { messages
   const sender = (m: MessageModel) => (m.fromId === undefined ? undefined : fleet.find((a) => a.id === m.fromId));
   return <>
     <ul className="m-0 grid list-none gap-0.5 p-0" aria-label={t('ide-tab-messages')}>
-      {merged(messages, notices).map((r, i) => r.notice
+      {merged(messages, notices).map((r) => r.notice
         ? <li key={`notice-${r.notice.id}`}><NoticeRow n={r.notice} now={now} /></li>
-        : <li key={`${r.m.atMs}-${i}`}><MessageRow m={r.m} agent={sender(r.m)} now={now} onOpen={(row) => { opener.current = row; setReading(r.m); }} /></li>)}
+        : <li key={`${r.m.atMs}-${r.at}`}><MessageRow m={r.m} agent={sender(r.m)} now={now} onOpen={(row) => { opener.current = row; setReading(r.m); }} /></li>)}
     </ul>
     {reading && <MessageReader m={reading} agent={sender(reading)} now={now} onClose={() => setReading(undefined)} returnTo={opener} />}
   </>;
@@ -36,7 +36,8 @@ export function TeamChat({ messages, notices = [], fleet = [], now }: { messages
 /** The owner's channel notices (ADR-0130), given by the window to every Team chat it draws (the side panel, a layout panel, the phone). */
 export const ChannelNotices = createContext<readonly NoticeRowModel[]>([]);
 
-type Row = { notice: NoticeRowModel; m?: undefined } | { notice?: undefined; m: MessageModel };
+// `at` is a message's index in `messages`, so its row keeps its key when a notice is placed above it.
+type Row = { notice: NoticeRowModel; m?: undefined } | { notice?: undefined; m: MessageModel; at: number };
 
 /** Both lists newest first, as one: a notice goes before a message of the same time. */
 export function merged(messages: readonly MessageModel[], notices: readonly NoticeRowModel[]): Row[] {
@@ -46,7 +47,7 @@ export function merged(messages: readonly MessageModel[], notices: readonly Noti
   while (i < messages.length || j < notices.length) {
     const m = messages[i];
     const n = notices[j];
-    if (n && (!m || n.atMs >= m.atMs)) { out.push({ notice: n }); j++; } else if (m) { out.push({ m }); i++; }
+    if (n && (!m || n.atMs >= m.atMs)) { out.push({ notice: n }); j++; } else if (m) { out.push({ m, at: i }); i++; }
   }
   return out;
 }
