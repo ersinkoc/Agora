@@ -1878,7 +1878,9 @@ impl Hub {
             .collect();
         // ADR-0130: the channel notice, kept in the acceptance's own transaction with a hint for windows to read again.
         let mut events = events;
-        let channel = if accept {
+        // Review, once on, stays on: the project must still be shared (on two machines or more) for a notice.
+        let shared = crate::board::nodes_with(&g.view, &project).len() >= 2;
+        let channel = if accept && shared {
             crate::project_notice::pending(
                 self.store(),
                 &project,
@@ -1956,10 +1958,18 @@ impl Hub {
         let mut s = crate::project_notice::settings(self.store(), &project).map_err(|_| {
             Error::new(ErrorCode::Internal).with("incident_id", "project_notices.get")
         })?;
-        let review = self.lock().view.review_projects.contains(&project);
-        s.active = review && !s.channel.is_empty();
+        let (review, shared) = {
+            let g = self.lock();
+            (
+                g.view.review_projects.contains(&project),
+                crate::board::nodes_with(&g.view, &project).len() >= 2,
+            )
+        };
+        s.active = review && shared && !s.channel.is_empty();
         if !review {
             s.inactive_reason = "review_off".into();
+        } else if !shared {
+            s.inactive_reason = "not_shared".into();
         }
         Ok(s)
     }

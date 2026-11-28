@@ -196,7 +196,8 @@ machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_e
 
 Channel notices (ADR-0130 Amendment A): `ProjectNoticesSettingsSet` / `ProjectNoticesSettingsGet` (commands 134, 135) save and read the
 owner's notice settings of a project (`channel` `#` plus 1 to 32 of `[a-z0-9_-]`, empty for off; a channel that is not one is
-`protocol.invalid_message`, field `channel`); the read says `active` and, when not, `inactive_reason` (`review_off`). When a report is
+`protocol.invalid_message`, field `channel`); the read says `active` and, when not, `inactive_reason` (`review_off`, or `not_shared` once the project is on fewer than two
+machines: Review stays on, so the hub checks sharing at each acceptance and writes no notice then). When a report is
 accepted on a project whose channel is set and Review is on, the hub keeps a `ProjectNotice` (stable `notice_id` from project, task,
 revision and channel; no dispatcher or reviewer) in the acceptance's own transaction and records the content-free `ProjectNoticesChanged
 { project_id }` (event arm 98, hub only); `ProjectNoticesPage` (136) reads them oldest first after a cursor, at most 50 a page, `more`

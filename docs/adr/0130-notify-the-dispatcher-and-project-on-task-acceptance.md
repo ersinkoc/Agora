@@ -91,7 +91,9 @@ Step 1, channel notices at the hub: built (2026-11-28). Schema (Amendment A's me
 the owner's settings (`#` and 1 to 32 of `[a-z0-9_-]`, kept while Review is off, with `active` and `inactive_reason` in the read), the
 notice kept in the acceptance's own transaction (`Hub::task_review_decide`, a settings row keyed by the stable notice id, so a retry
 adds none) with the hint `ProjectNoticesChanged`, pruning after it (30 days, 50 per project channel, 10,000 on the hub; never the board),
-and the page (oldest first after the cursor, at most 50, expired ones left out). The three commands are the unscoped owner's in this
+and the page (oldest first after the cursor, at most 50, expired ones left out). A notice key holds the start of the SHA-256 of the project id, and every read keeps only the project's own
+rows, so a project whose id starts with another's never sees its notices (agora-ac's review of e0300a93); a project no longer shared
+writes none (`not_shared`). The three commands are the unscoped owner's in this
 step (`dispatch.rs`), and the hint reaches unscoped windows only. Tests: `project_notice.rs`'s own,
 `an_accepted_report_leaves_one_channel_notice_and_a_hint`, `channel_notice_commands_are_the_owners_at_the_hub`. Left: the window (the
 settings form offering the project's channels, notices as rows in Team chat), members' and agents' reads with access checked per page,

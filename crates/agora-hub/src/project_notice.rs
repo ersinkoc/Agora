@@ -32,20 +32,22 @@ fn settings_key(project: &str) -> String {
     format!("{SETTINGS_PREFIX}{project}")
 }
 
-/// The settings key prefix of one project's notices, as a glob (the store adds the `*`; glob characters in a project id are escaped).
+/// A project's part of a notice key: the start of the SHA-256 of its id, so no project's keys are a prefix of another's (an id may hold
+/// `/` or glob characters; review of e0300a93).
+fn project_part(project: &str) -> String {
+    Sha256::digest(project.as_bytes())[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The settings key prefix of one project's notices (the store adds the `*`).
 fn notices_glob(project: &str) -> String {
-    let escaped: String = project
-        .chars()
-        .map(|c| match c {
-            '*' | '?' | '[' | ']' => format!("[{c}]"),
-            c => c.to_string(),
-        })
-        .collect();
-    format!("{NOTICE_PREFIX}{escaped}/")
+    format!("{NOTICE_PREFIX}{}.", project_part(project))
 }
 
 fn notice_key(project: &str, notice_id: &str) -> String {
-    format!("{NOTICE_PREFIX}{project}/{notice_id}")
+    format!("{NOTICE_PREFIX}{}.{notice_id}", project_part(project))
 }
 
 /// The owner's settings for `project` (`dispatcher`, `channel`); defaults (off) when none were saved.
@@ -137,10 +139,18 @@ fn all_of(store: &SqliteStore, glob: &str) -> Result<Vec<v1::ProjectNotice>, Sto
         .collect())
 }
 
+/// `project`'s notices only (the key already separates them; the id is checked again).
+fn of_project(store: &SqliteStore, project: &str) -> Result<Vec<v1::ProjectNotice>, StoreError> {
+    Ok(all_of(store, &notices_glob(project))?
+        .into_iter()
+        .filter(|n| n.project_id == project)
+        .collect())
+}
+
 /// Removes what the limits and the expiry no longer keep: notices older than 30 days, then the oldest beyond 50 of `project`'s channel,
 /// then the oldest beyond 10,000 on the hub. Never touches the board.
 pub fn prune(store: &SqliteStore, project: &str, now_ms: u64) -> Result<(), StoreError> {
-    let mut mine = all_of(store, &notices_glob(project))?;
+    let mut mine = of_project(store, project)?;
     mine.sort_by(|a, b| (b.created_ms, &b.notice_id).cmp(&(a.created_ms, &a.notice_id)));
     for (i, n) in mine.iter().enumerate() {
         if i >= PER_CHANNEL || now_ms.saturating_sub(n.created_ms) > KEEP_MS {
@@ -166,7 +176,7 @@ pub fn page(
     now_ms: u64,
 ) -> Result<v1::ProjectNoticesPageResult, StoreError> {
     let limit = req.limit.clamp(1, PAGE_MAX) as usize;
-    let mut mine: Vec<v1::ProjectNotice> = all_of(store, &notices_glob(project))?
+    let mut mine: Vec<v1::ProjectNotice> = of_project(store, project)?
         .into_iter()
         .filter(|n| now_ms.saturating_sub(n.created_ms) <= KEEP_MS)
         .filter(|n| {
@@ -193,6 +203,51 @@ mod tests {
             std::env::temp_dir().join(format!("agora-notices-{name}-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         (SqliteStore::open(&path).unwrap(), path)
+    }
+
+    #[test]
+    fn a_project_never_sees_another_whose_id_starts_with_its_own() {
+        let (s, path) = store("prefix");
+        for project in ["a", "a/b"] {
+            set_settings(
+                &s,
+                &v1::ProjectNoticesSettingsSet {
+                    project_id: project.into(),
+                    dispatcher: false,
+                    channel: "#dev".into(),
+                },
+                project,
+            )
+            .unwrap()
+            .unwrap();
+            let (k, v) = pending(&s, project, "t", 1, 10).unwrap().unwrap();
+            s.set_setting(&k, &v).unwrap();
+        }
+        let read = |p: &str| {
+            page(
+                &s,
+                p,
+                &v1::ProjectNoticesPage {
+                    limit: 50,
+                    ..Default::default()
+                },
+                20,
+            )
+            .unwrap()
+            .notices
+        };
+        assert_eq!(
+            read("a")
+                .iter()
+                .map(|n| n.project_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        prune(&s, "a", 10 + KEEP_MS + 1).unwrap();
+        assert!(read("a").is_empty());
+        assert_eq!(read("a/b").len(), 1, "pruning a never touches a/b");
+        drop(s);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
