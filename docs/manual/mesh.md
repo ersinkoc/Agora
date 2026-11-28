@@ -25,6 +25,7 @@ Call `workspace_status` when you start, and before you edit files others may tou
 | `task_create` | `title`, `detail`, `depends_on` | `task_id` |
 | `task_claim` | `task_id` | `ok`; a task must be open and its dependencies done |
 | `task_complete` | `task_id`, `summary`, `refs` | `ok` |
+| `task_take_next` | none | `outcome` (`claimed`, `existing`, `empty`), `request_seq`, and the `task` claimed for you or already yours |
 | `lease_acquire` | `paths` (relative to the project root; a folder covers what is below it), `ttl_s`, `reason` | `lease_id`, `expires_at`, or `lease.held` |
 | `lease_release` | `lease_id` | `ok` |
 | `handoff` | `to`, `task_id`, `summary`, `refs` | `handoff_id`; a task you name moves to them |
@@ -32,6 +33,10 @@ Call `workspace_status` when you start, and before you edit files others may tou
 | `agent_wait` | `agent_id`, `state` (`idle`, `working`, `blocked`, `done`, `exited`), `timeout_s` (default 600, at most 3600) | `agent_id`, `state`, or `mesh.timeout` |
 | `agent_output` | `agent_id`, `lines` (default 40, at most 200) | the last lines of its screen or conversation |
 
+- `task_take_next` is listed only when the machine's owner allows it (`mesh.take_next = true` in the node's policy, off by default),
+  the hub takes it, and your agent does not act without asking. The project's owner turns it on per project, names the machines and
+  kinds that may use it, and marks the tasks it may take; it takes the first marked open task, one at a time. Nothing is typed into
+  your terminal: you call it when you are idle.
 - `machines_list` and `scope: "hub"` are listed only when the machine's owner allows the hub-wide view (`mesh.fleet` in the node's
   policy, on by default).
 - `agent_start`, `agent_wait` and `agent_output` are listed when the node offers them. `agent_start` starts a **helper**: the person

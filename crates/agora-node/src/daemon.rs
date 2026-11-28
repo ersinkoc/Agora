@@ -1624,6 +1624,27 @@ pub const AUTO_RESUME_COOLDOWN_MS: u64 = 10 * 60 * 1000;
 /// ADR-0062 item 4: the time between two rounds of agents brought back by themselves.
 pub const AUTO_RESUME_GAP: Duration = Duration::from_secs(5);
 
+/// ADR-0131: the supervisor says which run an agent is now, and whether its mode acts without asking.
+struct RunGate {
+    supervisor: Arc<Mutex<Supervisor>>,
+}
+
+impl crate::mesh_server::TakeNextGate for RunGate {
+    fn run(&self, agent: &AgentId) -> Result<[u8; 16], &'static str> {
+        let sup = self.supervisor.lock().unwrap_or_else(|e| e.into_inner());
+        let run = sup
+            .list()
+            .into_iter()
+            .find(|v| v.id == *agent && v.running)
+            .and_then(|v| v.run_id)
+            .ok_or("unknown_run")?;
+        if sup.skips_permissions_now(agent) {
+            return Err("skips_permissions");
+        }
+        Ok(run)
+    }
+}
+
 /// Name of the node's policy file in its data directory (written by the machine's owner; the hub cannot change it).
 pub const POLICY_FILE: &str = "policy";
 
@@ -1638,6 +1659,9 @@ pub struct Policy {
     /// Agents may see every machine and agent of the hub (`mesh.fleet`, default true; ADR-0112): the node offers `machines_list` and
     /// `agents_list {scope: "hub"}` and asks the hub for its view only when this allows it.
     pub mesh_fleet: bool,
+    /// An idle agent here may ask the hub for the next task the owner marked (`mesh.take_next`, default false; ADR-0131). Only the word
+    /// `true` turns it on; the hub's settings decide too.
+    pub take_next: bool,
     /// Routed commands that need a user-signed grant (`signed_commands = a, b*`; ADR-0041). Empty: none do.
     pub signed_commands: crate::grants::SignedCommands,
     /// ADR-0122: whether this node gives its agents the owner's shared skills and MCP servers (`share.items = off` gives none), and
@@ -1725,6 +1749,7 @@ impl Default for Policy {
             mesh_remote: true,
             remote_helpers: true,
             mesh_fleet: true,
+            take_next: false,
             signed_commands: crate::grants::SignedCommands::default(),
             share: crate::shared_items::SharePolicy::default(),
             sandbox: crate::sandbox::SandboxPolicy::default(),
@@ -1832,6 +1857,7 @@ pub fn read_policy(path: &std::path::Path) -> Policy {
                 "mesh.remote" => p.mesh_remote = v.trim() == "true",
                 "mesh.remote_helpers" => p.remote_helpers = v.trim() == "true",
                 "mesh.fleet" => p.mesh_fleet = v.trim() == "true",
+                "mesh.take_next" => p.take_next = v.trim() == "true",
                 // ADR-0122: anything but `on` or `off` keeps it off (a typo never widens) and is a line not understood.
                 "share.items" => match v.trim() {
                     "on" | "true" => p.share.on = true,
@@ -2188,6 +2214,7 @@ impl Node {
         )?);
         mesh.set_remote_allowed(policy.mesh_remote);
         mesh.set_fleet_allowed(policy.mesh_fleet);
+        mesh.set_take_next_allowed(policy.take_next);
         // ADR-0109: the durable inbox opens first, so the reservation below starts above every restored record's number.
         if let Err(e) = mesh.open_handoffs(&cfg.data_dir) {
             crate::log_line!("mesh: durable handoffs unavailable: {e}");
@@ -2528,6 +2555,9 @@ impl Node {
             mesh.set_shared_launch(Arc::clone(&shared) as Arc<dyn crate::mesh_server::SharedLaunch>);
         }
         mesh.set_helpers(Arc::clone(&spawner) as Arc<dyn crate::mesh_server::Helpers>);
+        mesh.set_take_next_gate(Arc::new(RunGate {
+            supervisor: Arc::clone(&supervisor),
+        }));
         // ADR-0088: the node's own ports, where a home laid out the default way writes them (`<home>/hub/listen`, `<home>/link/url`,
         // `<home>/link/panel-port`, home being the data folder's parent).
         let previews = Arc::new(crate::preview::Previews::new(
@@ -4782,6 +4812,10 @@ mod announce_tests {
         assert!(read_policy(&dir.join("absent")).mesh_fleet);
         assert!(reg("mesh.fleet = true\n").mesh_fleet);
         assert!(!reg("mesh.fleet = false\n").mesh_fleet);
+        // ADR-0131: `mesh.take_next` is off unless the line says exactly `true`.
+        assert!(!read_policy(&dir.join("absent")).take_next);
+        assert!(reg("mesh.take_next = true\n").take_next);
+        assert!(!reg("mesh.take_next = ture\n").take_next);
         let fleet_typo = reg("mesh.fleet = flase\n");
         assert!(!fleet_typo.mesh_fleet && fleet_typo.problems.is_empty());
         assert!(reg("agents.registry = off\n").registry.off);

@@ -138,6 +138,55 @@ pub trait RemoteLink: Send + Sync {
     ) {
         done(Err("node.offline".into()));
     }
+
+    /// ADR-0131: asks the hub's board for the next task for run `run` of `from_agent`, with the node's request sequence `seq` (0 asks
+    /// only for what the hub committed). `done` is called once. Must not block.
+    fn take_next(
+        &self,
+        _from_agent: &str,
+        _project: &str,
+        _run: [u8; 16],
+        _seq: u64,
+        done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+    ) {
+        done(Err("node.offline".into()));
+    }
+}
+
+/// ADR-0131: who says which run an agent is now, and whether it may ask for the next task (the supervisor knows its run and its mode).
+pub trait TakeNextGate: Send + Sync {
+    /// The run of `agent` now, or why it may not ask (`unknown_run`; `skips_permissions` while its mode acts without asking).
+    fn run(&self, agent: &AgentId) -> Result<[u8; 16], &'static str>;
+}
+
+/// ADR-0131: the node's side of `task_take_next`: its policy (`mesh.take_next`), whether the hub's link agreed on
+/// `board.take_next.v1`, who names the run, and each run's next request sequence (none until the hub's committed one is known: a
+/// run asks with 0 first, after a node restart or a reattachment too). One request at a time on the node.
+#[derive(Default)]
+pub struct TakeNext {
+    allowed: AtomicBool,
+    agreed: AtomicBool,
+    gate: Mutex<Option<Arc<dyn TakeNextGate>>>,
+    seqs: Mutex<HashMap<AgentId, ([u8; 16], u64)>>,
+    busy: Mutex<()>,
+}
+
+impl TakeNext {
+    /// Whether the node offers it to the hub: its policy allows it, its mesh reaches the hub, and something names runs.
+    fn may_offer(&self, remote_allowed: &AtomicBool) -> bool {
+        self.allowed.load(Ordering::Acquire)
+            && remote_allowed.load(Ordering::Acquire)
+            && self
+                .gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+    }
+
+    /// Whether agents are offered the tool now: as above, and the hub's link agreed.
+    fn offered(&self, remote_allowed: &AtomicBool) -> bool {
+        self.may_offer(remote_allowed) && self.agreed.load(Ordering::Acquire)
+    }
 }
 
 /// What an agent asked `agent_start` for (ADR-0057), parsed; the node decides everything else.
@@ -940,6 +989,165 @@ fn board_reply(
     }
 }
 
+/// ADR-0131: the node's answer to `task_take_next`, which never reaches a broker: the node's policy and the run (`task.pickup_off`
+/// `node_policy`, `unknown_run`, `skips_permissions`), the hub's link (`board.unavailable` without one, `protocol.capability_missing`
+/// when it did not agree), then the hub's answer with the run's id and sequence filled here. The sequence goes on only past an answer
+/// the hub committed; a run whose sequence is not known asks with 0 first, and a stale answer moves it to the hub's committed one (one
+/// more try). A hub that says the project is not shared is `not_shared`; nothing runs on the node's own board.
+fn take_next_reply(
+    conn: &McpConnection,
+    line: &str,
+    mesh: &Arc<Mutex<Mesh>>,
+    links: &Links<'_>,
+) -> Option<Message> {
+    use agora_protocol::{Error, ErrorCode};
+    if !conn.initialized() {
+        return None;
+    }
+    let Ok(Message::Request { id, method, params }) = agora_protocol::jsonrpc::parse_line(line)
+    else {
+        return None;
+    };
+    if method != "tools/call"
+        || params.get("name").and_then(Value::as_str) != Some(agora_mesh::mcp::TAKE_NEXT_TOOL)
+    {
+        return None;
+    }
+    let reply = |result: Value| Message::Response {
+        id: id.clone(),
+        result,
+    };
+    let refuse = |e: Error| reply(agora_mesh::mcp::protocol_error_result(&e));
+    let off = |reason: &str| refuse(Error::new(ErrorCode::TaskPickupOff).with("reason", reason));
+    let tn = links.take_next;
+    if !tn.allowed.load(Ordering::Acquire) || !links.allowed.load(Ordering::Acquire) {
+        return Some(off("node_policy"));
+    }
+    let agent = conn.agent().clone();
+    let Some(project) = mesh
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .agent_info(&agent)
+        .map(|a| a.project.clone())
+    else {
+        return Some(off("unknown_run"));
+    };
+    let gate = tn.gate.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let run = match gate.map(|g| g.run(&agent)) {
+        Some(Ok(run)) => run,
+        Some(Err(reason)) => return Some(off(reason)),
+        None => return Some(off("unknown_run")),
+    };
+    let unavailable =
+        || refuse(Error::new(ErrorCode::BoardUnavailable).with("project_id", project.as_str()));
+    let Some(link) = links
+        .remote
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    else {
+        return Some(unavailable());
+    };
+    let capability = agora_protocol::handshake::BOARD_TAKE_NEXT_V1;
+    let missing =
+        || refuse(Error::new(ErrorCode::ProtocolCapabilityMissing).with("capability", capability));
+    if !tn.agreed.load(Ordering::Acquire) {
+        return Some(missing());
+    }
+    let _one = tn.busy.lock().unwrap_or_else(|e| e.into_inner());
+    let ask = |seq: u64| -> Result<BoardReply, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        link.take_next(
+            agent.as_str(),
+            &project,
+            run,
+            seq,
+            Box::new(move |r| {
+                let _ = tx.send(r);
+            }),
+        );
+        rx.recv_timeout(BOARD_WAIT)
+            .unwrap_or_else(|_| Err("node.timeout".into()))
+    };
+    // The hub's answer: the tool result as the agent gets it, and its text parsed.
+    enum Got {
+        Answer(Value, Value),
+        Off(Message),
+    }
+    let got = |r: Result<BoardReply, String>| match r {
+        Ok(b) if b.shared => match serde_json::from_str::<Value>(&b.result_json) {
+            Ok(result) => {
+                let text = agora_mesh::mcp::tool_result_value(&result).unwrap_or(Value::Null);
+                Got::Answer(result, text)
+            }
+            Err(_) => Got::Off(unavailable()),
+        },
+        Ok(_) => Got::Off(off("not_shared")),
+        // An older hub does not know the command's new fields or the tool.
+        Err(code) if code == "protocol.invalid_message" => Got::Off(missing()),
+        Err(_) => Got::Off(unavailable()),
+    };
+    let known = tn
+        .seqs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&agent)
+        .filter(|(r, _)| *r == run)
+        .map(|(_, next)| *next);
+    let mut next = match known {
+        Some(next) => next,
+        None => match got(ask(0)) {
+            Got::Answer(result, text) => {
+                let Some(committed) = text["request_seq"].as_u64() else {
+                    // A refusal (the owner turned it off, say) is the answer; the sequence stays unknown.
+                    return Some(reply(result));
+                };
+                committed + 1
+            }
+            Got::Off(m) => return Some(m),
+        },
+    };
+    for _ in 0..2 {
+        let (result, text) = match got(ask(next)) {
+            Got::Answer(result, text) => (result, text),
+            Got::Off(m) => {
+                // Not answered, or not by this hub: the same sequence is asked again next time (a committed one is answered again).
+                tn.seqs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(agent.clone(), (run, next));
+                return Some(m);
+            }
+        };
+        if text["error"]["code"].as_str() == Some(ErrorCode::TaskPickupStale.as_str()) {
+            let committed = text["error"]["params"]["committed_seq"]
+                .as_str()
+                .and_then(|c| c.parse::<u64>().ok())
+                .or_else(|| text["error"]["params"]["committed_seq"].as_u64());
+            if let Some(c) = committed {
+                next = c + 1;
+                continue;
+            }
+        }
+        // A committed answer moves the sequence on; a refusal before the hub committed anything keeps it.
+        let after = if text["request_seq"].as_u64() == Some(next) {
+            next + 1
+        } else {
+            next
+        };
+        tn.seqs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(agent.clone(), (run, after));
+        return Some(reply(result));
+    }
+    tn.seqs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(agent, (run, next));
+    Some(unavailable())
+}
+
 /// How long `workspace_status` waits for the hub before it answers from this node alone (`partial: true`).
 const STATUS_WAIT: Duration = Duration::from_secs(3);
 
@@ -1320,6 +1528,8 @@ pub struct MeshServer {
     /// ADR-0112: node policy `mesh.fleet` and whether the hub offers `fleet_status`.
     fleet: Arc<Fleet>,
     subtasks_agreed: Arc<AtomicBool>,
+    /// ADR-0131.
+    take_next: Arc<TakeNext>,
     shares: Arc<Shares>,
     /// ADR-0039: the shared-board leases renewed for running agents (a leaf lock).
     renewals: Arc<LeaseRenewals>,
@@ -1447,6 +1657,7 @@ impl MeshServer {
             remote_allowed: Arc::new(AtomicBool::new(true)),
             remote,
             subtasks_agreed: Arc::new(AtomicBool::new(false)),
+            take_next: Arc::new(TakeNext::default()),
             fleet: Arc::new(Fleet {
                 allowed: AtomicBool::new(true),
                 hub: AtomicBool::new(false),
@@ -1533,10 +1744,36 @@ impl MeshServer {
                 .any(|c| c == agora_protocol::handshake::BOARD_SUBTASKS_V1),
             Ordering::Release,
         );
+        self.take_next.agreed.store(
+            capabilities
+                .iter()
+                .any(|c| c == agora_protocol::handshake::BOARD_TAKE_NEXT_V1),
+            Ordering::Release,
+        );
     }
 
     pub(crate) fn hub_disconnected(&self) {
         self.subtasks_agreed.store(false, Ordering::Release);
+        self.take_next.agreed.store(false, Ordering::Release);
+    }
+
+    /// ADR-0131: node policy `mesh.take_next` (default off).
+    pub fn set_take_next_allowed(&self, allowed: bool) {
+        self.take_next.allowed.store(allowed, Ordering::Release);
+    }
+
+    /// ADR-0131: who names an agent's run and says whether it may ask.
+    pub fn set_take_next_gate(&self, gate: Arc<dyn TakeNextGate>) {
+        *self
+            .take_next
+            .gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(gate);
+    }
+
+    /// ADR-0131: whether the node offers `board.take_next.v1` to the hub.
+    pub(crate) fn take_next_offered(&self) -> bool {
+        self.take_next.may_offer(&self.remote_allowed)
     }
 
     pub(crate) fn remote_allowed(&self) -> bool {
@@ -2358,6 +2595,7 @@ impl MeshServer {
         let thread = {
             let typed = Arc::clone(&typed);
             let subtasks_agreed = Arc::clone(&self.subtasks_agreed);
+            let take_next = Arc::clone(&self.take_next);
             let launch_slot = Arc::clone(&self.shared_launch);
             let suggest_slot = Arc::clone(&self.preview_suggest);
             let (mesh, stop, agent, remote, allowed, shares, helpers, fleet, renewals) = (
@@ -2392,6 +2630,7 @@ impl MeshServer {
                                 };
                                 let typed = Arc::clone(&typed);
                                 let subtasks_agreed = Arc::clone(&subtasks_agreed);
+                                let take_next = Arc::clone(&take_next);
                                 let (mesh, stop, agent, remote, allowed, shares, fleet, renewals) = (
                                     Arc::clone(&mesh),
                                     Arc::clone(&stop),
@@ -2426,6 +2665,7 @@ impl MeshServer {
                                                 renewals: &renewals,
                                                 fleet: &fleet,
                                                 subtasks_agreed: &subtasks_agreed,
+                                                take_next: &take_next,
                                                 helpers,
                                                 launch,
                                                 preview,
@@ -2738,6 +2978,8 @@ struct Links<'a> {
     renewals: &'a LeaseRenewals,
     fleet: &'a Fleet,
     subtasks_agreed: &'a AtomicBool,
+    /// ADR-0131.
+    take_next: &'a TakeNext,
     helpers: Option<Arc<dyn Helpers>>,
     /// ADR-0122 Amendment A: the shared servers' launcher.
     launch: Option<Arc<dyn SharedLaunch>>,
@@ -3192,6 +3434,10 @@ fn route(text: &str, s: &mut Session<'_>, mesh: &Arc<Mutex<Mesh>>, links: &Links
     let fleet = links.fleet.offered(allowed);
     s.conn.set_fleet(fleet);
     s.conn.set_subtasks(links.subtasks_offered());
+    s.conn.set_take_next(links.take_next.offered(allowed));
+    if let Some(msg) = take_next_reply(&s.conn, text, mesh, links) {
+        return Step::Reply(msg);
+    }
     s.conn.set_preview(links.preview.is_some());
     if let Some(p) = &links.preview {
         if let Some(msg) = preview_reply(&s.conn, text, p.as_ref()) {
@@ -6319,6 +6565,165 @@ mod tests {
         assert_eq!(c.tool("task_list", json!({}))[0]["task_id"], "t-9");
         assert_eq!(link.0.lock().unwrap().last().unwrap().0, "task_list");
 
+        drop(c);
+        done(server, dir);
+    }
+
+    /// ADR-0131, on a real endpoint: `task_take_next` is listed and answered only with the node's policy on, a run the gate names, a hub
+    /// link that agreed on `board.take_next.v1`; the node fills the run and the sequence (0 first, then on past committed answers, the
+    /// hub's committed one after a stale answer), says `not_shared` rather than ever asking its own board, and passes refusals on.
+    #[test]
+    fn take_next_is_the_hubs_with_the_nodes_run_and_sequence() {
+        if !agora_platform::LOCAL_SOCKETS_SUPPORTED {
+            return;
+        }
+        /// A hub's board for one run: it commits each new sequence and answers as the hub does.
+        #[derive(Default)]
+        struct Hub {
+            asked: Mutex<Vec<(String, [u8; 16], u64)>>,
+            committed: Mutex<u64>,
+            shared: AtomicBool,
+        }
+        impl RemoteLink for Hub {
+            fn post(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[String],
+                done: Box<dyn FnOnce(Result<(), String>) + Send>,
+            ) {
+                done(Err("node.offline".into()));
+            }
+            fn take_next(
+                &self,
+                agent: &str,
+                _: &str,
+                run: [u8; 16],
+                seq: u64,
+                done: Box<dyn FnOnce(Result<BoardReply, String>) + Send>,
+            ) {
+                self.asked.lock().unwrap().push((agent.into(), run, seq));
+                let mut committed = self.committed.lock().unwrap();
+                let text = if seq == 0 {
+                    json!({"outcome": "empty", "request_seq": *committed})
+                } else if seq < *committed {
+                    json!({"error": {"code": "task.pickup_stale", "params": {"committed_seq": committed.to_string()}}})
+                } else {
+                    *committed = seq;
+                    json!({"outcome": "empty", "request_seq": seq})
+                };
+                let is_error = text.get("error").is_some();
+                done(Ok(BoardReply {
+                    shared: self.shared.load(Ordering::Acquire),
+                    result_json: json!({"content": [{"type": "text", "text": text.to_string()}], "isError": is_error}).to_string(),
+                }));
+            }
+        }
+        struct Gate(Mutex<Result<[u8; 16], &'static str>>);
+        impl TakeNextGate for Gate {
+            fn run(&self, _: &AgentId) -> Result<[u8; 16], &'static str> {
+                *self.0.lock().unwrap()
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("agora-take-next-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let server = MeshServer::new(&dir, Limits::default()).unwrap();
+        let hub = Arc::new(Hub::default());
+        hub.shared.store(true, Ordering::Release);
+        let sock = server
+            .register(AgentInfo {
+                id: AgentId::new("a1"),
+                kind: "fixture".into(),
+                node: "n".into(),
+                project: "p".into(),
+                label: "a1".into(),
+                worktree: String::new(),
+                state: "idle".into(),
+            })
+            .unwrap();
+        let mut c = Client::new(&sock);
+        let take = |c: &mut Client| c.tool(agora_mesh::mcp::TAKE_NEXT_TOOL, json!({}));
+        let listed = |c: &mut Client| {
+            c.names()
+                .iter()
+                .any(|n| n == agora_mesh::mcp::TAKE_NEXT_TOOL)
+        };
+        let cap = agora_protocol::handshake::BOARD_TAKE_NEXT_V1;
+
+        // The policy is off by default: not offered to the hub, not listed, refused, and the hub never asked.
+        server.hub_welcomed(&[cap.into()]);
+        assert!(!server.take_next_offered());
+        assert!(!listed(&mut c));
+        assert_eq!(take(&mut c)["error"]["params"]["reason"], "node_policy");
+        server.set_take_next_allowed(true);
+        assert!(!server.take_next_offered(), "nothing names runs yet");
+        assert_eq!(take(&mut c)["error"]["params"]["reason"], "unknown_run");
+        let gate = Arc::new(Gate(Mutex::new(Err("skips_permissions"))));
+        server.set_take_next_gate(gate.clone());
+        assert!(server.take_next_offered());
+        assert_eq!(
+            take(&mut c)["error"]["params"]["reason"],
+            "skips_permissions"
+        );
+        *gate.0.lock().unwrap() = Ok([7; 16]);
+        assert_eq!(
+            take(&mut c)["error"]["code"],
+            "board.unavailable",
+            "no hub link"
+        );
+        server.set_remote(hub.clone() as Arc<dyn RemoteLink>);
+        server.hub_disconnected();
+        assert!(!listed(&mut c));
+        assert_eq!(take(&mut c)["error"]["code"], "protocol.capability_missing");
+        assert!(hub.asked.lock().unwrap().is_empty());
+
+        server.hub_welcomed(&[cap.into()]);
+        assert!(listed(&mut c));
+        assert_eq!(take(&mut c), json!({"outcome": "empty", "request_seq": 1}));
+        assert_eq!(take(&mut c), json!({"outcome": "empty", "request_seq": 2}));
+        let seqs: Vec<u64> = hub
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(a, r, s)| {
+                assert_eq!((a.as_str(), *r), ("a1", [7; 16]));
+                *s
+            })
+            .collect();
+        assert_eq!(
+            seqs,
+            [0, 1, 2],
+            "0 once, to learn what the hub committed, then on"
+        );
+
+        // A new run starts from what the hub committed; a node that lost its count is put right by a stale answer.
+        *gate.0.lock().unwrap() = Ok([8; 16]);
+        *hub.committed.lock().unwrap() = 5;
+        assert_eq!(take(&mut c), json!({"outcome": "empty", "request_seq": 6}));
+        server
+            .take_next
+            .seqs
+            .lock()
+            .unwrap()
+            .insert(AgentId::new("a1"), ([8; 16], 3));
+        assert_eq!(take(&mut c), json!({"outcome": "empty", "request_seq": 7}));
+        let tail: Vec<u64> = hub
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(3)
+            .map(|(_, _, s)| *s)
+            .collect();
+        assert_eq!(tail, [0, 6, 3, 7]);
+
+        // A hub that says the project is not shared: never the node's own board.
+        hub.shared.store(false, Ordering::Release);
+        assert_eq!(take(&mut c)["error"]["params"]["reason"], "not_shared");
+        server.set_take_next_allowed(false);
+        assert!(!listed(&mut c));
         drop(c);
         done(server, dir);
     }

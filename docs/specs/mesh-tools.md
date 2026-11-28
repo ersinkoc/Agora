@@ -17,7 +17,7 @@ the node per MCP connection; agents cannot impersonate each other.
 | `task_create` | `{ title, detail?, depends_on? }` | `{ task_id }` |
 | `task_claim` | `{ task_id }` | `{ ok }` or `lease.held`-style conflict |
 | `task_complete` | `{ task_id, summary, refs? }` | `{ ok }` |
-| `task_take_next` | `{}` | `{ outcome: "claimed"\|"existing"\|"empty", request_seq, task? }` (ADR-0131 Amendment A; the hub alone answers it, on a link that negotiated `board.take_next.v1`; listed to agents once their node offers it, a later step). See "Taking the next task" |
+| `task_take_next` | `{}` | `{ outcome: "claimed"\|"existing"\|"empty", request_seq, task? }` (ADR-0131 Amendment A; the hub alone answers it, on a link that negotiated `board.take_next.v1`; listed to agents only while their node offers it, `mesh.take_next = true`). See "Taking the next task" |
 | `lease_acquire` | `{ paths: [glob], ttl_s: number, reason }` | `{ lease_id, expires_at }` or `lease.held` |
 | `lease_release` | `{ lease_id }` | `{ ok }` |
 | `handoff` | `{ to, task_id?, summary, refs }` | `{ handoff_id }` |
@@ -40,8 +40,14 @@ the run's start), a run whose launch skips permission prompts (`skips_permission
 (ties by id) that the board lets the run claim (a dependency not accepted yet blocks it) is `claimed`, with the task as `task_list` shows
 it, else `empty`. A claim, the hub's `TaskPickedUp` and the run's outcome row are stored in one transaction under the hub's lock, so a
 manual claim or the owner clearing a mark meanwhile wins; the rows of runs that are not running any more are dropped (at a take in the
-project and by the hub's sweep once a minute). Not yet: the
-node's side (`[mesh] take_next`, the run's mode, its sequence) and the window.
+project and by the hub's sweep once a minute). The node's side: offered to the hub (`board.take_next.v1`) and listed to agents only
+while its policy says `mesh.take_next = true` (off by default; only the word `true`), its mesh reaches the hub, and the hub's link
+agreed. The node answers the tool itself, never on its own board: `task.pickup_off` `node_policy` with the policy off, `unknown_run`
+for an agent the supervisor does not know running, `skips_permissions` while its current mode acts without asking;
+`board.unavailable` without a hub link, `protocol.capability_missing` when the link did not agree (or an older hub refuses the call); a
+hub that says the project is not shared is `not_shared`. It keeps each run's next sequence in memory: a run it has no count for asks
+with 0 first (after a node restart or a reattachment too), the count goes on only past an answer the hub committed, and a stale answer
+moves it to the hub's committed one for one more try. One request at a time on the node. Not yet: the window.
 
 ## Waiting for messages
 

@@ -322,6 +322,40 @@ impl crate::mesh_server::RemoteLink for MeshOut {
             })),
         });
     }
+
+    fn take_next(
+        &self,
+        from_agent: &str,
+        project: &str,
+        run: [u8; 16],
+        seq: u64,
+        done: Box<dyn FnOnce(Result<crate::mesh_server::BoardReply, String>) + Send>,
+    ) {
+        let call = agora_protocol::v1::BoardCall {
+            project_id: project.to_string(),
+            tool: agora_mesh::mcp::TAKE_NEXT_TOOL.to_string(),
+            arguments_json: "{}".to_string(),
+            origin: String::new(),
+            from_agent: from_agent.to_string(),
+            from_run_id: run.to_vec(),
+            request_seq: seq,
+        };
+        self.request(
+            command_request::Command::BoardCall(call),
+            "",
+            Box::new(move |r| {
+                done(r.and_then(|ok| match ok.result {
+                    Some(agora_protocol::v1::command_ok::Result::BoardResult(b)) => {
+                        Ok(crate::mesh_server::BoardReply {
+                            shared: b.shared,
+                            result_json: b.result_json,
+                        })
+                    }
+                    _ => Err("protocol.invalid_message".to_string()),
+                }))
+            }),
+        );
+    }
 }
 
 impl MeshOut {
@@ -739,6 +773,10 @@ where
     }
     if mesh.as_ref().is_some_and(|mesh| mesh.remote_allowed()) {
         capabilities.push(agora_protocol::handshake::BOARD_SUBTASKS_V1);
+    }
+    // ADR-0131: offered only while the node's policy allows it (`mesh.take_next`) and its mesh reaches the hub.
+    if mesh.as_ref().is_some_and(|mesh| mesh.take_next_offered()) {
+        capabilities.push(agora_protocol::handshake::BOARD_TAKE_NEXT_V1);
     }
     let has_notices = mesh
         .as_ref()

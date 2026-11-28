@@ -90,6 +90,8 @@ pub struct McpConnection {
     subtasks: bool,
     /// ADR-0088: the node takes `preview_suggest` (it has a hub to tell, and previews).
     preview: bool,
+    /// ADR-0131: the node offers `task_take_next` (its policy allows it and its hub's link agreed on `board.take_next.v1`).
+    take_next: bool,
 }
 
 /// ADR-0088: an agent says its app listens on a port; the node raises `PreviewSuggested` (a card with Open, never an open).
@@ -627,6 +629,10 @@ impl BatchReply {
 /// The tools that read or change a project's shared state (ADR-0039): on a shared project they run on the hub's board.
 pub const SUBTASK_TOOL: &str = "task_create_subtask";
 
+/// ADR-0131: an idle agent asks the hub's board for the next task the owner marked. Not one of [`BOARD_TOOLS`]: only the hub answers
+/// it (no local board ever does), and the node fills the call.
+pub const TAKE_NEXT_TOOL: &str = "task_take_next";
+
 pub const BOARD_TOOLS: &[&str] = &[
     "task_list",
     "task_create",
@@ -658,6 +664,7 @@ pub fn board_tool(
         fleet: false,
         subtasks: false,
         preview: false,
+        take_next: false,
     };
     let params = json!({"name": name, "arguments": args});
     match conn.call(&Value::Null, &params, mesh, now_ms) {
@@ -687,7 +694,13 @@ impl McpConnection {
             fleet: false,
             subtasks: false,
             preview: false,
+            take_next: false,
         }
+    }
+
+    /// ADR-0131: whether `task_take_next` is listed. The node sets it before each line and answers the tool itself.
+    pub fn set_take_next(&mut self, on: bool) {
+        self.take_next = on;
     }
 
     /// ADR-0088: whether `preview_suggest` is listed. The node sets it before each line.
@@ -786,6 +799,13 @@ impl McpConnection {
                             ],
                             &["parent_task_id", "title"],
                         ),
+                    }));
+                }
+                if self.take_next {
+                    list.push(json!({
+                        "name": TAKE_NEXT_TOOL,
+                        "description": "When you are idle, take the next task the owner marked on the project's shared board. Returns the task claimed for you, the task you already hold, or that none is waiting.",
+                        "inputSchema": schema(&[], &[]),
                     }));
                 }
                 if self.spawn {

@@ -155,6 +155,14 @@ take in the project and by a sweep once a minute), a claim
 the run holds, and the first marked open task in creation order the board lets it claim. The claim, every event the board calls made,
 `TaskPickedUp` and the outcome row are stored in one transaction; on a failure the board is put back. Tests: `task_pickup.rs`'s
 (`requests_are_limited_per_run_node_and_project_each_second`, `outcome_rows_are_the_runs_own_and_go_with_the_run`) and
-`an_idle_run_takes_the_next_marked_task_once_and_only_for_itself`. No node offers the capability yet, so no agent reaches it. Left: the
-node's side (`[mesh] take_next`, run, mode, sequence, no local fallback, the tool listed to agents) and the window (settings form, the
-mark on a card, the pickup's source).
+`an_idle_run_takes_the_next_marked_task_once_and_only_for_itself`. 
+
+Step 3, the node's side: built (2026-11-28). The policy key is `mesh.take_next = true` in the node's policy file (the file's own
+syntax for the amendment's `[mesh] take_next`; off by default, only the word `true`). `MeshServer`'s `TakeNext`: offered to the hub
+(`uplink_client`) only with the policy on, `mesh.remote` on and a gate that names runs (`daemon::RunGate`: the supervisor's running
+view and run id, and `skips_permissions_now`, so a mode switched to acting without asking counts); listed to agents only once the
+hub's link agreed. `take_next_reply` answers the tool itself (never a broker): the node's reasons, the link's, then the hub's answer
+with the run and sequence filled by the node (`RemoteLink::take_next`, a `BoardCall` with fields 6 and 7); each run's next sequence in
+memory, 0 first for a run without a count, on only past a committed answer, the committed one after a stale answer; `not_shared`
+from a hub that says so. Tests: `take_next_is_the_hubs_with_the_nodes_run_and_sequence`, the policy test. Left: the window (settings
+form, the mark on a card, the pickup's source) and an end-to-end run with two fake agents on a real hub.

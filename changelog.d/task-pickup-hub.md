@@ -1,1 +1,1 @@
-- The hub keeps the owner's automatic-pickup settings per project and the owner's mark on tasks an idle agent may take, and answers an idle agent's request for the next marked task (ADR-0131); agents reach it once their machine offers it, in a later step.
+- An idle agent can take the next task the project's owner marked on a shared board with Review (ADR-0131): the hub keeps the owner's settings and marks and answers `task_take_next`; a machine offers the tool to its agents only with `mesh.take_next = true` in its policy. The window's controls come in a later step.
