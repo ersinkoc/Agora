@@ -2459,6 +2459,7 @@ plugin-frame-use = { $name } (plugin): click or press Enter to use it
 safe-mode-open = Open in safe mode
 palette-safe-mode = Open in safe mode (no plugins, the built-in theme)
 plugin-stopped = { $name } was stopped: it sent the window too many messages.
+plugin-stopped-focus = { $name } was stopped: it kept taking the keyboard while you were not using it.
 plugin-restart = Start it again
 
 # Sounds when an agent finishes or needs you (Settings > This device > Sounds; the agent's menu), and the finished mark that lasts until seen

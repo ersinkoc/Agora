@@ -138,12 +138,6 @@ Sources: #1150 (the low-priority list from the 2026-11-23 reviews onward), #1125
 
 ## Flaky tests (fix with a proof)
 
-- `scripts/e2e-plugin-sandbox.mjs` "a plugin taking the focus cannot keep it" (the CI `web` job): red on most `main` pushes on
-  2026-11-27/28 (ab350b59, 0816d5bd, 3d29c44b, e44055a4, 9afa9cce, ...). The focus half holds (BODY, IFRAME, BODY, inert true); the
-  failing half is "the key then opens safe mode": Ctrl+Alt+Shift+S pressed right after the click elsewhere does not reach `?safe`
-  within 10 s while the stealer refocuses every 20 ms. Once (3d29c44b) the frame had the focus before any click. Prove whether the
-  key is lost to the stealer (a real gap in the inert guard) or the page is reloading; do not widen the wait first.
-
 - `panelcmd::tests::closing_the_panel_closes_the_port_and_the_next_run_gets_the_same_one` (panelcmd.rs:421): once on CI ubuntu
   (job 140634782042, d8b51d03), never alone; likely another test takes the freed port, as the exclusive-bind one below.
 

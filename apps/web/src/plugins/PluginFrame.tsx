@@ -35,6 +35,18 @@ export function themeFacts(): ThemeFacts {
 }
 
 const FLUSH_MS = 250;
+/** A frame not in use that takes the keyboard this many times within `STEAL_WINDOW_MS` is stopped (a plugin focusing its own input once
+ *  after it loads takes it once). */
+export const STEALS_STOPPED = 3;
+export const STEAL_WINDOW_MS = 10_000;
+/** The plugin frames on the page that are not in use, so a frame that takes the keyboard while inert can be named (see the guard). */
+const idleFrames = new Set<HTMLIFrameElement>();
+/** The frame not in use that holds the keyboard now: the active element when it is one of them, else the only one there is. With
+ *  several and the window naming none of them, nobody is blamed (the focus is still sent back). */
+export function stealer(active: Element | null, idle: ReadonlySet<HTMLIFrameElement>): HTMLIFrameElement | undefined {
+  if (active instanceof HTMLIFrameElement && idle.has(active)) return active;
+  return idle.size === 1 ? [...idle][0] : undefined;
+}
 const READ_TIMEOUT_MS = 5000;
 
 interface Watch { cap: Capability; last?: string; close?: () => void; lines?: ChatLine[]; key?: string; reads?: number; newest?: number }
@@ -46,13 +58,15 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   const [dropped, setDropped] = useState(0);
   // A frame that sends a malformed or oversized message, or floods the window, is taken away (reading a message costs the window as
   // much as the frame put in it); the person can start it again.
-  const [stopped, setStopped] = useState(false);
+  // `focus`: it kept taking the keyboard while not in use (ADR-0114 decision 4: the focus is the person's).
+  const [stopped, setStopped] = useState<false | 'messages' | 'focus'>(false);
+  const steals = useRef<number[]>([]);
   const flushNow = useRef<() => void>(() => {});
   const m = plugin.manifest;
   useEffect(() => {
     const win = frame.current?.contentWindow;
     if (!win) return;
-    const filter = frameFilter(undefined, () => { alive = false; setStopped(true); });
+    const filter = frameFilter(undefined, () => { alive = false; setStopped('messages'); });
     const watches = new Map<number, Watch>();
     let booted = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -164,21 +178,41 @@ export function PluginFrame({ plugin, panel, granted, view, dev }: { plugin: Che
   const activeRef = useRef(active);
   activeRef.current = active;
   useEffect(() => {
-    if (active) frame.current?.focus();
+    // After the click's own default focus (on the box, the click's target while the frame was inert), or the frame would lose it at once
+    // and the person's first keys would go to the box instead of the plugin.
+    const into = active ? setTimeout(() => { if (activeRef.current) frame.current?.focus(); }, 0) : undefined;
+    const own = frame.current;
+    if (own && !active) idleFrames.add(own);
     const away = (e: Event) => { if (activeRef.current && !(e.target instanceof Node && box.current?.contains(e.target))) setActive(false); };
-    // Focus that reaches the frame while it is not in use (it cannot, while inert; this is the guard) goes back to the window.
-    const blur = () => setTimeout(() => { if (!activeRef.current && document.activeElement === frame.current) { frame.current?.blur(); window.focus(); } }, 0);
+    // Focus that reaches a frame not in use goes back to the window. Inert does not stop a frame's own `window.focus()` from taking the
+    // keyboard, and the window then still names its body (or the inert frame) as the active element, so the guard looks at where the
+    // focus went: the window lost it (`blur`) yet the page still has it, and no frame in use holds it. Shown by the e2e's stealer under a
+    // slowed CPU: every key went to the inert frame until this took the focus back each time (CI flake of 2026-11-27/28).
+    // A frame that does it again and again is stopped: taking the focus back is a race a frame asking every few milliseconds wins (keys
+    // pressed in between still went to it), and the stopped frame is gone, so the keys reach the window.
+    const blur = () => setTimeout(() => {
+      if (activeRef.current || !document.hasFocus()) return;
+      const held = document.activeElement;
+      if (held instanceof HTMLIFrameElement && !held.inert) return; // a frame in use (this window's or another pane's) keeps it
+      if (own && stealer(held, idleFrames) === own) {
+        const now = Date.now();
+        steals.current = [...steals.current.filter((at) => now - at < STEAL_WINDOW_MS), now];
+        if (steals.current.length >= STEALS_STOPPED) { steals.current = []; setStopped('focus'); }
+      }
+      frame.current?.blur();
+      window.focus();
+    }, 0);
     window.addEventListener('pointerdown', away, true);
     window.addEventListener('focusin', away, true);
     window.addEventListener('blur', blur);
-    return () => { window.removeEventListener('pointerdown', away, true); window.removeEventListener('focusin', away, true); window.removeEventListener('blur', blur); };
-  }, [active]);
+    return () => { clearTimeout(into); if (own) idleFrames.delete(own); window.removeEventListener('pointerdown', away, true); window.removeEventListener('focusin', away, true); window.removeEventListener('blur', blur); };
+  }, [active, stopped]);
 
   if (stopped) {
     return (
       <div className="grid min-h-0 flex-1 place-items-center p-4 text-center" data-plugin-stopped="">
         <div className="grid justify-items-center gap-2">
-          <p className="m-0 text-muted">{t('plugin-stopped', { name: panel.name ?? m.name })}</p>
+          <p className="m-0 text-muted">{t(stopped === 'focus' ? 'plugin-stopped-focus' : 'plugin-stopped', { name: panel.name ?? m.name })}</p>
           <Button size="sm" onClick={() => { setDropped(0); setStopped(false); }}>{t('plugin-restart')}</Button>
         </div>
       </div>

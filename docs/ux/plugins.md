@@ -381,9 +381,13 @@ Holding a key at start (Shift, as some Mac apps do) is not built: reading a key'
 system, which belongs in `agora-platform`, and Wayland does not tell an app without a focused window which keys are down.
 
 **The focus is the person's.** A plugin's frame is `inert` until the person clicks into it (or presses Enter on it), and inert again as
-soon as they click or move the focus anywhere else in the window; focus that reaches a frame not in use is sent back to the window. So a
+soon as they click or move the focus anywhere else in the window; focus that reaches a frame not in use is sent back to the window.
+`inert` does not stop a frame's own `window.focus()` from taking the keyboard, and sending it back is a race a frame asking every few
+milliseconds wins, so a frame that takes the keyboard while not in use 3 times within 10 seconds is stopped: its pane says it "kept
+taking the keyboard" and offers to start it again (a plugin that focuses its own text box once after it loads takes it once). So a
 plugin can never take the keyboard by itself or keep it: while the person is using the frame, a key goes to the frame (as any key does
-in a frame), and one click outside it hands the keyboard, and the safe-mode key, back to the window.
+in a frame), and one click outside it hands the keyboard, and the safe-mode key, back to the window. The first click into a frame gives
+it the keyboard at once.
 
 In safe mode **Plugins** lists the plugins this browser keeps by their names only (nothing is checked or run) and **Remove** forgets
 one, so a plugin that misbehaves can be taken out without running it.
@@ -485,7 +489,8 @@ runs.
   (judged by a UDP and a TCP listener), the `RTC…` constructors are gone for good and no frame the plugin makes hands one back; four
   malformed or oversized message (an unknown type, a long name, a 16 MB array, a 200,000-field object) stops the frame at once, as do
   40 well-formed messages over the rate, without stalling the window (in WebKit, without stalling it after the frame's own send loop,
-  which it cannot preempt); a plugin taking the focus cannot keep it, and the
+  which it cannot preempt); a plugin's frame has the keyboard only while in use and a plugin taking the focus while not in use is stopped (also with the CPU
+  slowed, `E2E_CPU_THROTTLE`), and the
   pane's menu opens safe mode, whose plugins dialog removes a kept plugin; the marker stays whole in a narrow pane; the frame page
   opened on its own is opaque and reaches nothing; the loader is asked for without an `Origin` header (the hub's proxy rule refuses `Origin: null`); a granted read
   answers and one not granted says so; the header cannot be covered; `?safe` and the key load no plugin and the built-in theme; a

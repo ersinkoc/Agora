@@ -2352,6 +2352,7 @@ plugin-frame-use = { $name } (eklenti): kullanmak için tıklayın ya da Enter'a
 safe-mode-open = Güvenli kipte aç
 palette-safe-mode = Güvenli kipte aç (eklenti yok, yerleşik tema)
 plugin-stopped = { $name } durduruldu: pencereye çok fazla ileti gönderdi.
+plugin-stopped-focus = { $name } durduruldu: siz kullanmıyorken klavyeyi almaya devam etti.
 plugin-restart = Yeniden başlat
 
 # Bir ajan bitirdiğinde ya da sana ihtiyaç duyduğunda çalan sesler (Ayarlar > Bu cihaz > Sesler; ajanın menüsü) ve görülene dek kalan bitti işareti

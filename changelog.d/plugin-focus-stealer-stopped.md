@@ -1,0 +1,1 @@
+- A plugin that keeps taking the keyboard while you are not using it is stopped, so the safe-mode key always reaches the window; the first click into a plugin now gives it the keyboard at once.

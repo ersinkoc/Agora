@@ -388,29 +388,53 @@ for (const [name, code, budget] of stopCases) {
   check(key.page.url().includes('?safe') && (await key.page.locator('iframe').count()) === 0, `the safe-mode key reopens the window with no plugin (${key.page.url().replace(HUB, '')})`);
   await key.ctx.close();
 
-  // A plugin that keeps taking the focus: the frame is inert until the person clicks into it, and inert again once they click
-  // elsewhere, so the key reaches the window; and a plugin pane's menu has safe mode by the mouse.
+  // The focus is the person's (ADR-0114 decision 4). A quiet plugin with a text box: its frame is inert until the person clicks into it,
+  // and inert again once they click elsewhere, so the key reaches the window. A plugin that keeps taking the focus while not in use is
+  // stopped (inert does not stop a frame's own window.focus(), and taking the focus back is a race it wins), so the key reaches the window.
+  // Each frame writes down every key that reaches it (read from outside, never sent to the window), so a key lost to it is seen as such.
+  const keys = "window.__keys = ''; document.addEventListener('keydown', function (e) { window.__keys += e.code + ';'; }, true);";
+  const qid = 'quiet';
+  const quiet = makePackage(qid, R('quiet', `var i = document.createElement('input'); document.body.appendChild(i); ${keys} report('ready');`), []);
+  const qt = { ...seeded(qid, quiet, [], [], workspace(`plugin.${qid}.main`, [{ type: 'pane', id: 'p2', panel: 'usage' }])) };
   const sid = 'stealer';
-  const stealer = makePackage(sid, R('stealer', "var i = document.createElement('input'); document.body.appendChild(i); setInterval(function () { window.focus(); i.focus(); }, 20); report('stealing');"), []);
+  const stealer = makePackage(sid, R('stealer', `var i = document.createElement('input'); document.body.appendChild(i); ${keys} setInterval(function () { window.focus(); i.focus(); }, 20); report('stealing');`), []);
   const st = { ...seeded(sid, stealer, [], [], workspace(`plugin.${sid}.main`, [{ type: 'pane', id: 'p2', panel: 'usage' }])) };
+  // E2E_CPU_THROTTLE=<rate> slows a window's CPU as a busy CI runner does (Chromium only), to show timing faults here.
+  const throttle = async (w) => {
+    if (process.env.E2E_CPU_THROTTLE && engine === 'chromium') await (await w.ctx.newCDPSession(w.page)).send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.E2E_CPU_THROTTLE) });
+  };
+  const q = await open(qt);
+  await throttle(q);
+  await q.page.waitForSelector('iframe[data-plugin-frame]');
+  await report(q.page, 'quiet');
+  await q.page.waitForTimeout(500);
+  const untouched = await q.page.evaluate(() => document.activeElement?.tagName);
+  const qb = await q.page.locator('iframe[data-plugin-frame]').boundingBox();
+  await q.page.mouse.click(qb.x + qb.width / 2, qb.y + qb.height / 2);
+  await q.page.waitForTimeout(400);
+  const inFrame = await q.page.evaluate(() => document.activeElement?.tagName);
+  await q.page.locator('[data-pane="p2"]').click({ position: { x: 20, y: 200 } });
+  await q.page.waitForTimeout(600);
+  const after = await q.page.evaluate(() => ({ tag: document.activeElement?.tagName, inert: document.querySelector('iframe[data-plugin-frame]')?.inert }));
+  const quietFrame = q.page.frames().find((f) => f !== q.page.mainFrame());
+  await q.page.keyboard.press('Control+Alt+Shift+KeyS');
+  const quietKeys = await quietFrame?.evaluate(() => window.__keys).catch(() => 'none: the window reloaded');
+  await q.page.waitForURL(/\?safe/, { timeout: 10000 }).catch(() => {});
+  check(untouched !== 'IFRAME' && inFrame === 'IFRAME' && after.tag !== 'IFRAME' && after.inert === true && q.page.url().includes('?safe'),
+    `a plugin's frame has the keyboard only while in use: before a click ${untouched}, after clicking in ${inFrame}, after clicking elsewhere ${after.tag} (inert ${after.inert}); the key then opens safe mode [keys in the frame ${JSON.stringify(quietKeys)}; at ${q.page.url().replace(HUB, '')}]`);
+  await q.ctx.close();
+
   const f1 = await open(st);
-  await f1.page.waitForSelector('iframe[data-plugin-frame]');
-  await report(f1.page, 'stealer');
-  await f1.page.waitForTimeout(500);
-  const untouched = await f1.page.evaluate(() => document.activeElement?.tagName);
-  const fb = await f1.page.locator('iframe[data-plugin-frame]').boundingBox();
-  await f1.page.mouse.click(fb.x + fb.width / 2, fb.y + fb.height / 2);
-  await f1.page.waitForTimeout(400);
-  const inFrame = await f1.page.evaluate(() => document.activeElement?.tagName);
-  await f1.page.locator('[data-pane="p2"]').click({ position: { x: 20, y: 200 } });
-  await f1.page.waitForTimeout(600);
-  const after = await f1.page.evaluate(() => ({ tag: document.activeElement?.tagName, inert: document.querySelector('iframe[data-plugin-frame]').inert }));
+  await throttle(f1);
+  await f1.page.waitForSelector('[data-plugin-stopped]', { timeout: 10000 }).catch(() => {});
+  const stoppedText = (await f1.page.locator('[data-plugin-stopped]').textContent().catch(() => '')) ?? '';
+  const framesLeft = await f1.page.locator('iframe[data-plugin-frame]').count();
   await f1.page.keyboard.press('Control+Alt+Shift+KeyS');
   await f1.page.waitForURL(/\?safe/, { timeout: 10000 }).catch(() => {});
-  check(untouched !== 'IFRAME' && inFrame === 'IFRAME' && after.tag !== 'IFRAME' && after.inert && f1.page.url().includes('?safe'),
-    `a plugin taking the focus cannot keep it: before a click ${untouched}, after clicking in ${inFrame}, after clicking elsewhere ${after.tag} (inert ${after.inert}); the key then opens safe mode`);
+  check(stoppedText.includes('kept taking the keyboard') && framesLeft === 0 && f1.page.url().includes('?safe'),
+    `a plugin taking the focus while not in use is stopped, and the key then opens safe mode (stopped: ${JSON.stringify(stoppedText)}; frames left ${framesLeft}; at ${f1.page.url().replace(HUB, '')})`);
   await f1.ctx.close();
-  const f2 = await open(st);
+  const f2 = await open(qt);
   await f2.page.waitForSelector('iframe[data-plugin-frame]');
   await f2.page.locator('.pane-bar', { has: f2.page.locator('[data-plugin-mark]') }).locator('button[aria-haspopup]').click();
   await f2.page.getByRole('menuitem', { name: 'Open in safe mode' }).click();
@@ -421,7 +445,7 @@ for (const [name, code, budget] of stopCases) {
   await f2.page.keyboard.press('Control+KeyK');
   await f2.page.keyboard.type('Plugins');
   await f2.page.keyboard.press('Enter');
-  const row = f2.page.locator(`[data-plugin-row="${sid}"]`);
+  const row = f2.page.locator(`[data-plugin-row="${qid}"]`);
   await row.waitFor({ timeout: 5000 }).catch(() => {});
   const listed = await row.count();
   await row.getByRole('button', { name: 'Remove' }).click().catch(() => {});
