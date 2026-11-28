@@ -31,15 +31,16 @@ ADR-0131 (Amendment A): an idle agent asks for the next task with `task_take_nex
 no run is started. The node fills the call, never from the agent's arguments: `BoardCall.from_run_id` (the calling run) and
 `request_seq` (its sequence for that run, from 1; 0 asks only for what the hub committed). The hub keys both by the node of the link and
 takes a run only while its projection knows it running on that node, in that project; in order it checks the link's capability
-(`protocol.capability_missing`), the limits (`rate.limited`: 1 a second per run, 5 per node, 20 per project), the run (`task.pickup_off`
-`unknown_run`), the owner's settings (`owner_off`, `review_off`, `not_shared`, `node`, `kind`; the kind is the one the hub recorded at
+(`protocol.capability_missing`), the node's limit (`rate.limited`: 5 a second), the run (`task.pickup_off` `unknown_run`), the run's
+and the project's limits (1 and 20 a second; only a run the hub knows is counted there), the owner's settings (`owner_off`, `review_off`, `not_shared`, `node`, `kind`; the kind is the one the hub recorded at
 the run's start), a run whose launch skips permission prompts (`skips_permissions`, which the node says first) and a board still joining
 (`board.unavailable`). Then the sequence: 0 answers the committed outcome (or `empty` with sequence 0), an older one is
 `task.pickup_stale` (`committed_seq`), the committed one gets its answer again. Then a claimed task the run already holds is `existing`
 (nothing new is claimed; a task in Review holds no slot), else the first task the owner marked, open, in the board's creation order
 (ties by id) that the board lets the run claim (a dependency not accepted yet blocks it) is `claimed`, with the task as `task_list` shows
 it, else `empty`. A claim, the hub's `TaskPickedUp` and the run's outcome row are stored in one transaction under the hub's lock, so a
-manual claim or the owner clearing a mark meanwhile wins; the rows of runs that are not running any more are dropped. Not yet: the
+manual claim or the owner clearing a mark meanwhile wins; the rows of runs that are not running any more are dropped (at a take in the
+project and by the hub's sweep once a minute). Not yet: the
 node's side (`[mesh] take_next`, the run's mode, its sequence) and the window.
 
 ## Waiting for messages

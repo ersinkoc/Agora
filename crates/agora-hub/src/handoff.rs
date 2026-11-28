@@ -210,9 +210,17 @@ pub(crate) async fn run(hub: &Hub) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut retry = BTreeMap::<Vec<u8>, (u64, u64)>::new();
     let mut settling = BTreeMap::new();
+    // ADR-0131: the outcome rows of ended runs are swept once a minute (this worker is the hub's one periodic task).
+    let mut swept_at = 0u64;
     loop {
         tick.tick().await;
         let now = now_ms();
+        if now.saturating_sub(swept_at) >= 60_000 {
+            swept_at = now;
+            if let Err(error) = hub.prune_pickup_outcomes() {
+                crate::log_line!("task pickup sweep: {error}");
+            }
+        }
         // Keep answers while their transactions are unavailable, without retrying or expiring those deliveries.
         settling.retain(|_, (pending, outcome)| {
             !matches!(hub.settle_handoff(pending, outcome, now), Ok(true))

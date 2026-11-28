@@ -146,10 +146,12 @@ the facts are owner-only (`scope.rs`) and a node's are refused (`projection.rs`)
 
 
 Step 2, the hub's `task_take_next`: built (2026-11-28). `Hub::take_next` (`hub.rs`) under the hub's lock, in the order
-`docs/specs/mesh-tools.md` ("Taking the next task") gives: capability, limits (`task_pickup::Rate`), the run bound to the link's node
-and the project (`unknown_run` otherwise, also for another node naming it), the owner's settings checked at each take (`active`, not only
+`docs/specs/mesh-tools.md` ("Taking the next task") gives: capability, the node's limit, the run bound to the link's node
+and the project (`unknown_run` otherwise, also for another node naming it), then the run's and the project's limits (`task_pickup::Rate`:
+made-up run ids cost their node alone, never the project's share; agora-ac's read of 70393b1b), the owner's settings checked at each take (`active`, not only
 `enabled`), the allow-lists with the hub's recorded kind, `skips_permissions` from the hub's record too, the board's join; then the
-sequence (`task_pickup::Outcome` rows keyed by the project, the link's node and the run; dropped once the run is not running), a claim
+sequence (`task_pickup::Outcome` rows keyed by the project, the link's node and the run; dropped once the run is not running, at a
+take in the project and by a sweep once a minute), a claim
 the run holds, and the first marked open task in creation order the board lets it claim. The claim, every event the board calls made,
 `TaskPickedUp` and the outcome row are stored in one transaction; on a failure the board is put back. Tests: `task_pickup.rs`'s
 (`requests_are_limited_per_run_node_and_project_each_second`, `outcome_rows_are_the_runs_own_and_go_with_the_run`) and

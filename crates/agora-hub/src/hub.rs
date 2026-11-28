@@ -1323,12 +1323,12 @@ impl Hub {
         if !self.router.has_capability(node, cap) {
             return fail(ErrorCode::ProtocolCapabilityMissing, "capability", cap);
         }
+        if let Err(limit) = g.pickup_rate.admit_node(now_ms, node) {
+            return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
+        }
         let Ok(run) = <[u8; 16]>::try_from(call.from_run_id.as_slice()) else {
             return off("unknown_run");
         };
-        if let Err(limit) = g.pickup_rate.admit(now_ms, project, node, &tp_hex(&run)) {
-            return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
-        }
         let caller = crate::projection::qualified(node, &call.from_agent);
         let Some(agent) = g.view.agents.get(&caller).filter(|a| {
             a.running
@@ -1341,6 +1341,12 @@ impl Hub {
             return off("unknown_run");
         };
         let (kind, skips) = (agent.kind.clone(), agent.skips_permissions);
+        if let Err(limit) = g
+            .pickup_rate
+            .admit_run(now_ms, project, node, &tp_hex(&run))
+        {
+            return fail(ErrorCode::RateLimited, "limit", &limit.to_string());
+        }
         let Ok(settings) = tp::settings(self.store(), project) else {
             return internal();
         };
@@ -1400,6 +1406,7 @@ impl Hub {
             _ => {}
         }
         let row = |result: serde_json::Value| tp::Outcome {
+            project: project.to_string(),
             node: node.to_string(),
             agent: call.from_agent.clone(),
             run,
@@ -1734,6 +1741,22 @@ impl Hub {
                 .handoff_deliveries
                 .get(&pending.id())
                 .is_some_and(|(_, status)| status.state() == DeliveryState::Pending)
+    }
+
+    /// ADR-0131: drops the outcome rows of runs that are not running any more, in every project (called from the hub's periodic work).
+    pub(crate) fn prune_pickup_outcomes(&self) -> Result<(), StoreError> {
+        let g = self.lock();
+        crate::task_pickup::prune_all(self.store(), |project, node, agent, run| {
+            g.view
+                .agents
+                .get(&crate::projection::qualified(node, agent))
+                .is_some_and(|a| {
+                    a.running
+                        && a.node_id == node
+                        && a.run_id == Some(*run)
+                        && agora_core::fold_project_id(&a.project_id) == project
+                })
+        })
     }
 
     pub(crate) fn expire_handoffs(

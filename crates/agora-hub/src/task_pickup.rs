@@ -89,7 +89,9 @@ pub fn set_settings(
     Ok(Ok(()))
 }
 
-/// The requests of the current second, per run, node and project. A request over any limit is refused and not counted.
+/// The requests of the current second, per node, run and project. A request over a limit is refused and not counted. The node's is
+/// charged before the run is checked ([`Rate::admit_node`]), the run's and the project's only for a run the hub knows
+/// ([`Rate::admit_run`]), so made-up run ids cost their node alone and never the project's share.
 #[derive(Debug, Default)]
 pub struct Rate {
     second: u64,
@@ -99,8 +101,7 @@ pub struct Rate {
 }
 
 impl Rate {
-    /// Takes one request, or says the limit it would pass (per second).
-    pub fn admit(&mut self, now_ms: u64, project: &str, node: &str, run: &str) -> Result<(), u32> {
+    fn roll(&mut self, now_ms: u64) {
         let second = now_ms / 1000;
         if second != self.second {
             self.second = second;
@@ -108,18 +109,36 @@ impl Rate {
             self.nodes.clear();
             self.projects.clear();
         }
+    }
+
+    /// Takes one request of `node`, or says its limit (per second).
+    pub fn admit_node(&mut self, now_ms: u64, node: &str) -> Result<(), u32> {
+        self.roll(now_ms);
+        let n = self.nodes.entry(node.to_string()).or_default();
+        if *n >= PER_NODE {
+            return Err(PER_NODE);
+        }
+        *n += 1;
+        Ok(())
+    }
+
+    /// Takes one request of a known run of `node` in `project`, or says the limit it would pass (per second).
+    pub fn admit_run(
+        &mut self,
+        now_ms: u64,
+        project: &str,
+        node: &str,
+        run: &str,
+    ) -> Result<(), u32> {
+        self.roll(now_ms);
         let run_key = format!("{node}\u{0}{run}");
-        for (map, key, limit) in [
-            (&self.runs, run_key.as_str(), PER_RUN),
-            (&self.nodes, node, PER_NODE),
-            (&self.projects, project, PER_PROJECT),
-        ] {
-            if map.get(key).copied().unwrap_or(0) >= limit {
-                return Err(limit);
-            }
+        if self.runs.get(&run_key).copied().unwrap_or(0) >= PER_RUN {
+            return Err(PER_RUN);
+        }
+        if self.projects.get(project).copied().unwrap_or(0) >= PER_PROJECT {
+            return Err(PER_PROJECT);
         }
         *self.runs.entry(run_key).or_default() += 1;
-        *self.nodes.entry(node.to_string()).or_default() += 1;
         *self.projects.entry(project.to_string()).or_default() += 1;
         Ok(())
     }
@@ -156,6 +175,7 @@ pub fn outcome_key(project: &str, node: &str, run: &[u8; 16]) -> String {
 /// A run's latest committed request: its sequence and the result it got (the tool's JSON, without the MCP wrapping).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
+    pub project: String,
     pub node: String,
     pub agent: String,
     pub run: [u8; 16],
@@ -165,7 +185,7 @@ pub struct Outcome {
 
 impl Outcome {
     pub fn encode(&self) -> Vec<u8> {
-        json!({"node": self.node, "agent": self.agent, "run": hex(&self.run), "seq": self.seq, "result": self.result})
+        json!({"project": self.project, "node": self.node, "agent": self.agent, "run": hex(&self.run), "seq": self.seq, "result": self.result})
             .to_string()
             .into_bytes()
     }
@@ -181,6 +201,7 @@ impl Outcome {
             *b = u8::from_str_radix(run_hex.get(2 * i..2 * i + 2)?, 16).ok()?;
         }
         Some(Self {
+            project: v["project"].as_str()?.to_string(),
             node: v["node"].as_str()?.to_string(),
             agent: v["agent"].as_str()?.to_string(),
             run,
@@ -193,6 +214,23 @@ impl Outcome {
 /// The outcome row at `key`; none when there is none or it is not one the hub wrote.
 pub fn outcome(store: &SqliteStore, key: &str) -> Result<Option<Outcome>, StoreError> {
     Ok(store.setting(key)?.and_then(|b| Outcome::decode(&b)))
+}
+
+/// Drops every project's outcome rows whose run is not running now (the hub's periodic sweep, so a project that stops taking keeps
+/// none of an ended run's).
+pub fn prune_all(
+    store: &SqliteStore,
+    running: impl Fn(&str, &str, &str, &[u8; 16]) -> bool,
+) -> Result<(), StoreError> {
+    for bytes in store.settings_with_prefix(OUTCOME_PREFIX)? {
+        let Some(o) = Outcome::decode(&bytes) else {
+            continue;
+        };
+        if !running(&o.project, &o.node, &o.agent, &o.run) {
+            store.remove_setting(&outcome_key(&o.project, &o.node, &o.run))?;
+        }
+    }
+    Ok(())
 }
 
 /// Drops the outcome rows of `project` whose run is not running now (`running(node, agent, run)` says), so the rows are bounded by
@@ -288,28 +326,32 @@ mod more_tests {
     use super::*;
 
     #[test]
-    fn requests_are_limited_per_run_node_and_project_each_second() {
+    fn requests_are_limited_per_node_then_per_run_and_project_each_second() {
         let mut r = Rate::default();
-        assert_eq!(r.admit(1_000, "p", "n1", "r1"), Ok(()));
+        assert_eq!(r.admit_node(1_000, "n1"), Ok(()));
+        assert_eq!(r.admit_run(1_000, "p", "n1", "r1"), Ok(()));
+        assert_eq!(r.admit_node(1_500, "n1"), Ok(()));
         assert_eq!(
-            r.admit(1_500, "p", "n1", "r1"),
+            r.admit_run(1_500, "p", "n1", "r1"),
             Err(PER_RUN),
             "one per run per second"
         );
-        for i in 2..=5 {
-            assert_eq!(r.admit(1_500, "p", "n1", &format!("r{i}")), Ok(()));
+        for _ in 3..=5 {
+            assert_eq!(r.admit_node(1_500, "n1"), Ok(()));
         }
         assert_eq!(
-            r.admit(1_600, "p", "n1", "r6"),
+            r.admit_node(1_600, "n1"),
             Err(PER_NODE),
-            "minting runs does not get round the node's limit"
+            "made-up runs cost their node alone"
         );
-        for n in 2..=16 {
-            let _ = r.admit(1_700, "p", &format!("n{n}"), "r");
+        for n in 2..=20 {
+            assert_eq!(r.admit_node(1_700, &format!("n{n}")), Ok(()));
+            let _ = r.admit_run(1_700, "p", &format!("n{n}"), "r");
         }
-        assert_eq!(r.admit(1_800, "p", "n17", "r"), Err(PER_PROJECT));
-        assert_eq!(r.admit(1_800, "q", "n17", "r"), Ok(()), "per project");
-        assert_eq!(r.admit(2_000, "p", "n1", "r1"), Ok(()), "a new second");
+        assert_eq!(r.admit_run(1_800, "p", "n21", "r"), Err(PER_PROJECT));
+        assert_eq!(r.admit_run(1_800, "q", "n21", "r"), Ok(()), "per project");
+        assert_eq!(r.admit_node(2_000, "n1"), Ok(()), "a new second");
+        assert_eq!(r.admit_run(2_000, "p", "n1", "r1"), Ok(()));
     }
 
     #[test]
@@ -319,6 +361,7 @@ mod more_tests {
         let _ = std::fs::remove_file(&path);
         let store = SqliteStore::open(&path).unwrap();
         let row = |node: &str, run: u8| Outcome {
+            project: "p".into(),
             node: node.into(),
             agent: "a".into(),
             run: [run; 16],
@@ -352,6 +395,13 @@ mod more_tests {
                 .unwrap()
                 .is_none(),
             "an ended run's row is dropped"
+        );
+        prune_all(&store, |project, node, _, _| project == "p" && node != "n1").unwrap();
+        assert!(
+            outcome(&store, &outcome_key("p", "n1", &[1; 16]))
+                .unwrap()
+                .is_none(),
+            "the sweep drops it too"
         );
         drop(store);
         let _ = std::fs::remove_file(&path);
