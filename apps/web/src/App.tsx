@@ -54,6 +54,8 @@ import { refusalCode, startRefusalKey } from './net/startRefusal';
 import { useUsageReport } from './net/useUsage';
 import { noticeRows, readNoticeSettings, saveNoticeChannel, useProjectNotices } from './net/notices';
 import { BoardNoticesContext, type BoardNoticesApi } from './components/BoardNotices';
+import { BoardPickupContext, type BoardPickupApi } from './components/BoardPickup';
+import { markPickup, readPickup, savePickup } from './net/pickup';
 import { ChannelNotices } from './components/TeamChat';
 import { catalogAskFor, setCatalogSource } from './themes/catalog';
 import { sharedSourceFor } from './net/share';
@@ -568,6 +570,18 @@ export function App() {
     read: readNotices,
     save: link === 'live' ? (projectId, read, channel) => saveNoticeChannel(api.command, projectId, read, channel) : undefined,
   } : undefined), [api, readNotices, live, link]);
+  // ADR-0131: automatic pickup, the owner's on each Review-enabled board card and on its open tasks.
+  const readPickupFor = useMemo(() => (api && noticesOwner ? (projectId: string) => readPickup(api.command, projectId) : undefined), [api, noticesOwner, link === 'live']); // eslint-disable-line react-hooks/exhaustive-deps
+  const boardPickup = useMemo<BoardPickupApi | undefined>(() => (api && readPickupFor ? {
+    machines: (projectId) => {
+      const folders = boardList.find((b) => b.projectId === projectId)?.folders ?? [];
+      return [...new Map(folders.map((f) => [f.nodeId, { id: f.nodeId, name: f.machine }])).values()];
+    },
+    kinds: (projectId) => [...new Set(agents.flatMap((a) => (a.projectId === projectId && a.kind ? [a.kind] : [])))],
+    read: readPickupFor,
+    save: link === 'live' ? (projectId, next) => savePickup(api.command, projectId, next) : undefined,
+    mark: link === 'live' ? (projectId, taskId, eligible) => markPickup(api.command, projectId, taskId, eligible) : undefined,
+  } : undefined), [api, readPickupFor, boardList, agents, link]);
   const giveApi = useMemo<GiveApi | undefined>(() => {
     if (!hub || !api || !live || !changes) return undefined;
     const list = machines(live);
@@ -843,6 +857,7 @@ export function App() {
     } : undefined}>
     <ShowAcceptedTasks.Provider value={role === 'owner'}>
     <BoardNoticesContext.Provider value={boardNotices}>
+    <BoardPickupContext.Provider value={boardPickup}>
     <ChannelNotices.Provider value={noticeRowList}>
     <GiveContext.Provider value={giveApi}>
       {/* The Start window is drawn by Home only: My machines goes to the window first, as the palette does, so it opens at once. */}
@@ -886,6 +901,7 @@ export function App() {
         onLater={() => setLater((l) => new Set(l).add(waiting[0]?.deviceId ?? ''))} />}
     </GiveContext.Provider>
     </ChannelNotices.Provider>
+    </BoardPickupContext.Provider>
     </BoardNoticesContext.Provider>
     </ShowAcceptedTasks.Provider>
     </BoardReviewContext.Provider>

@@ -184,7 +184,8 @@ function recordReview(v: View, key: string, row: agora.v1.TaskReview.$Properties
   }
 }
 
-export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean; parentTaskId?: string }
+// ADR-0131: `pickupEligible` is the owner's mark for automatic pickup; `pickedUp` the last pickup a rule made (the agent's hub-wide key).
+export interface TaskV { projectId: string; title: string; ownerId: string; done: boolean; parentTaskId?: string; pickupEligible?: boolean; pickedUp?: { agentId: string; atMs: number } }
 export interface LeaseV { agentId: string; path: string; expiresAtMs: number }
 // `producer` is the machine that recorded it; `paired` marks a copy already matched with its twin (#905). `via` is the machine whose
 // word alone names the sender: a copy recorded by another machine than the sender's (a receiver's, or a forged one) that neither the
@@ -295,7 +296,8 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
   for (const project of s.reviewEnabledProjectIds ?? []) v.reviewProjects.add(project);
   for (const t of s.tasks ?? []) {
     const key = `${t.projectId ?? ''}/${t.taskId ?? ''}`;
-    v.tasks.set(key, { projectId: t.projectId ?? '', title: t.title ?? '', ownerId: t.claimedByAgentId ?? '', done: !!t.done, ...(t.parentTaskId ? { parentTaskId: t.parentTaskId } : {}) });
+    v.tasks.set(key, { projectId: t.projectId ?? '', title: t.title ?? '', ownerId: t.claimedByAgentId ?? '', done: !!t.done, ...(t.parentTaskId ? { parentTaskId: t.parentTaskId } : {}),
+      ...(t.pickupEligible ? { pickupEligible: true } : {}), ...(t.pickedUp?.agentId ? { pickedUp: { agentId: t.pickedUp.agentId, atMs: num(t.pickedUp.atMs) } } : {}) });
     if (t.review) recordReview(v, key, t.review);
   }
   for (const l of s.leases ?? []) {
@@ -359,6 +361,7 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
   // The hub sends session options and board metadata that did not fit at the snapshot's position.
   const hubMetadata = ev.producerId === 'hub' && (
     ev.body === 'taskHandoffDeliveryChanged' || ev.body === 'taskReviewChanged' || ev.body === 'taskReviewEnabled' || ev.body === 'taskParentLinked'
+    || ev.body === 'taskPickupEligible' || ev.body === 'taskPickedUp'
   );
   const replacing = pos === v.pos && (hubMetadata || ev.body === 'agentSessionConfig' || ev.body === 'agentCommands' || ev.body === 'agentQuotaObserved');
   if (pos <= v.pos && !replacing) return;
@@ -690,12 +693,32 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (task) v.tasks.set(key, { ...task, parentTaskId: b.parentTaskId });
       break;
     }
+    case 'taskPickupEligible': {
+      // ADR-0131: the hub's word only.
+      const b = e.taskPickupEligible;
+      const key = `${b.projectId ?? ''}/${b.taskId ?? ''}`;
+      const task = v.tasks.get(key);
+      if (producer !== 'hub' || !task) break;
+      const { pickupEligible: _was, ...rest } = task;
+      v.tasks.set(key, b.eligible ? { ...rest, pickupEligible: true } : rest);
+      break;
+    }
+    case 'taskPickedUp': {
+      const b = e.taskPickedUp;
+      const key = `${b.projectId ?? ''}/${b.taskId ?? ''}`;
+      const task = v.tasks.get(key);
+      if (producer !== 'hub' || !task || !b.agentId) break;
+      v.tasks.set(key, { ...task, pickedUp: { agentId: b.agentId, atMs: num(b.atMs) } });
+      break;
+    }
     case 'taskChanged': {
       const b = e.taskChanged;
       const key = `${b.projectId ?? ''}/${b.taskId ?? ''}`;
       const parentTaskId = v.tasks.get(key)?.parentTaskId;
       if (producer !== 'hub' && (parentTaskId || v.reviews.has(key))) break;
-      v.tasks.set(key, { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done, ...(parentTaskId ? { parentTaskId } : {}) });
+      const before = v.tasks.get(key);
+      v.tasks.set(key, { projectId: b.projectId ?? '', title: b.title ?? '', ownerId: b.claimedByAgentId ? qb(b.claimedByAgentId) : '', done: !!b.done, ...(parentTaskId ? { parentTaskId } : {}),
+        ...(before?.pickupEligible ? { pickupEligible: true } : {}), ...(before?.pickedUp ? { pickedUp: before.pickedUp } : {}) });
       break;
     }
     case 'leaseGranted': {
@@ -1018,7 +1041,8 @@ export function projectChannels(v: View, projectId: string): string[] {
 
 // `id` is the board's key (`<project>/<task>`); `taskId` is the id the board and the node know.
 interface SubtaskProgress { accepted: number; total: number }
-export interface BoardTaskModel { id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'review' | 'done'; review?: TaskReviewModel; owner: string; ownerId?: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[]; handoffs?: HandoffDeliveryModel[]; parent?: { title: string }; subtasks?: SubtaskProgress }
+// ADR-0131: `pickup` is the owner's mark on the task; `pickedUp` names the agent a rule gave it to, and when.
+export interface BoardTaskModel { pickup?: boolean; pickedUp?: { agent: string; atMs: number }; id: string; taskId?: string; title: string; status: 'open' | 'claimed' | 'review' | 'done'; review?: TaskReviewModel; owner: string; ownerId?: string; ownerState?: UiState; ownerSkips?: boolean; held?: string[]; handoffs?: HandoffDeliveryModel[]; parent?: { title: string }; subtasks?: SubtaskProgress }
 export interface BoardLeaseModel { path: string; holder: string; expiresAtMs: number }
 export interface BoardFolderModel { nodeId: string; machine: string; path: string }
 export interface BoardModel { projectId: string; project: string; reviewEnabled?: boolean; folders: BoardFolderModel[]; tasks: BoardTaskModel[]; leases: BoardLeaseModel[] }
@@ -1070,7 +1094,8 @@ export function boards(v: View): BoardModel[] {
     const review = v.reviews.get(id);
     const parent = t.parentTaskId ? v.tasks.get(`${t.projectId}/${t.parentTaskId}`) : undefined;
     const progress = subtasks.get(id);
-    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: review?.state === 'pending' ? 'review' : t.done ? 'done' : t.ownerId ? 'claimed' : 'open', ...(review ? { review } : {}), owner: t.ownerId ? label(t.ownerId) : '', ...(t.ownerId ? { ownerId: t.ownerId } : {}), ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [], handoffs: handoffsByTask.get(id)?.reverse(), ...(parent ? { parent: { title: parent.title } } : {}), ...(progress ? { subtasks: progress } : {}) });
+    board(t.projectId).tasks.push({ id, taskId: id.slice(t.projectId.length + 1), title: t.title, status: review?.state === 'pending' ? 'review' : t.done ? 'done' : t.ownerId ? 'claimed' : 'open', ...(review ? { review } : {}), owner: t.ownerId ? label(t.ownerId) : '', ...(t.ownerId ? { ownerId: t.ownerId } : {}), ownerState: owner?.state, ownerSkips: owner?.skipsPermissions, held: t.ownerId ? heldBy.get(t.ownerId) ?? [] : [], handoffs: handoffsByTask.get(id)?.reverse(), ...(parent ? { parent: { title: parent.title } } : {}), ...(progress ? { subtasks: progress } : {}),
+      ...(t.pickupEligible ? { pickup: true } : {}), ...(t.pickedUp ? { pickedUp: { agent: label(t.pickedUp.agentId), atMs: t.pickedUp.atMs } } : {}) });
   }
   // A lease belongs to its holder's project.
   for (const l of v.leases.values()) {

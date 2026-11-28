@@ -164,5 +164,12 @@ view and run id, and `skips_permissions_now`, so a mode switched to acting witho
 hub's link agreed. `take_next_reply` answers the tool itself (never a broker): the node's reasons, the link's, then the hub's answer
 with the run and sequence filled by the node (`RemoteLink::take_next`, a `BoardCall` with fields 6 and 7); each run's next sequence in
 memory, 0 first for a run without a count, on only past a committed answer, the committed one after a stale answer; `not_shared`
-from a hub that says so. Tests: `take_next_is_the_hubs_with_the_nodes_run_and_sequence`, the policy test. Left: the window (settings
-form, the mark on a card, the pickup's source) and an end-to-end run with two fake agents on a real hub.
+from a hub that says so. Tests: `take_next_is_the_hubs_with_the_nodes_run_and_sequence`, the policy test. 
+
+Step 4, the owner's window: built (2026-11-28). `apps/web/src/net/pickup.ts` (read, save with the lists cut to what the hub takes,
+mark) and `components/BoardPickup.tsx`: on a Review-enabled project's board card, "Idle agents take marked tasks" with the machines
+that have the project and the kinds seen in it (the saved ones always offered), each change saved and read back, why it is paused;
+on an open card "Offer to an idle agent" / "Stop offering", which only says the mark without a live link. `net/view.ts` folds
+`TaskPickupEligible` and `TaskPickedUp` (the hub's only; kept through a task's moves; from the snapshot or after it), and a card says
+an idle agent took it. Only the owner's window gets the controls. Tests: `net/pickup.test.tsx`. Left: an end-to-end run with two fake
+agents on a real hub (ADR's Verification), and a node-side reattachment test with a real supervisor.

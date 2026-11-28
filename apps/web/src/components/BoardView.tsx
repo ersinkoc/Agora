@@ -11,13 +11,14 @@ import { EmptyState, StatusPill, Tag, type Tone } from './kit';
 import { NoAskBadge } from './NoAskBadge';
 import { BoardHandoffs } from './BoardHandoffs';
 import { BoardReview } from './BoardReview';
+import { PickupMark } from './BoardPickup';
 
 // Each column's mark and hue (the kit's tones): Backlog is a neutral fact, Doing is working blue, Done is finished green. The word and the
 // count say the same, so the colour is never the only sign.
 const COLUMN_LOOK: Record<ColumnId, { tone: Tone; icon: IconName }> = { backlog: { tone: 'plain', icon: 'stack' }, doing: { tone: 'working', icon: 'play' }, review: { tone: 'plain', icon: 'files' }, done: { tone: 'finished', icon: 'check' } };
 
 // `give`: the board this card is on, when its Backlog cards offer "Give to an agent" (ADR-0095 step 2).
-function Card({ task, projectId, give }: { task: BoardTaskModel; projectId: string; give?: { projectId: string; project: string } }) {
+function Card({ task, projectId, give, review }: { task: BoardTaskModel; projectId: string; give?: { projectId: string; project: string }; review?: boolean }) {
   const held = task.held ?? [];
   return (
     <li className="kit-card kit-card--dense min-w-0 gap-1.5" data-task-id={task.id}>
@@ -28,6 +29,10 @@ function Card({ task, projectId, give }: { task: BoardTaskModel; projectId: stri
       </span>}
       {task.subtasks && <span className="text-xs text-muted">
         {t('board-card-subtask-progress', { accepted: task.subtasks.accepted, total: task.subtasks.total })}
+      </span>}
+      {/* ADR-0131: taken by the rule, not given by a person; the agent is named only when it is not the one the card already names. */}
+      {task.pickedUp && task.status !== 'open' && <span className="break-words text-xs text-muted">
+        {task.pickedUp.agent === task.owner ? t('board-card-picked-up-short') : t('board-card-picked-up', { name: plain(task.pickedUp.agent, OWNER_MAX) })}
       </span>}
       {task.status !== 'open' && task.owner && <span className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted">
         <span className="min-w-0 break-words">{t('board-card-owner', { name: plain(task.owner, OWNER_MAX) })}</span>
@@ -42,6 +47,7 @@ function Card({ task, projectId, give }: { task: BoardTaskModel; projectId: stri
       {task.review && task.taskId && <BoardReview key={task.review.revision} projectId={projectId} taskId={task.taskId} review={task.review} />}
       {task.handoffs && <BoardHandoffs deliveries={task.handoffs} />}
       {give && task.status === 'open' && <GiveButton task={giveTaskOf(give, task)} />}
+      {review && task.status === 'open' && task.taskId && <PickupMark projectId={projectId} taskId={task.taskId} marked={!!task.pickup} />}
     </li>
   );
 }
@@ -61,7 +67,7 @@ export function BoardColumns({ board }: { board: BoardModel }) {
             <span className="min-w-0 flex-1 truncate">{t(`board-col-${col.id}`)}</span><Tag>{col.total}</Tag>
           </h3>
           {col.total === 0 ? <p className="m-0 rounded-s border border-dashed border-line px-3 py-4 text-center text-xs text-muted">{t(`board-col-${col.id}-empty`)}</p> : <ul className="m-0 grid list-none gap-2 p-0">
-            {col.cards.map((task) => <Card key={task.id} task={task} projectId={board.projectId} give={canGive && col.id === 'backlog' ? board : undefined} />)}
+            {col.cards.map((task) => <Card key={task.id} task={task} projectId={board.projectId} give={canGive && col.id === 'backlog' ? board : undefined} review={board.reviewEnabled} />)}
           </ul>}
           {col.total > col.cards.length && <button type="button" className="kit-btn kit-btn--ghost kit-btn--sm" onClick={() => setShown({ ...shown, [col.id]: col.cards.length + COLUMN_PAGE })}>
             {t('board-show-more', { count: col.cards.length, total: col.total })}

@@ -1,0 +1,1 @@
+- The owner can let idle agents take tasks on a Review-enabled shared board: turn it on per project on its board card, choose the machines and agent kinds, and offer tasks one by one from the Backlog; a card says when an idle agent took it (ADR-0131).

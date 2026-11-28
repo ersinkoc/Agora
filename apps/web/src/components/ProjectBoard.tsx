@@ -2,6 +2,7 @@ import { t } from '../i18n';
 import { Icon } from './Icon';
 import { Tag } from './kit';
 import { BoardNotices } from './BoardNotices';
+import { BoardPickup } from './BoardPickup';
 import { sharesName } from '../model';
 import type { BoardModel } from '../net/view';
 import { visible } from '../net/hidden';
@@ -26,6 +27,7 @@ export function ProjectBoard({ board: b, machines = [], onOpen }: {
         </ul>
       </details>}
       {b.reviewEnabled && <BoardNotices projectId={b.projectId} />}
+      {b.reviewEnabled && <BoardPickup projectId={b.projectId} />}
       {b.tasks.length > 0 && <button type="button" className="kit-btn kit-btn--sm w-fit" aria-haspopup="dialog" onClick={e => onOpen(e.currentTarget)}><Icon name="board" className="size-3.5" />{t('board-open-view', { count: b.tasks.length })}</button>}
       <ul className="m-0 grid list-none gap-1 p-0 text-[0.8125rem]">
         {b.tasks.map(task => <li key={task.id} className="flex items-baseline justify-between gap-2">

@@ -4,12 +4,13 @@ import type { ChatLine, ChatSource } from '../net/chat';
 import type { QuotaObs } from '../net/quota';
 import type { ApprovalModel, BoardModel } from '../net/view';
 import { ApprovalBanner } from './ApprovalBanner';
-import { BoardColumns } from './BoardView';
 import { GiveContext, type GiveApi } from './GiveTask';
 import { PromptBox } from './PromptBox';
 import { QuotaProvider } from './Quota';
 import { UsagePanel } from './UsagePanel';
 import { BoardNoticesContext, type BoardNoticesApi } from './BoardNotices';
+import { BoardPickupContext, type BoardPickupApi } from './BoardPickup';
+import { BoardColumns } from './BoardView';
 import { ProjectBoard } from './ProjectBoard';
 import { TeamChat } from './TeamChat';
 import type { NoticeRowModel } from '../net/notices';
@@ -68,6 +69,22 @@ const noticesApi: BoardNoticesApi = {
   save: async (_p, r, channel) => ({ ...r, channel }),
 };
 const noticeBoard: BoardModel = { ...board, reviewEnabled: true, tasks: board.tasks.slice(0, 2) };
+// ADR-0131: idle agents take the tasks the owner marks; one open task offered, one taken by an idle agent.
+const pickupApi: BoardPickupApi = {
+  machines: () => [{ id: 'laptop', name: 'laptop' }, { id: 'build', name: 'build' }],
+  kinds: () => ['claude-code', 'codex'],
+  read: async () => ({ enabled: true, nodeIds: ['laptop'], agentKinds: ['codex'], active: true, inactiveReason: '' }),
+  save: async (_p, next) => ({ ...next, active: true, inactiveReason: '' }),
+  mark: async () => {},
+};
+const pickupBoard: BoardModel = {
+  ...board, reviewEnabled: true,
+  tasks: [
+    { ...board.tasks[0]!, taskId: 't1', pickup: true },
+    { ...board.tasks[1]!, taskId: 't2' },
+    { ...board.tasks[2]!, taskId: 't3', pickup: true, pickedUp: { agent: 'codex · teal', atMs: AT - 3 * 60_000 } },
+  ],
+};
 const chatNotices: NoticeRowModel[] = [
   { id: 'n2', channel: '#ops', title: 'Ship the settings form', project: board.project, atMs: AT - 60_000 },
   { id: 'n1', channel: '#ops', project: board.project, atMs: AT - 40 * 60_000 },
@@ -92,8 +109,11 @@ export function PolishGallery() {
         <GiveContext.Provider value={give}><BoardColumns board={board} /></GiveContext.Provider>
       </div>
       <div data-polish-notices className="grid max-w-3xl grid-cols-1 gap-4 md:grid-cols-2">
-        <BoardNoticesContext.Provider value={noticesApi}><ProjectBoard board={noticeBoard} onOpen={() => {}} /></BoardNoticesContext.Provider>
+        <BoardNoticesContext.Provider value={noticesApi}><BoardPickupContext.Provider value={pickupApi}><ProjectBoard board={noticeBoard} onOpen={() => {}} /></BoardPickupContext.Provider></BoardNoticesContext.Provider>
         <div className="rounded-l border border-line bg-surface-1 p-2"><TeamChat messages={chatMessages} notices={chatNotices} now={AT} /></div>
+      </div>
+      <div data-polish-pickup className="flex h-[26rem] max-w-4xl flex-col overflow-hidden rounded-l border border-line">
+        <BoardPickupContext.Provider value={pickupApi}><BoardColumns board={pickupBoard} /></BoardPickupContext.Provider>
       </div>
       <div data-polish-usage className="max-w-sm rounded-l border border-line bg-surface-1 p-4">
         <QuotaProvider obs={quota} machines={new Map([['laptop', 'laptop'], ['build', 'build']])} fixedNow={AT}><UsagePanel fleet={usageFleet} now={AT} /></QuotaProvider>
