@@ -165,9 +165,9 @@ checkpoint and retention decision.
   part is ADR-0088 Amendment A (Accepted 2026-11-27)
 - [x] **M2.11 Layouts** (ADR-0068): panel registry (#1214), keybindings and the palette (#1224), the terminal client's layouts (#1230);
   the terminal client's keybindings file is in #1242; rung 6 is closed (ADR-0099 stages rejected)
-- [ ] **M2.13 The window knows what each machine can do** (**schema**). The web window learns unsupported actions only from
-  a refusal (#885). [ADR-0132](../adr/0132-show-negotiated-node-capabilities-in-the-window.md) defines scoped snapshot
-  and live updates, starting with task dispatch.
+- [x] **M2.13 The window knows what each machine can do** (**schema**). [ADR-0132](../adr/0132-show-negotiated-node-capabilities-in-the-window.md):
+  the hub publishes what each machine's current link negotiated, starting with `task.dispatch`, in the snapshot and live; the window
+  no longer offers a task to a machine known not to take one (a capability is added to the list when a client uses it).
 - [x] **M2.14 The terminal repaint carries the program's modes and its history** (ADR-0100, **schema** for step 2)
   - [x] step 1, the modes in the repaint (#953); step 2, the history before the repaint when a window asks (#959); step 3, the web
     window and the terminal client ask for it (#964)

@@ -24,7 +24,9 @@ export function num(x: Num): number {
 // `linkGen`: the generation of the latest `NodeLink { up }` this window saw (ADR-0070); unknown (0) for a node it only knows from the
 // snapshot.
 // `forgotten`: the owner had the hub forget it (ADR-0073); it and what it runs are not shown until it connects again.
-export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean; binary?: string; machine?: MachineFigures }
+export interface NodeV { hostname: string; os: string; online: boolean; lastEventMs: number; agentsRunning: number; memoryBytes?: number; build?: string; terminalsOpen?: number; linkGen?: number; forgotten?: boolean; binary?: string; machine?: MachineFigures;
+  // ADR-0132: the published capabilities of the node's current link (`task.dispatch`, ...); undefined: not known.
+  capabilities?: string[] }
 // ADR-0136: a machine's CPU, memory and disks as its node last reported them, and when. `cpuBusy` is 0..1000 of all CPUs.
 export interface DiskFigures { mount: string; total: number; free: number; data: boolean; workspaces: boolean }
 export interface MachineFigures { cpuCount: number; cpuBusy: number; memTotal: number; memAvailable: number; disks: DiskFigures[]; workspaces: number; atMs: number }
@@ -247,6 +249,7 @@ export function fromSnapshot(s: agora.v1.Snapshot.$Properties): View {
       // ADR-0069: the node's program, only when its folder is not on that machine's PATH.
       binary: n.binary ?? '',
       machine: machineFiguresOf(n, num(n.resourcesAtMs)),
+      ...(n.capabilities ? { capabilities: [...(n.capabilities.names ?? [])].slice(0, 16) } : {}),
     });
   }
   for (const n of s.nodes ?? []) if (n.trustedDeviceIds?.length) (v.trusted ??= new Map()).set(n.nodeId ?? '', [...n.trustedDeviceIds]);
@@ -403,6 +406,8 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
       if (!stale) {
         n.online = !!b.up;
         if (b.up) n.linkGen = gen;
+        // ADR-0132: a new link knows nothing yet, and the current link's end leaves nothing known.
+        n.capabilities = undefined;
         // ADR-0073: a forgotten machine that connects again is shown again, with what it still runs; one that stopped while it was
         // hidden stays forgotten, as the hub's `remember_node` keeps it.
         if (b.up && n.forgotten) {
@@ -440,6 +445,14 @@ export function applyEvent(v: View, pos: number, ev: Ev): void {
     case 'checkoutDiscovered': {
       const b = e.checkoutDiscovered;
       v.checkouts.set(q(b.checkoutId), { nodeId: b.nodeId ?? '', projectId: b.projectId ?? '', path: b.path ?? '' });
+      break;
+    }
+    case 'nodeCapabilitiesChanged': {
+      // ADR-0132: the hub's word on the node's current link only.
+      if (producer !== 'hub') break;
+      const b = e.nodeCapabilitiesChanged;
+      const n = v.nodes.get(b.nodeId ?? '');
+      if (n && n.online && num(b.generation) === (n.linkGen ?? 0)) n.capabilities = b.capabilities ? [...(b.capabilities.names ?? [])].slice(0, 16) : undefined;
       break;
     }
     case 'nodeResources': {
@@ -923,12 +936,12 @@ export function quotaObs(v: View): QuotaObs[] {
   return [...(v.quota?.values() ?? [])].flatMap((m) => [...m.values()]).map((q) => ({ machineId: q.nodeId, tool: q.tool, window: q.window, usedPercent: q.usedPercent, resetsAtMs: q.resetsAtMs, observedAtMs: q.observedAtMs }));
 }
 
-export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string; machine?: MachineFigures }
+export interface MachineModel { id: string; name: string; os: string; online: boolean; agentsRunning: number; lastSeenMs: number; memoryBytes?: number; build?: string; terminalsOpen?: number; binary?: string; machine?: MachineFigures; capabilities?: string[] }
 
 // Online machines first, then by name.
 export function machines(v: View): MachineModel[] {
   return [...v.nodes.entries()]
-    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary), ...(n.machine ? { machine: { ...n.machine, disks: n.machine.disks.map((d) => ({ ...d, mount: visible(d.mount) })) } } : {}) }))
+    .map(([id, n]) => ({ id, name: visible(n.hostname || id), os: visible(n.os), online: n.online, agentsRunning: n.agentsRunning, lastSeenMs: n.lastEventMs, memoryBytes: n.memoryBytes, build: n.build === undefined ? undefined : visible(n.build), terminalsOpen: n.terminalsOpen, binary: n.binary === undefined ? undefined : visible(n.binary), ...(n.machine ? { machine: { ...n.machine, disks: n.machine.disks.map((d) => ({ ...d, mount: visible(d.mount) })) } } : {}), ...(n.capabilities ? { capabilities: n.capabilities } : {}) }))
     .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
 }
 

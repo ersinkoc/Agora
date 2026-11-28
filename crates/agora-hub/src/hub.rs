@@ -930,6 +930,19 @@ impl Hub {
             g.fleet_agreed.remove(node);
         }
         opened?;
+        // ADR-0132: what this link negotiated, of the capabilities the hub publishes. A failure to store it leaves the windows not knowing
+        // (they keep their behaviour from before), never a past link's word.
+        let _published = self.emit(
+            &mut g,
+            Body::NodeCapabilitiesChanged(agora_protocol::v1::NodeCapabilitiesChanged {
+                node_id: node.to_string(),
+                generation,
+                capabilities: Some(agora_protocol::v1::NodeCapabilities {
+                    names: crate::projection::published_capabilities(&capabilities),
+                }),
+            }),
+            now_ms,
+        );
         let (registration, commands) = self.router.register_with_capabilities(node, capabilities);
         Ok((registration, commands, generation))
     }
@@ -2762,6 +2775,24 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// ADR-0132: a link that opens writes the published part of what it negotiated, right after its `NodeLink { up }`.
+    #[test]
+    fn an_opened_link_publishes_what_it_negotiated_of_the_published_list() {
+        let hub = hub();
+        let (_reg, _cmds, generation) = hub
+            .node_link_opened(
+                "n1",
+                vec!["fleet.status.v1".into(), "task.dispatch".into()],
+                1,
+            )
+            .unwrap();
+        let (view, _) = hub.view();
+        assert_eq!(
+            view.nodes["n1"].capabilities,
+            Some((generation, vec!["task.dispatch".to_string()]))
+        );
+    }
+
     #[test]
     fn an_offline_machine_can_be_forgotten_and_comes_back_when_it_connects() {
         use agora_protocol::{v1::AgentExited, ErrorCode};
@@ -2875,8 +2906,13 @@ mod tests {
         // A client that resumes from after the return replays as usual.
         let after = hub.subscribe(Some(pos)).unwrap();
         assert!(after.snapshot.is_none());
-        // The hub restarting keeps the rule: the rebuilt view knows where the machine came back.
-        assert_eq!(View::rebuild(hub.store()).unwrap().0.remembered_at, pos);
+        // The hub restarting keeps the rule: the rebuilt view knows where the machine came back (its `NodeLink { up }`, before the
+        // link's published capabilities, ADR-0132).
+        assert!(view.remembered_at > at && view.remembered_at <= pos);
+        assert_eq!(
+            View::rebuild(hub.store()).unwrap().0.remembered_at,
+            view.remembered_at
+        );
     }
 
     #[test]
@@ -5276,9 +5312,10 @@ mod tests {
         let (hub, path) = hub_on_file("presence-end-partial");
         let (reg, _cmds, generation) = hub.node_link_opened("n1", Vec::new(), 1).unwrap();
         let other = rusqlite::Connection::open(&path).unwrap();
-        // The log holds the opening; `NodeOffline` is the second event and goes in, `NodeLink` would be the third.
+        // The log holds the opening (its `NodeLink` and its published capabilities, ADR-0132); `NodeOffline` is the third event and goes
+        // in, `NodeLink` would be the fourth.
         other
-            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= 2 BEGIN SELECT RAISE(ABORT, 'full'); END;")
+            .execute_batch("CREATE TRIGGER no_events BEFORE INSERT ON events WHEN (SELECT COUNT(*) FROM events) >= 3 BEGIN SELECT RAISE(ABORT, 'full'); END;")
             .unwrap();
         assert!(hub.node_link_closed(reg, generation, false, 5, 6));
         assert!(!hub.view().0.nodes["n1"].online);

@@ -312,6 +312,7 @@ impl Scope {
             Body::NodeOnline(e) => self.node_visible(&e.node_id),
             Body::NodeOffline(e) => self.node_visible(&e.node_id),
             Body::NodeLink(e) => self.node_visible(&e.node_id),
+            Body::NodeCapabilitiesChanged(e) => self.node_visible(&e.node_id),
             Body::NodeForgotten(e) => self.node_visible(&e.node_id),
             Body::NodeResources(e) => self.node_visible(&e.node_id),
             // ADR-0091 (privacy): a plan limit is the whole machine's use, not a project's. A member of one shared project must not see

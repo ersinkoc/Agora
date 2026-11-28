@@ -46,7 +46,7 @@ import { agentTarget } from './components/sessionChoice';
 import { ChatActionsContext, type ChatActions, type PromptResult } from './components/chatActions';
 import { CloseAgentContext } from './components/CloseAgent';
 import { closeAsk } from './net/closeAgent';
-import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, useGiveAsk, useGiveSupport } from './net/give';
+import { canStartFor, forgetGiveSupport, forgetOffline, givableTasks, giveAsk, giveTask, noteCapabilities, useGiveAsk, useGiveSupport } from './net/give';
 import { GiveContext, GiveDialog, type GiveApi } from './components/GiveTask';
 import { plain } from './components/boardColumns';
 import { failure, type ActionResult } from './net/refusal';
@@ -570,6 +570,8 @@ export function App() {
   // What was heard of machines that do not take tasks belongs to one connection, and to a machine until it goes offline (an update restarts it).
   useEffect(() => { if (link === 'live') forgetGiveSupport(); }, [link]);
   useEffect(() => { if (giveApi?.online) forgetOffline(giveApi.online); }, [giveApi?.online]);
+  // ADR-0132: what the hub publishes of each machine's link decides before any answer does.
+  useEffect(() => { if (live) noteCapabilities(machines(live)); }, [live]);
   const giveSupport = useGiveSupport(); // machines heard not to take tasks drop out of the palette too
   const current = hash.startsWith('#/agent/') ? decodeHash(hash.slice('#/agent/'.length)) : undefined;
   const approvalsNow = live ? approvalList(live) : hub ? [] : demoApprovals;

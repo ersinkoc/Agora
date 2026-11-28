@@ -79,6 +79,8 @@ message Event {
     TaskReviewChanged task_review_changed = 94;
     TaskReviewEnabled task_review_enabled = 95;
     TaskParentLinked task_parent_linked = 96; // ADR-0126, hub only.
+    // ADR-0132, hub only: what the node's current link negotiated, of the capabilities the hub publishes.
+    NodeCapabilitiesChanged node_capabilities_changed = 97;
     // ADR-0095, capability `task.dispatch`: a person gave a task to an agent (the audit record of `TaskDispatch`).
     TaskDispatched task_dispatched = 68;
     // ADR-0057: the node refused an agent's `agent_start` before any approval was asked (limits, folder, kind).
@@ -159,6 +161,21 @@ message NodeResources {
   repeated DiskUsage disks = 9;
   // The size of the workspaces the node made (ADR-0064).
   uint64 workspaces_bytes = 10;
+}
+
+// ADR-0132: the capabilities a node's link negotiated, of the few the hub publishes to windows (an allow-list: `task.dispatch` first),
+// sorted, at most 16.
+message NodeCapabilities {
+  repeated string names = 1;
+}
+
+// ADR-0132, hub only: the published capabilities of the node's link `generation` (the `NodeLink` generation). Written right after
+// that link's `NodeLink { up }`. A view keeps it only while that link is the node's current one; the link's end, or a newer link,
+// makes it unknown again.
+message NodeCapabilitiesChanged {
+  string node_id = 1;
+  uint64 generation = 2;
+  NodeCapabilities capabilities = 3;
 }
 
 // ADR-0136: one file system of a machine.

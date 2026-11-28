@@ -37,6 +37,8 @@ message NodeSnapshot {
   repeated DiskUsage disks = 16;
   uint64 workspaces_bytes = 17;
   uint64 resources_at_ms = 18;
+  // ADR-0132: the published capabilities of the node's current link; absent: not known (offline, an older hub, not negotiated yet).
+  NodeCapabilities capabilities = 19;
 }
 
 message CheckoutSnapshot {

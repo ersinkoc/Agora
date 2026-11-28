@@ -1,0 +1,1 @@
+- The window no longer offers "Give to an agent" for a machine whose Agora cannot take tasks; it knows from the hub before you try (ADR-0132).

@@ -51,3 +51,16 @@ Use older and newer hubs, nodes and windows. Exercise known empty, unknown, onli
 disconnect from an old connection, hub restart, hidden node and reconnect from a saved position.
 Check snapshot and live convergence, frame limits at fleet size, and normal authorization refusal
 when the advertised protocol capability is present. Append protocol fixtures.
+
+## Status of the build
+
+Built (2026-11-28) for `task.dispatch`. Schema: `NodeCapabilities`, `NodeCapabilitiesChanged` (event arm 97, hub only), `NodeSnapshot.capabilities`
+(19), fixtures and `crates/agora-protocol/tests/node_capabilities.rs`. Hub: `Hub::node_link_opened` records the published part of what
+the link negotiated right after its `NodeLink { up }` (a store failure leaves it unknown); the projection keeps it as
+`(generation, names)` and shows it only for the current, online link (`projection.rs` `PUBLISHED_CAPABILITIES`,
+`published_capabilities`); a newer link or the link's end clears it, and a hub that starts records every stale link closed, so a
+past link's word is never shown. Window: the view keeps it per machine for the current link; `give.ts` `noteCapabilities` takes a
+machine known not to speak `task.dispatch` out of "Give to an agent" and "Start a new agent for this task", with the existing words
+for an unsupported machine; a machine not known is offered as before and the window still learns from a refusal. Tests:
+`a_nodes_published_capabilities_are_its_current_links_only`, `an_opened_link_publishes_what_it_negotiated_of_the_published_list`,
+`apps/web/src/net/nodeCapabilities.test.ts`.

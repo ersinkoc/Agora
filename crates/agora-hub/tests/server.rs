@@ -228,7 +228,10 @@ async fn a_node_streams_events_gets_acks_and_goes_offline_when_it_leaves() {
     }
     assert_eq!(next_ack(&mut c).await, 2);
     let (view, pos) = st.hub.view();
-    assert_eq!(pos, 3, "the hub's NodeLink and the node's two events");
+    assert_eq!(
+        pos, 4,
+        "the hub's NodeLink and published capabilities (ADR-0132), and the node's two events"
+    );
     assert!(view.nodes["laptop"].online);
     assert!(view.agents.contains_key("laptop/agent-1"));
     c.close().await;
@@ -441,8 +444,8 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         (STREAM_EVENTS, kinds::SNAPSHOT)
     );
     let snap = v1::Snapshot::decode(snap.payload.as_slice()).unwrap();
-    // The hub's `NodeLink { up }` (ADR-0070) is position 1, the node's `NodeOnline` 2.
-    assert_eq!((snap.pos, snap.nodes.len()), (2, 1));
+    // The hub's `NodeLink { up }` (ADR-0070) is position 1, its published capabilities (ADR-0132) 2, the node's `NodeOnline` 3.
+    assert_eq!((snap.pos, snap.nodes.len()), (3, 1));
     assert_eq!(snap.nodes[0].node_id, "n1");
 
     node.send(&f(
@@ -458,13 +461,13 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         v1::PositionedEvent::decode(live.payload.as_slice())
             .unwrap()
             .pos,
-        3
+        4
     );
 
     let mut c2 = dial(addr, Some("good-token")).await;
     subscribe(
         &mut c2,
-        v1::Subscribe { after_pos: Some(2) }.encode_to_vec(),
+        v1::Subscribe { after_pos: Some(3) }.encode_to_vec(),
     )
     .await;
     let fr = recv(&mut c2).await;
@@ -473,7 +476,7 @@ async fn a_client_needs_a_token_then_gets_a_snapshot_and_live_events_and_can_res
         v1::PositionedEvent::decode(fr.payload.as_slice())
             .unwrap()
             .pos,
-        3
+        4
     );
 }
 

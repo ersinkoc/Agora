@@ -15,8 +15,9 @@ export interface GiveTask { key: string; projectId: string; taskId: string; proj
  *  machine asked for the owner's permission first; it settles with the answer to the command that is sent again once it is allowed. */
 export type GiveResult = { ok: true; queued: boolean } | { ok: false; key: string; args?: Record<string, string>; grant?: Promise<GiveResult> };
 
-// The window cannot read a machine's capabilities (the snapshot carries none, and a window does not negotiate them with the hub), so it
-// offers the action and learns from the answer. A machine that does not take tasks answers in one of two ways: `protocol.capability_missing`
+// ADR-0132: a hub that publishes them says which machines' current links speak `task.dispatch` (`noteCapabilities`); a machine known
+// not to is not offered, and one not known (an older hub, a link that just opened) is offered as before, the window learning from the
+// answer. A machine that does not take tasks answers in one of two ways: `protocol.capability_missing`
 // for `task.dispatch` (the hub, for a node that does not offer it), or `protocol.invalid_message` for the field `command` (a node too old to
 // decode the command; a hub too old to know it answers the same, and the window cannot tell the two apart). Either way only that machine is
 // no longer offered. What was heard of a machine is forgotten when it goes offline (an update restarts it) and on every new connection.
@@ -34,10 +35,20 @@ export function noteRefusal(node: string, code: string, params: Record<string, s
     changed();
   }
 }
+// ADR-0132: machines whose current link is known not to speak `task.dispatch`, from the hub's published capabilities.
+let knownLacking = new Set<string>();
+/** Takes what the hub publishes of each machine's link: a machine with a known list without `task.dispatch` is known not to take tasks;
+ *  a machine without one (not known) is offered as before. */
+export function noteCapabilities(list: readonly { id: string; capabilities?: readonly string[] }[]): void {
+  const next = new Set(list.filter((m) => m.capabilities && !m.capabilities.includes('task.dispatch')).map((m) => m.id));
+  if (next.size === knownLacking.size && [...next].every((id) => knownLacking.has(id))) return;
+  knownLacking = next;
+  changed();
+}
 /** Whether the window still offers giving tasks to agents on this machine. */
-export const offersGive = (node: string): boolean => !lacking.has(node);
+export const offersGive = (node: string): boolean => !lacking.has(node) && !knownLacking.has(node);
 /** Forgets what was heard (a new connection or another hub starts again; tests). */
-export function forgetGiveSupport(): void { if (lacking.size > 0) { lacking.clear(); changed(); } }
+export function forgetGiveSupport(): void { if (lacking.size > 0 || knownLacking.size > 0) { lacking.clear(); knownLacking = new Set(); changed(); } }
 /** Forgets what was heard of machines that are not connected now: one that comes back may have been updated. */
 export function forgetOffline(online: ReadonlySet<string>): void {
   let any = false;

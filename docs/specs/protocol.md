@@ -194,6 +194,15 @@ memory, in order, and written before any later hub fact (so a node that dials ag
 connection is refused while the end still cannot be written) and by a retry that waits 100 ms, doubling up to 5 s, until the store works (#996); the
 machine is shown offline from that write on. The snapshot's `NodeSnapshot.last_event_ms` includes `last_heard_ms`, so it is "last seen".
 
+Published capabilities (ADR-0132): right after a link's `NodeLink { up }` the hub records `NodeCapabilitiesChanged { node_id, generation,
+capabilities }` (event arm 97, producer `hub` only; a node that sends one is refused, field `node_capabilities_changed`): the
+capabilities that link negotiated, of the hub's published list (`task.dispatch` for now), sorted, at most 16. A reader keeps it only
+while that generation is the node's current link and the node is online; a newer `NodeLink { up }` or the current link's end makes it
+unknown again, and a word about an older generation changes nothing. `NodeSnapshot.capabilities` (19) carries the current link's list:
+present and empty means the link negotiated none of the published ones; absent means not known (offline, an older hub, or the word
+not stored yet). It follows the snapshot's node visibility. A capability known present only means the hub can route that feature to
+the node; the hub and the node still check every grant, policy and runtime condition.
+
 Schema additions (ADR-0025/0026/0027, all new messages, nothing published changed): `agent.list` (`AgentList` -> `AgentListResult` of
 `AgentSummary`; implemented on the node and as `agora agent list`), `EventAck` (hub -> producer, cumulative), `client.proto`
 (`Subscribe`, `Snapshot` with `*Snapshot` tables mirroring the hub view, `PositionedEvent`; named `*Snapshot` because

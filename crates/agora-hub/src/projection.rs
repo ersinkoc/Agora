@@ -43,6 +43,25 @@ pub struct NodeView {
     pub forgotten: bool,
     /// ADR-0136: the machine's latest CPU, memory and disks, and when they were recorded; kept until a report carries new ones.
     pub machine: MachineView,
+    /// ADR-0132: the published capabilities of the link `generation` (`(generation, names)`); `None`: not known. Shown only while that
+    /// link is the node's current one.
+    pub capabilities: Option<(u64, Vec<String>)>,
+}
+
+/// ADR-0132: the capabilities the hub publishes to windows, of those a node's link negotiated. A capability is added here when a client
+/// uses it.
+pub const PUBLISHED_CAPABILITIES: &[&str] = &["task.dispatch"];
+
+/// The published subset of `names`: allow-listed, sorted, once each.
+pub fn published_capabilities(names: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = names
+        .iter()
+        .filter(|n| PUBLISHED_CAPABILITIES.contains(&n.as_str()))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// ADR-0136: a machine's figures as its latest `NodeResources` that carried them said (zero: not reported).
@@ -75,6 +94,7 @@ impl NodeView {
             link_generation: 0,
             forgotten: false,
             machine: MachineView::default(),
+            capabilities: None,
         }
     }
 }
@@ -521,6 +541,7 @@ pub(crate) fn named_node(body: &Body) -> Result<Option<&str>, &'static str> {
         // ADR-0070, ADR-0073, ADR-0053: presence, forgetting a machine and forgetting an agent (named by its hub-wide key, which
         // holds its node) are the hub's own facts.
         Body::NodeLink(_) => return Err("node_link"),
+        Body::NodeCapabilitiesChanged(_) => return Err("node_capabilities_changed"),
         Body::TaskHandoffDeliveryChanged(_) => return Err("task_handoff_delivery_changed"),
         Body::TaskReviewChanged(_) => return Err("task_review_changed"),
         Body::TaskReviewEnabled(_) => return Err("task_review_enabled"),
@@ -969,12 +990,26 @@ impl View {
                     if e.up {
                         n.link_generation = e.generation;
                     }
+                    // ADR-0132: a new link knows nothing yet, and the current link's end leaves nothing known.
+                    n.capabilities = None;
                 }
                 if e.up && !stale {
                     self.remember_node(&e.node_id);
                 }
             }
             Body::NodeLink(_) => {}
+            // ADR-0132: the published capabilities of the node's current link only (an older link's word changes nothing).
+            Body::NodeCapabilitiesChanged(e) if producer == RESERVED_HUB_ID => {
+                if let Some(n) = self.nodes.get_mut(&e.node_id) {
+                    if n.online && e.generation == n.link_generation {
+                        n.capabilities = e
+                            .capabilities
+                            .as_ref()
+                            .map(|c| (e.generation, published_capabilities(&c.names)));
+                    }
+                }
+            }
+            Body::NodeCapabilitiesChanged(_) => {}
             // ADR-0073: written by the hub only, for a machine that is offline.
             Body::NodeForgotten(e) if producer == RESERVED_HUB_ID => {
                 if let Some(n) = self.nodes.get_mut(&e.node_id) {
@@ -1605,6 +1640,7 @@ mod tests {
             NodeView {
                 forgotten: true,
                 machine: Default::default(),
+                capabilities: None,
                 ..NodeView::unknown(false)
             },
         );
@@ -2143,6 +2179,70 @@ mod tests {
             (b.kind.as_str(), b.project_id.as_str()),
             ("claude-code", "p")
         );
+    }
+
+    /// ADR-0132: the published capabilities of a node's current link only: written after its `NodeLink { up }`, filtered to the
+    /// published list, unknown again when that link ends or a newer one opens, and never from an older link's word.
+    #[test]
+    fn a_nodes_published_capabilities_are_its_current_links_only() {
+        use agora_protocol::v1::{NodeCapabilities, NodeCapabilitiesChanged};
+        let caps = |generation: u64, names: &[&str]| {
+            Body::NodeCapabilitiesChanged(NodeCapabilitiesChanged {
+                node_id: "n1".into(),
+                generation,
+                capabilities: Some(NodeCapabilities {
+                    names: names.iter().map(|n| n.to_string()).collect(),
+                }),
+            })
+        };
+        let shown = |v: &View| {
+            crate::server::snapshot_of(v, 0)
+                .nodes
+                .iter()
+                .find(|n| n.node_id == "n1")
+                .and_then(|n| n.capabilities.clone())
+                .map(|c| c.names)
+        };
+        let mut v = View::default();
+        v.apply(&ev(
+            RESERVED_HUB_ID,
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        assert_eq!(shown(&v), None, "not known before the word");
+        v.apply(&ev(
+            RESERVED_HUB_ID,
+            2,
+            caps(1, &["x.unpublished", "task.dispatch", "task.dispatch"]),
+        ));
+        assert_eq!(shown(&v), Some(vec!["task.dispatch".to_string()]));
+        // A node cannot say it for itself.
+        let mut forged = View::default();
+        forged.apply(&ev(
+            RESERVED_HUB_ID,
+            1,
+            link("n1", true, NodeLinkReason::Opened, 1, 1),
+        ));
+        forged.apply(&ev("n1", 2, caps(1, &["task.dispatch"])));
+        assert_eq!(shown(&forged), None);
+        // A newer link knows nothing until its own word; the older link's word is not taken.
+        v.apply(&ev(
+            RESERVED_HUB_ID,
+            3,
+            link("n1", true, NodeLinkReason::Opened, 2, 3),
+        ));
+        assert_eq!(shown(&v), None);
+        v.apply(&ev(RESERVED_HUB_ID, 4, caps(1, &["task.dispatch"])));
+        assert_eq!(shown(&v), None, "an older link's word");
+        v.apply(&ev(RESERVED_HUB_ID, 5, caps(2, &[])));
+        assert_eq!(shown(&v), Some(Vec::new()), "known and empty");
+        // The link ends: unknown.
+        v.apply(&ev(
+            RESERVED_HUB_ID,
+            6,
+            link("n1", false, NodeLinkReason::Closed, 2, 6),
+        ));
+        assert_eq!(shown(&v), None);
     }
 
     fn link(node: &str, up: bool, reason: NodeLinkReason, generation: u64, heard: u64) -> Body {

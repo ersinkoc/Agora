@@ -2045,6 +2045,7 @@ mod tests {
                     link_generation: 0,
                     forgotten: false,
                     machine: Default::default(),
+                    capabilities: None,
                 },
             );
             v.checkouts

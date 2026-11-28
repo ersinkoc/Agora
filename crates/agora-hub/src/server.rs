@@ -819,6 +819,14 @@ fn snapshot_for_client(view: &View, pos: u64, owner: bool) -> v1::Snapshot {
                 disks: n.machine.disks.clone(),
                 workspaces_bytes: n.machine.workspaces_bytes,
                 resources_at_ms: n.machine.at_ms,
+                // ADR-0132: only the current link's word, and only while the node is connected.
+                capabilities: n
+                    .capabilities
+                    .as_ref()
+                    .filter(|(generation, _)| n.online && *generation == n.link_generation)
+                    .map(|(_, names)| v1::NodeCapabilities {
+                        names: names.clone(),
+                    }),
             })
             .collect(),
         checkouts: view
